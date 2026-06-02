@@ -7,7 +7,7 @@ Requisitos: gcloud auth application-default login
 
 from google.cloud import bigquery
 
-PROJECT_ID = "project-d945be28-75a7-460a-998"
+PROJECT_ID = "abahana-agent"
 DATASET_ID = "abahana"
 TABLE_ID = "villas"
 
@@ -118,10 +118,10 @@ villas = [
     },
 ]
 
-errors = client.insert_rows_json(table, villas)
-if errors:
-    print(f"Errores al insertar datos: {errors}")
-else:
+job = client.load_table_from_json(villas, table_ref)
+job.result()
+errors = []
+if True:
     print(f"5 villas insertadas correctamente en '{DATASET_ID}.{TABLE_ID}'.")
     print("\nVillas creadas:")
     for v in villas:

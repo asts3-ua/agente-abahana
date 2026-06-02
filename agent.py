@@ -7,7 +7,7 @@ from google.adk.agents import Agent
 from google.adk.integrations.bigquery import BigQueryToolset
 from google.adk.integrations.bigquery.config import BigQueryToolConfig
 
-PROJECT_ID = "project-d945be28-75a7-460a-998"
+PROJECT_ID = "abahanaweb"
 DATASET_ID = "abahana"
 
 INSTRUCTION = """Eres el asistente virtual de Abahana Villas, empresa especializada en
