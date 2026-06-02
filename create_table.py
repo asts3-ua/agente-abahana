@@ -7,7 +7,7 @@ Requisitos: gcloud auth application-default login
 
 from google.cloud import bigquery
 
-PROJECT_ID = "abahana-agent"
+PROJECT_ID = "abahanaweb"
 DATASET_ID = "abahana"
 TABLE_ID = "villas"
 
