@@ -1,6 +1,11 @@
 """
 Agente de Abahana Villas — responde preguntas sobre villas y reservas
 usando Google ADK + BigQuery (capa silver_clean).
+
+Roles disponibles:
+  cliente  — catálogo público, búsqueda y valoraciones
+  interno  — todo lo anterior + amenidades extendidas y ficha completa
+  admin    — igual que interno, preparado para herramientas sensibles futuras
 """
 
 import logging
@@ -20,6 +25,10 @@ TABLA_BOOKINGS = f"`{PROJECT_ID}.{DATASET}.int_etendo_bookings`"
 _bq = bigquery.Client(project=PROJECT_ID)
 _BILLING_CAP = 10 * 1024 * 1024  # 10 MB por consulta
 
+
+# ---------------------------------------------------------------------------
+# Herramientas
+# ---------------------------------------------------------------------------
 
 def listar_propiedades() -> dict[str, Any]:
     """Devuelve todas las propiedades disponibles con sus características.
@@ -46,23 +55,34 @@ def buscar_propiedades(
     capacidad_min: int | None = None,
     camas_min: int | None = None,
     banos_min: int | None = None,
+    metros_habitables_min: int | None = None,
     piscina: bool | None = None,
     internet: bool | None = None,
+    aire_acondicionado: bool | None = None,
+    lavadora: bool | None = None,
+    lavavajillas: bool | None = None,
+    admite_animales: bool | None = None,
     texto: str | None = None,
 ) -> dict[str, Any]:
-    """Busca propiedades por ubicación, capacidad y amenidades básicas.
+    """Busca propiedades aplicando cualquier combinación de filtros.
 
-    Usa esta función para filtros comunes. Para aire acondicionado, lavadora,
-    lavavajillas o mascotas usa buscar_propiedades_amenidades.
+    Usa esta función para todos los criterios de búsqueda: ubicación,
+    capacidad, camas, baños, metros, y cualquier amenidad (piscina,
+    internet, aire acondicionado, lavadora, lavavajillas, mascotas).
 
     Args:
         ubicacion: Pueblo cercano (Altea, Calpe, Moraira, Benidorm, Dénia…).
         zona: Nombre de zona geográfica (Costa Blanca Norte, Sur…).
-        capacidad_min: Número mínimo de personas que debe admitir la villa.
+        capacidad_min: Número mínimo de personas que debe admitir.
         camas_min: Número mínimo de camas.
         banos_min: Número mínimo de baños.
+        metros_habitables_min: Metros habitables mínimos.
         piscina: True para exigir piscina privada.
         internet: True para exigir internet.
+        aire_acondicionado: True para exigir aire acondicionado en salón.
+        lavadora: True para exigir lavadora.
+        lavavajillas: True para exigir lavavajillas.
+        admite_animales: True para propiedades que admiten mascotas.
         texto: Busca en nombre y tipo de villa.
 
     Returns:
@@ -91,76 +111,9 @@ def buscar_propiedades(
         conditions.append("total_banos >= @banos_min")
         params.append(bigquery.ScalarQueryParameter("banos_min", "INT64", banos_min))
 
-    if piscina is not None:
-        conditions.append(f"tiene_piscina_privada = {'TRUE' if piscina else 'FALSE'}")
-
-    if internet is not None:
-        conditions.append(f"tiene_internet = {'TRUE' if internet else 'FALSE'}")
-
-    if texto:
-        conditions.append(
-            "(LOWER(nombre) LIKE LOWER(@texto) OR LOWER(tipo_villa_descripcion) LIKE LOWER(@texto))"
-        )
-        params.append(bigquery.ScalarQueryParameter("texto", "STRING", f"%{texto.strip()}%"))
-
-    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-    query = f"SELECT * FROM {TABLA_PROPIEDADES} {where} ORDER BY nombre LIMIT 20"
-
-    try:
-        rows = list(_bq.query(
-            query,
-            job_config=bigquery.QueryJobConfig(
-                query_parameters=params,
-                maximum_bytes_billed=_BILLING_CAP,
-            ),
-        ).result())
-    except Exception as e:
-        log.exception("buscar_propiedades: error en BigQuery")
-        return {"matches": [], "count": 0, "error": str(e)}
-
-    matches = [dict(r.items()) for r in rows]
-    return {"matches": matches, "count": len(matches)}
-
-
-def buscar_propiedades_amenidades(
-    ubicacion: str | None = None,
-    capacidad_min: int | None = None,
-    piscina: bool | None = None,
-    internet: bool | None = None,
-    aire_acondicionado: bool | None = None,
-    lavadora: bool | None = None,
-    lavavajillas: bool | None = None,
-    admite_animales: bool | None = None,
-) -> dict[str, Any]:
-    """Busca propiedades filtrando por amenidades extendidas.
-
-    Usa esta función cuando el usuario mencione aire acondicionado, lavadora,
-    lavavajillas o mascotas/animales. También sirve para combinar con ubicación
-    y capacidad.
-
-    Args:
-        ubicacion: Pueblo cercano (Altea, Calpe, Moraira…).
-        capacidad_min: Número mínimo de personas.
-        piscina: True para exigir piscina privada.
-        internet: True para exigir internet.
-        aire_acondicionado: True para exigir aire acondicionado en salón.
-        lavadora: True para exigir lavadora.
-        lavavajillas: True para exigir lavavajillas.
-        admite_animales: True para propiedades que admiten mascotas.
-
-    Returns:
-        Diccionario con 'matches' (lista de propiedades únicas, máx. 20) y 'count'.
-    """
-    conditions: list[str] = []
-    params: list[bigquery.ScalarQueryParameter] = []
-
-    if ubicacion:
-        conditions.append("LOWER(pueblo_cercano) LIKE LOWER(@ubicacion)")
-        params.append(bigquery.ScalarQueryParameter("ubicacion", "STRING", f"%{ubicacion.strip()}%"))
-
-    if capacidad_min is not None:
-        conditions.append("capacidad_pax >= @capacidad_min")
-        params.append(bigquery.ScalarQueryParameter("capacidad_min", "INT64", capacidad_min))
+    if metros_habitables_min is not None:
+        conditions.append("metros_habitables >= @metros_habitables_min")
+        params.append(bigquery.ScalarQueryParameter("metros_habitables_min", "FLOAT64", float(metros_habitables_min)))
 
     if piscina is not None:
         conditions.append(f"tiene_piscina_privada = {'TRUE' if piscina else 'FALSE'}")
@@ -180,18 +133,20 @@ def buscar_propiedades_amenidades(
     if admite_animales is not None:
         conditions.append(f"admite_animales = {'TRUE' if admite_animales else 'FALSE'}")
 
+    if texto:
+        conditions.append(
+            "(LOWER(propiedad_nombre) LIKE LOWER(@texto) OR LOWER(tipo_villa_descripcion) LIKE LOWER(@texto))"
+        )
+        params.append(bigquery.ScalarQueryParameter("texto", "STRING", f"%{texto.strip()}%"))
+
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     query = f"""
         SELECT DISTINCT
-            propiedad_nombre, licencia_turismo, tipo_villa_descripcion,
-            anyo_construccion, metros_parcela, metros_habitables,
-            capacidad_pax, total_camas, camas_dobles, camas_individuales,
-            total_banos, tiene_internet, tiene_aire_salon, tiene_lavadora,
-            tiene_lavavajillas, tiene_piscina_privada, admite_animales,
-            pueblo_cercano, zona_nombre, region_nombre, direccion_completa,
-            latitud, longitud,
-            score_rating_banos, score_rating_cocina,
-            score_rating_interior, score_rating_exterior
+            propiedad_nombre, tipo_villa_descripcion,
+            capacidad_pax, total_camas, total_banos, metros_habitables,
+            tiene_piscina_privada, tiene_internet, tiene_aire_salon,
+            tiene_lavadora, tiene_lavavajillas, admite_animales,
+            pueblo_cercano, zona_nombre, region_nombre
         FROM {TABLA_BOOKINGS}
         {where}
         ORDER BY propiedad_nombre
@@ -207,7 +162,7 @@ def buscar_propiedades_amenidades(
             ),
         ).result())
     except Exception as e:
-        log.exception("buscar_propiedades_amenidades: error en BigQuery")
+        log.exception("buscar_propiedades: error en BigQuery")
         return {"matches": [], "count": 0, "error": str(e)}
 
     matches = [dict(r.items()) for r in rows]
@@ -301,6 +256,7 @@ def obtener_detalle_propiedad(nombre: str) -> dict[str, Any]:
 
     Usa cuando el usuario pregunte por una villa concreta por su nombre,
     quiera más información sobre una propiedad, o pida ver todos los detalles.
+    Incluye dirección completa, coordenadas, métricas de habitaciones y ratings.
 
     Args:
         nombre: Nombre o parte del nombre de la propiedad.
@@ -342,21 +298,15 @@ def obtener_detalle_propiedad(nombre: str) -> dict[str, Any]:
     return {"matches": matches, "count": len(matches)}
 
 
-INSTRUCTION = """
+# ---------------------------------------------------------------------------
+# Instrucciones por rol
+# ---------------------------------------------------------------------------
+
+_INSTRUCCION_BASE = """
 Eres el asistente virtual de Abahana Villas, empresa de alquiler de villas vacacionales
 en la Costa Blanca (España).
 
-## Herramientas disponibles
-- `listar_propiedades()`: catálogo completo sin filtros.
-- `buscar_propiedades(...)`: búsqueda por ubicación, capacidad, camas, baños, piscina, internet.
-- `buscar_propiedades_amenidades(...)`: cuando el usuario mencione aire acondicionado,
-  lavadora, lavavajillas o mascotas/animales.
-- `buscar_por_valoracion(...)`: cuando el usuario pida villas bien valoradas, con buena
-  puntuación, las mejor valoradas, o especifique un rating mínimo.
-- `obtener_detalle_propiedad(nombre)`: cuando el usuario pregunte por una villa concreta
-  o quiera ver todos los detalles de una propiedad específica.
-
-## Reglas
+## Reglas generales
 - Responde SIEMPRE en español.
 - Para ubicación usa pueblo_cercano (Altea, Calpe, Moraira…) o zona_nombre.
 - Muestra el rating_medio cuando uses buscar_por_valoracion.
@@ -366,17 +316,85 @@ en la Costa Blanca (España).
 - No tenemos información de precios por noche en el sistema actual.
 """.strip()
 
+INSTRUCTION_CLIENTE = f"""{_INSTRUCCION_BASE}
 
-root_agent = Agent(
-    name="abahana_villas_agent",
+## Herramientas disponibles
+- `listar_propiedades()`: catálogo completo sin filtros.
+- `buscar_propiedades(...)`: búsqueda con cualquier combinación de filtros (ubicación,
+  capacidad, camas, baños, metros, piscina, internet, aire acondicionado, lavadora,
+  lavavajillas, mascotas).
+- `buscar_por_valoracion(...)`: cuando el usuario pida villas bien valoradas o con
+  un rating mínimo.
+""".strip()
+
+INSTRUCTION_INTERNO = f"""{_INSTRUCCION_BASE}
+
+## Herramientas disponibles
+- `listar_propiedades()`: catálogo completo sin filtros.
+- `buscar_propiedades(...)`: búsqueda con cualquier combinación de filtros (ubicación,
+  capacidad, camas, baños, metros, piscina, internet, aire acondicionado, lavadora,
+  lavavajillas, mascotas).
+- `buscar_por_valoracion(...)`: cuando el usuario pida villas bien valoradas o con
+  un rating mínimo.
+- `obtener_detalle_propiedad(nombre)`: ficha completa con dirección, coordenadas,
+  desglose de camas, metros habitables y ratings por categoría. Úsala cuando el
+  usuario pregunte por una villa concreta o pida más detalles.
+
+## Contexto de uso interno
+Eres la versión para agentes de ventas y equipo interno. Puedes mostrar la dirección
+completa, coordenadas y todos los datos de la ficha de propiedad.
+""".strip()
+
+INSTRUCTION_ADMIN = f"""{_INSTRUCCION_BASE}
+
+## Herramientas disponibles
+- `listar_propiedades()`: catálogo completo sin filtros.
+- `buscar_propiedades(...)`: búsqueda con cualquier combinación de filtros (ubicación,
+  capacidad, camas, baños, metros, piscina, internet, aire acondicionado, lavadora,
+  lavavajillas, mascotas).
+- `buscar_por_valoracion(...)`: cuando el usuario pida villas bien valoradas o con
+  un rating mínimo.
+- `obtener_detalle_propiedad(nombre)`: ficha completa con dirección, coordenadas,
+  desglose de camas, metros habitables y ratings por categoría.
+
+## Contexto de uso
+Eres la versión de administración. Tienes acceso completo a todos los datos disponibles.
+""".strip()
+
+
+# ---------------------------------------------------------------------------
+# Agentes por rol
+# ---------------------------------------------------------------------------
+
+agent_cliente = Agent(
+    name="abahana_villas_agent_cliente",
     model="gemini-2.5-flash",
-    description="Agente de villas vacacionales Abahana en la Costa Blanca",
-    instruction=INSTRUCTION,
-    tools=[
-        listar_propiedades,
-        buscar_propiedades,
-        buscar_propiedades_amenidades,
-        buscar_por_valoracion,
-        obtener_detalle_propiedad,
-    ],
+    description="Asistente público de villas Abahana (rol: cliente)",
+    instruction=INSTRUCTION_CLIENTE,
+    tools=[listar_propiedades, buscar_propiedades, buscar_por_valoracion],
 )
+
+agent_interno = Agent(
+    name="abahana_villas_agent_interno",
+    model="gemini-2.5-flash",
+    description="Asistente interno de villas Abahana (rol: interno)",
+    instruction=INSTRUCTION_INTERNO,
+    tools=[listar_propiedades, buscar_propiedades, buscar_por_valoracion, obtener_detalle_propiedad],
+)
+
+agent_admin = Agent(
+    name="abahana_villas_agent_admin",
+    model="gemini-2.5-flash",
+    description="Asistente de administración de villas Abahana (rol: admin)",
+    instruction=INSTRUCTION_ADMIN,
+    tools=[listar_propiedades, buscar_propiedades, buscar_por_valoracion, obtener_detalle_propiedad],
+)
+
+AGENTS: dict[str, Agent] = {
+    "cliente": agent_cliente,
+    "interno": agent_interno,
+    "admin": agent_admin,
+}
+
+# Compatibilidad con `adk web` (espera root_agent en agente_villas/__init__.py)
+root_agent = agent_interno

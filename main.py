@@ -2,15 +2,20 @@
 CLI interactivo para el agente de Abahana Villas.
 
 Uso:
-    python main.py
+    python main.py                  # rol por defecto: cliente
+    python main.py --rol interno    # agente con ficha completa
+    python main.py --rol admin      # acceso de administración
 
 Requisitos previos:
     1. gcloud auth application-default login
-    2. python create_table.py  (solo la primera vez)
-    3. pip install -r requirements.txt
+    2. pip install -r requirements.txt
 """
 
+import argparse
 import asyncio
+import truststore
+truststore.inject_into_ssl()
+
 from dotenv import load_dotenv
 
 load_dotenv()  # carga .env antes de que ADK inicialice el cliente Gemini
@@ -19,21 +24,32 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
-from agent import root_agent
+from agent import AGENTS
 
 APP_NAME = "abahana_villas"
 USER_ID = "cliente_01"
 
+ROLES_VALIDOS = list(AGENTS.keys())
 
-async def run():
+ROL_LABEL = {
+    "cliente": "Cliente",
+    "interno": "Agente Interno",
+    "admin":   "Administración",
+}
+
+
+async def run(rol: str) -> None:
+    agente = AGENTS[rol]
+
     session_service = InMemorySessionService()
     session = await session_service.create_session(
         app_name=APP_NAME,
         user_id=USER_ID,
+        state={"rol": rol},
     )
 
     runner = Runner(
-        agent=root_agent,
+        agent=agente,
         app_name=APP_NAME,
         session_service=session_service,
     )
@@ -41,6 +57,7 @@ async def run():
     print("=" * 60)
     print("  Bienvenido al Asistente Virtual de Abahana Villas")
     print("  Costa Blanca — Villas de alquiler vacacional")
+    print(f"  Rol activo: {ROL_LABEL[rol]}")
     print("=" * 60)
     print("  Escribe 'salir' para terminar.\n")
 
@@ -75,4 +92,12 @@ async def run():
 
 
 if __name__ == "__main__":
-    asyncio.run(run())
+    parser = argparse.ArgumentParser(description="Agente de villas Abahana")
+    parser.add_argument(
+        "--rol",
+        choices=ROLES_VALIDOS,
+        default="cliente",
+        help=f"Rol del usuario. Opciones: {', '.join(ROLES_VALIDOS)} (por defecto: cliente)",
+    )
+    args = parser.parse_args()
+    asyncio.run(run(args.rol))
