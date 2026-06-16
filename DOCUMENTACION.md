@@ -5,25 +5,25 @@
 
 ## 1. ¿Qué es este proyecto?
 
-Un **asistente virtual inteligente** que responde preguntas en lenguaje natural sobre las villas de alquiler vacacional de Abahana Villas. El usuario escribe preguntas como si hablara con una persona, y el agente consulta la base de datos real y responde con información actualizada.
+Un **asistente virtual inteligente** que responde preguntas en lenguaje natural sobre las villas de alquiler vacacional de Abahana Villas. El usuario escribe preguntas como si hablara con una persona, y el agente consulta la base de datos real y la web corporativa y responde con información actualizada.
 
 ### Ejemplos de uso
 
 ```
 Usuario: "¿Qué villas tienen piscina en Calpe para 6 personas?"
 Agente:  "He encontrado 20 villas en Calpe con piscina para 6 o más personas:
-          - 1005 ALFALS | Calpe | 6 personas | Piscina: Sí
-          - 1017 CASAVERANO | Calpe | 10 personas | Piscina: Sí ..."
+          - 1005 ALFALS | Calpe | 6 personas | Piscina: Sí ..."
 
-Usuario: "Quiero una villa que admita perros con piscina"
-Agente:  "He encontrado 20 villas que admiten animales con piscina:
-          - 1017 CASAVERANO | Calpe | 10 personas | Animales: Sí ..."
+Usuario: "¿Dónde están las oficinas de Abahana?"
+Agente:  "Abahana Villas tiene dos oficinas de check-in:
+          Oficina de Calpe: Avda. Jaime I El Conquistador, nº31. +34 965 838 233
+          Oficina de Moraira: C.C. Moravit. Ctra. Moraira-Calpe, nº306. +34 965 595 615"
 
-Usuario: "Muéstrame todas las villas disponibles"
-Agente:  "Tenemos un total de 891 propiedades. Aquí tienes algunas: ..."
+Usuario: "¿Cuál es la política de privacidad?"
+Agente:  [Accede a la web en tiempo real y resume el contenido de esa página]
 ```
 
-**Estado actual: funcional con datos reales.** 891 propiedades del catálogo real de Abahana Villas desde la capa Silver de BigQuery.
+**Estado actual: funcional con datos reales.** 891 propiedades desde la capa Silver de BigQuery + acceso en tiempo real a la web corporativa.
 
 ---
 
@@ -39,7 +39,10 @@ Agente:  "Tenemos un total de 891 propiedades. Aquí tienes algunas: ..."
 ### Google ADK (Agent Development Kit) — El framework
 - **¿Qué es?** Kit de desarrollo de Google para crear agentes de IA.
 - **¿Qué hace?** Gestiona la conversación, envía las preguntas a Gemini, ejecuta las herramientas Python y devuelve la respuesta.
-- **Herramientas:** Tres funciones Python que hacen queries parametrizadas a BigQuery.
+
+### Playwright — Navegador headless para la web
+- **¿Qué es?** Biblioteca que controla un navegador Chromium real sin interfaz gráfica.
+- **¿Para qué?** La web de Abahana es una SPA (Single Page Application) que renderiza su contenido con JavaScript. `requests` normal solo ve el HTML vacío. Playwright ejecuta el JS y extrae el contenido real.
 
 ### Google Cloud Platform (GCP) — La infraestructura
 - **Proyecto:** `abahanaweb`
@@ -54,7 +57,7 @@ Agente:  "Tenemos un total de 891 propiedades. Aquí tienes algunas: ..."
 ```
 ┌─────────────────────────────────────────────────────┐
 │                    USUARIO                          │
-│      "Quiero villa con piscina en Calpe"            │
+│      "¿Dónde están las oficinas?"                   │
 └──────────────────────┬──────────────────────────────┘
                        │
                        ▼
@@ -62,7 +65,8 @@ Agente:  "Tenemos un total de 891 propiedades. Aquí tienes algunas: ..."
 │              GOOGLE ADK (Framework)                 │
 │                                                     │
 │  ┌───────────────────────────────────────────────┐  │
-│  │           AGENTE (agent.py)                   │  │
+│  │      AGENTE (agent.py) — 3 roles              │  │
+│  │  cliente / interno / admin                    │  │
 │  │                                               │  │
 │  │  Gemini 2.5 Flash decide qué herramienta      │  │
 │  │  llamar según la pregunta del usuario         │  │
@@ -70,87 +74,109 @@ Agente:  "Tenemos un total de 891 propiedades. Aquí tienes algunas: ..."
 │                                                     │
 │  ┌──────────────────────────────────────────────┐   │
 │  │            Herramientas Python               │   │
-│  │  listar_propiedades()                        │   │
-│  │  buscar_propiedades()                        │   │
-│  │  buscar_propiedades_amenidades()             │   │
+│  │  listar_propiedades()         → BigQuery     │   │
+│  │  buscar_propiedades()         → BigQuery     │   │
+│  │  buscar_por_valoracion()      → BigQuery     │   │
+│  │  obtener_detalle_propiedad()  → BigQuery     │   │
+│  │  consultar_web()              → Web real     │   │
 │  └──────────────────────────────────────────────┘   │
-└──────────────────────────┬──────────────────────────┘
-                           │
-                           ▼
-┌──────────────────────────────────────────────────────┐
-│         GOOGLE BIGQUERY — capa silver_clean          │
-│                                                      │
-│  dim_propiedades (891 filas)                         │
-│  ├── propiedad_id, nombre, licencia_turismo          │
-│  ├── capacidad_pax, total_camas, total_banos         │
-│  ├── tiene_piscina_privada, tiene_internet           │
-│  ├── pueblo_cercano, zona_nombre, region_nombre      │
-│  └── latitud, longitud, fecha_creacion_sistema       │
-│                                                      │
-│  int_etendo_bookings (891 filas)                     │
-│  ├── booking_id, cliente_id, cliente_nombre          │
-│  ├── propiedad_nombre + todos los campos de dim      │
-│  ├── tiene_aire_salon, tiene_lavadora                │
-│  ├── tiene_lavavajillas, admite_animales             │
-│  └── score_rating_banos/cocina/interior/exterior     │
-└──────────────────────────────────────────────────────┘
+└────────────┬─────────────────────────┬──────────────┘
+             │                         │
+             ▼                         ▼
+┌─────────────────────┐   ┌────────────────────────────┐
+│   GOOGLE BIGQUERY   │   │  WEB CORPORATIVA           │
+│   silver_clean      │   │  abahanavillas.com         │
+│                     │   │                            │
+│  dim_propiedades    │   │  Playwright (Chromium)     │
+│  int_etendo_bookings│   │  renderiza JS → extrae     │
+│                     │   │  texto limpio              │
+└─────────────────────┘   └────────────────────────────┘
 ```
 
-### Flujo de una consulta
+### Flujo de una consulta de villa
 
 1. **Usuario** escribe: "Villa con lavadora y aire acondicionado en Altea"
 2. **ADK** envía la pregunta a **Gemini 2.5 Flash**
-3. **Gemini** decide llamar a `buscar_propiedades_amenidades(ubicacion="Altea", lavadora=True, aire_acondicionado=True)`
+3. **Gemini** decide llamar a `buscar_propiedades(ubicacion="Altea", lavadora=True, aire_acondicionado=True)`
 4. La **función Python** ejecuta SQL parametrizado contra `int_etendo_bookings`
 5. **Gemini** recibe los resultados y responde en lenguaje natural
-6. **Usuario** recibe la lista de villas o un mensaje indicando que no hay resultados
+
+### Flujo de una consulta de la web
+
+1. **Usuario** escribe: "¿Dónde están las oficinas?"
+2. **ADK** envía la pregunta a **Gemini 2.5 Flash**
+3. **Gemini** decide llamar a `consultar_web("https://www.abahanavillas.com/es/contacto/")`
+4. **Playwright** lanza Chromium, carga la página, espera a que renderice el JS, extrae el HTML
+5. **BeautifulSoup** limpia el HTML (quita nav, footer, scripts, imágenes, formularios, etc.)
+6. **Gemini** recibe el texto limpio y responde en lenguaje natural
 
 ---
 
-## 4. Estructura del código
+## 4. Sistema de roles
+
+El agente tiene tres variantes según el tipo de usuario. Cada una tiene acceso a distintas herramientas:
+
+| Herramienta | cliente | interno | admin |
+|---|:---:|:---:|:---:|
+| `listar_propiedades` | ✓ | ✓ | ✓ |
+| `buscar_propiedades` | ✓ | ✓ | ✓ |
+| `buscar_por_valoracion` | ✓ | ✓ | ✓ |
+| `consultar_web` | ✓ | ✓ | ✓ |
+| `obtener_detalle_propiedad` | ✗ | ✓ | ✓ |
+
+- **cliente** — acceso público: catálogo, búsqueda, valoraciones, web corporativa.
+- **interno** — agentes de ventas: incluye ficha completa con dirección, coordenadas y ratings desglosados.
+- **admin** — administración: igual que interno, preparado para herramientas sensibles futuras.
+
+```powershell
+python main.py --rol cliente   # por defecto
+python main.py --rol interno
+python main.py --rol admin
+```
+
+---
+
+## 5. Estructura del código
 
 ```
 agente_abahana/
 ├── .env                 ← Configuración (proyecto GCloud, región, Vertex AI)
 ├── requirements.txt     ← Dependencias Python
-├── agent.py             ← Agente, herramientas y conexión a BigQuery
+├── agent.py             ← Agente, herramientas, BigQuery y scraping web
 ├── main.py              ← Interfaz de línea de comandos (CLI interactivo)
 └── agente_villas/
     └── __init__.py      ← Re-exporta root_agent para compatibilidad con ADK web
 ```
 
-### agent.py — El corazón del sistema
+---
 
-#### `listar_propiedades()`
+## 6. Herramientas del agente
+
+### `listar_propiedades()`
 Devuelve todas las propiedades del catálogo ordenadas por nombre. Fuente: `dim_propiedades`.
 
-#### `buscar_propiedades(...)`
-Búsqueda filtrada contra `dim_propiedades`. Parámetros disponibles:
+### `buscar_propiedades(...)`
+Búsqueda filtrada con cualquier combinación de filtros. Fuente: `int_etendo_bookings`.
 
 | Parámetro | Tipo | Descripción |
 |-----------|------|-------------|
 | `ubicacion` | str | Pueblo cercano (Altea, Calpe, Moraira…) |
-| `zona` | str | Zona geográfica |
+| `zona` | str | Zona geográfica (Costa Blanca Norte…) |
 | `capacidad_min` | int | Personas mínimas |
 | `camas_min` | int | Camas mínimas |
 | `banos_min` | int | Baños mínimos |
+| `metros_habitables_min` | int | Metros habitables mínimos |
 | `piscina` | bool | Piscina privada |
 | `internet` | bool | Internet |
-| `texto` | str | Búsqueda libre en nombre y tipo de villa |
-
-#### `buscar_propiedades_amenidades(...)`
-Búsqueda con amenidades extendidas contra `int_etendo_bookings` (DISTINCT por propiedad). Parámetros adicionales respecto a la búsqueda básica:
-
-| Parámetro | Tipo | Descripción |
-|-----------|------|-------------|
 | `aire_acondicionado` | bool | Aire acondicionado en salón |
 | `lavadora` | bool | Lavadora |
 | `lavavajillas` | bool | Lavavajillas |
 | `admite_animales` | bool | Mascotas permitidas |
+| `texto` | str | Búsqueda libre en nombre y tipo de villa |
 
-#### `buscar_por_valoracion(...)`
-Busca propiedades ordenadas por valoración media (descendente). Fuente: `int_etendo_bookings`.
-La valoración media se calcula como media de los 4 scores disponibles: baños, cocina, interior y exterior.
+### `buscar_por_valoracion(...)`
+Busca propiedades ordenadas por valoración media (escala 1-6). Fuente: `int_etendo_bookings`.
+La media se calcula sobre los 4 scores disponibles: baños, cocina, interior y exterior.
 
 | Parámetro | Tipo | Descripción |
 |-----------|------|-------------|
@@ -159,20 +185,28 @@ La valoración media se calcula como media de los 4 scores disponibles: baños, 
 | `capacidad_min` | int | Personas mínimas |
 | `piscina` | bool | Piscina privada |
 
-> **Nota:** La escala de valoración es 1-6 (media actual del catálogo: 3.4). Valor máximo observado: 6.
+### `obtener_detalle_propiedad(nombre)` *(solo interno y admin)*
+Ficha completa de una propiedad por nombre parcial. Incluye dirección, coordenadas, metros, desglose de camas y ratings por categoría. Fuente: `int_etendo_bookings`.
 
-#### `obtener_detalle_propiedad(nombre)`
-Devuelve la ficha completa de una propiedad buscando por nombre parcial. Fuente: `int_etendo_bookings`.
-Incluye todos los campos disponibles: metros, camas por tipo, amenidades, ratings, coordenadas y dirección completa.
+### `consultar_web(url)`
+Accede a cualquier página de `abahanavillas.com` en tiempo real y devuelve texto limpio + enlaces de la página.
 
-**Seguridad en consultas:**
+- **Cómo funciona:** Playwright lanza un Chromium en segundo plano, carga la URL, espera 3s a que el JS renderice, extrae el HTML.
+- **Limpieza:** BeautifulSoup elimina scripts, estilos, nav, imágenes, vídeos, SVGs, selects y opciones. Filtra líneas duplicadas y menores de 10 caracteres.
+- **Enlaces:** BeautifulSoup extrae todos los `<a href>` del dominio con su texto y URL real. El agente recibe las URLs exactas de cada sección (política de privacidad, contacto, etc.) sin necesidad de inferirlas. Máximo 50 enlaces por página.
+- **Por qué extraer enlaces:** BeautifulSoup extrae solo texto, no atributos `href`. Sin esta extracción explícita el agente tendría que adivinar las URLs de las páginas internas.
+- **Retorno:** `{ titulo, contenido (máx. 9.000 chars), enlaces (máx. 50), url }`
+- **Seguridad:** Solo permite URLs del dominio `abahanavillas.com`.
+- **Restricción técnica:** Playwright es async pero las tools de ADK corren en un event loop ya activo. Se resuelve lanzando Playwright en un hilo separado con su propio event loop.
+
+**Seguridad en consultas SQL:**
 - Queries parametrizadas — sin interpolación de strings del usuario en SQL
 - `maximum_bytes_billed = 10 MB` por consulta — evita costes inesperados
 - Límite de 20 resultados por consulta (5 en detalle de propiedad)
 
 ---
 
-## 5. Cómo ejecutar
+## 7. Cómo ejecutar
 
 ```powershell
 # 1. Activar entorno virtual
@@ -184,20 +218,24 @@ gcloud auth application-default login
 # 3a. Lanzar CLI interactivo
 python main.py
 
-# 3b. Lanzar interfaz web (recomendado)
+# 3b. Con rol específico
+python main.py --rol interno
+
+# 3c. Lanzar interfaz web ADK (recomendado para pruebas)
 adk web
 # Abre http://localhost:8000 en el navegador
 ```
 
 ---
 
-## 6. Requisitos para funcionar
+## 8. Requisitos para funcionar
 
 - [x] Proyecto GCP `abahanaweb` con facturación activa
 - [x] BigQuery habilitado — dataset `silver_clean` con tablas `dim_propiedades` e `int_etendo_bookings`
 - [x] Vertex AI API habilitada — modelo `gemini-2.5-flash` accesible
 - [x] Credenciales ADC activas (`gcloud auth application-default login`)
 - [x] Python 3.13 con entorno virtual `.venv`
+- [x] Chromium descargado: `playwright install chromium` (se instala en `AppData\Local\ms-playwright`)
 
 ### Coste estimado
 
@@ -208,52 +246,56 @@ adk web
 | BigQuery — Consultas | $5 por TB (primeros 10 TB/mes gratis) |
 
 Estimación para testing: menos de 1€/mes. Las consultas son pequeñas y la tabla tiene 891 filas.
+Consultas web con Playwright consumen más tokens de Gemini (~2.000-5.000 tokens por página). Vigilar si el uso es intensivo.
 
 ---
 
-## 7. Limitaciones actuales
+## 9. Limitaciones actuales
 
 - **Sin precios:** Las tablas de `silver_clean` no contienen `precio_noche`. El agente no puede responder preguntas de precio.
 - **Sin disponibilidad por fechas:** No hay datos de fechas de entrada/salida en el catálogo.
 - **Aire acondicionado escaso:** Solo 33 de 891 propiedades tienen `tiene_aire_salon = TRUE`.
 - **Sesión en memoria:** Las conversaciones no persisten entre reinicios del servidor.
+- **Playwright lento:** Cada consulta web tarda ~5-8 segundos (Chromium lanza, renderiza, cierra). No apto para uso con alta concurrencia.
+- **Web dinámica:** Si la web cambia de estructura o añade protección anti-bot, el scraping puede romperse.
 
 ---
 
-## 8. Perspectivas futuras
+## 10. Perspectivas futuras
 
 ### Medio plazo
 
 #### Datos
-- **Precios:** Incorporar `precio_noche` a las tablas silver cuando esté disponible en Etendo. Permitirá filtros `precio_max` / `precio_min` y ordenar por precio.
-- **Disponibilidad por fechas:** Añadir fechas de entrada/salida a los bookings para que el agente pueda responder "¿está libre del 15 al 22 de agosto?".
-- **Fotos/URLs:** Enriquecer las respuestas con enlaces a imágenes de cada villa.
+- **Precios:** Incorporar `precio_noche` a las tablas silver. Permitirá filtros `precio_max`/`precio_min`.
+- **Disponibilidad por fechas:** Añadir fechas de entrada/salida para que el agente pueda responder "¿está libre del 15 al 22 de agosto?".
+- **Fotos/URLs:** Enriquecer respuestas con enlaces a imágenes de cada villa.
 
 #### Herramientas del agente
-- **Comparar villas:** Función que recibe dos nombres y devuelve comparativa de amenidades, capacidad y ratings lado a lado.
-- **Búsqueda por zona geográfica avanzada:** Filtrar por distancia a playa o coordenadas, aprovechando `latitud` y `longitud` ya disponibles.
+- **Comparar villas:** Función que recibe dos nombres y devuelve comparativa de amenidades, capacidad y ratings.
+- **Búsqueda geográfica avanzada:** Filtrar por distancia a playa usando `latitud` y `longitud` ya disponibles.
 
-#### Infraestructura
-- **Multi-idioma:** Gemini es multilingüe — añadir detección de idioma a la instrucción para que el agente responda en inglés, francés o alemán según el usuario.
-
----
+#### Web scraping
+- **Caché de páginas estáticas:** Para páginas que no cambian (política de privacidad, aviso legal), guardar el texto en BigQuery y refrescar semanalmente. Evita lanzar Playwright para contenido estático.
+- **Instancia Playwright persistente:** Mantener el browser abierto entre llamadas en lugar de crear y destruir Chromium en cada consulta. Mejora la latencia de ~5-8s a ~1-2s.
 
 ### Largo plazo
 
 #### Infraestructura
-- **Persistencia de sesión:** Sustituir `InMemorySessionService` por `DatabaseSessionService` (Cloud Spanner o Firestore). Las conversaciones actuales se pierden al reiniciar el servidor.
-- **Frontend custom:** Sustituir `adk web` por una interfaz integrada en la web de Abahana (widget de chat embebido).
+- **Persistencia de sesión:** Sustituir `InMemorySessionService` por `DatabaseSessionService` (Cloud Spanner o Firestore).
+- **Frontend custom:** Sustituir `adk web` por un widget de chat embebido en la web de Abahana.
+- **Multi-idioma:** Añadir detección de idioma para que el agente responda en inglés, francés o alemán.
 
 #### Integración con Etendo
-- **Consulta de disponibilidad real:** Conectar con Etendo vía API para verificar disponibilidad en tiempo real en lugar de depender solo de los datos de BigQuery.
-- **Inicio de reservas:** Permitir al agente iniciar o pre-rellenar una reserva directamente desde el chat, integrando con el flujo de reservas de Etendo.
-- **Sincronización de precios:** Cuando Etendo exponga precios por noche en el data warehouse, actualizar la capa silver y añadir la herramienta de búsqueda por precio.
+- **Disponibilidad real:** Conectar con Etendo vía API para verificar disponibilidad en tiempo real.
+- **Inicio de reservas:** Permitir al agente pre-rellenar o iniciar una reserva desde el chat.
 
 ---
 
-## 9. Notas técnicas
+## 11. Notas técnicas
 
-- **Autenticación:** Application Default Credentials (ADC). Las credenciales caducan ~12h — ejecutar `gcloud auth application-default login` para renovar.
-- **Por qué dos tablas:** `dim_propiedades` tiene 1 fila por propiedad (limpia para catálogo). `int_etendo_bookings` tiene amenidades extendidas (aire, lavadora, animales, ratings) que `dim_` no incluye — se usa con `DISTINCT` para evitar duplicados.
+- **Autenticación:** Application Default Credentials (ADC). Caducan ~12h — ejecutar `gcloud auth application-default login` para renovar.
+- **Por qué dos tablas:** `dim_propiedades` tiene 1 fila por propiedad (catálogo limpio). `int_etendo_bookings` tiene amenidades extendidas (aire, lavadora, animales, ratings) que `dim_` no incluye — se usa con `DISTINCT` para evitar duplicados.
+- **Por qué Playwright y no `requests`:** La web de Abahana es una SPA. El HTML estático solo contiene ~369 caracteres de contenido real. Todo lo demás lo inyecta JavaScript. `requests` no ejecuta JS.
+- **Por qué un hilo separado para Playwright:** Las tools de ADK se ejecutan dentro de un event loop de asyncio ya activo. `asyncio.run()` no puede anidarse en un loop existente. La solución es crear un thread separado con su propio event loop donde corre Playwright.
 - **Python:** 3.13 con entorno virtual `.venv`.
-- **Dependencias principales:** `google-adk[bigquery]`, `google-cloud-bigquery`, `google-genai`, `python-dotenv`.
+- **Dependencias principales:** `google-adk[bigquery]`, `google-cloud-bigquery`, `google-genai`, `python-dotenv`, `playwright`, `beautifulsoup4`, `requests`.

@@ -8,10 +8,14 @@ Roles disponibles:
   admin    — igual que interno, preparado para herramientas sensibles futuras
 """
 
+import asyncio
+import concurrent.futures
 import logging
 import os
 from typing import Any
+from urllib.parse import urlparse
 
+from bs4 import BeautifulSoup
 from google.adk.agents import Agent
 from google.cloud import bigquery
 
@@ -298,6 +302,101 @@ def obtener_detalle_propiedad(nombre: str) -> dict[str, Any]:
     return {"matches": matches, "count": len(matches)}
 
 
+_DOMINIO_WEB = "abahanavillas.com"
+
+
+async def _fetch_con_playwright(url: str) -> str:
+    from playwright.async_api import async_playwright
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page(locale="es-ES")
+        await page.goto(url, wait_until="load", timeout=30000)
+        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        await page.wait_for_timeout(3000)
+        html = await page.content()
+        await browser.close()
+    return html
+
+
+def _playwright_en_hilo(url: str) -> str:
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(_fetch_con_playwright(url))
+    finally:
+        loop.close()
+
+
+def consultar_web(url: str) -> dict[str, Any]:
+    """Obtiene el contenido de una página de la web de Abahana Villas.
+
+    Usa esta herramienta cuando el usuario pregunte por información de la
+    empresa: política de privacidad, aviso legal, condiciones de alquiler,
+    contacto, oficinas, destinos, o cualquier otra página del sitio web.
+
+    El agente decide qué URL visitar según lo que el usuario pregunte.
+    La URL base del sitio es https://www.abahanavillas.com/es/
+
+    Args:
+        url: URL completa de la página a consultar (debe ser de abahanavillas.com).
+
+    Returns:
+        Diccionario con 'titulo', 'contenido' (texto limpio) y 'url'.
+    """
+    parsed = urlparse(url)
+    if _DOMINIO_WEB not in parsed.netloc:
+        return {"error": f"Solo se permiten URLs de {_DOMINIO_WEB}"}
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            html = pool.submit(_playwright_en_hilo, url).result(timeout=45)
+    except Exception as e:
+        log.exception("consultar_web: error al obtener %s", url)
+        return {"error": str(e), "url": url}
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    for tag in soup(["script", "style", "nav", "noscript", "iframe",
+                     "img", "picture", "video", "audio", "svg", "canvas",
+                     "select", "option", "input"]):
+        tag.decompose()
+
+    titulo = soup.title.string.strip() if soup.title else ""
+
+    enlaces = []
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        texto_link = a.get_text(strip=True)
+        if _DOMINIO_WEB in href or href.startswith("/"):
+            if href.startswith("/"):
+                href = f"https://www.{_DOMINIO_WEB}{href}"
+            if texto_link:
+                enlaces.append(f"{texto_link}: {href}")
+
+    body = soup.find("body") or soup
+    texto = body.get_text(separator="\n", strip=True)
+
+    seen: set[str] = set()
+    lineas = []
+    for l in texto.splitlines():
+        l = l.strip()
+        if len(l) < 10 or l in seen:
+            continue
+        seen.add(l)
+        lineas.append(l)
+
+    contenido = "\n".join(lineas)
+
+    enlaces_unicos = list(dict.fromkeys(enlaces))
+    seccion_enlaces = "\n".join(enlaces_unicos[:50])
+
+    return {
+        "titulo": titulo,
+        "contenido": contenido[:9000],
+        "enlaces": seccion_enlaces,
+        "url": url,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Instrucciones por rol
 # ---------------------------------------------------------------------------
@@ -314,6 +413,14 @@ en la Costa Blanca (España).
 - Nunca inventes datos. Si no hay resultados, díselo y sugiere alternativas.
 - Muestra los datos de forma clara: nombre, ubicación, capacidad, amenidades.
 - No tenemos información de precios por noche en el sistema actual.
+
+## Web corporativa
+- URL base: https://www.abahanavillas.com/es/
+- Usa `consultar_web(url)` cuando el usuario pregunte por información de la empresa:
+  política de privacidad, aviso legal, condiciones, contacto, destinos, etc.
+- Infiere la URL según el contexto (ej. política de privacidad →
+  https://www.abahanavillas.com/es/politica-de-privacidad/).
+- Si la primera URL falla o no tiene contenido relevante, prueba variaciones.
 """.strip()
 
 INSTRUCTION_CLIENTE = f"""{_INSTRUCCION_BASE}
@@ -325,6 +432,8 @@ INSTRUCTION_CLIENTE = f"""{_INSTRUCCION_BASE}
   lavavajillas, mascotas).
 - `buscar_por_valoracion(...)`: cuando el usuario pida villas bien valoradas o con
   un rating mínimo.
+- `consultar_web(url)`: información corporativa de la web (política de privacidad,
+  aviso legal, condiciones, contacto, destinos…).
 """.strip()
 
 INSTRUCTION_INTERNO = f"""{_INSTRUCCION_BASE}
@@ -339,6 +448,8 @@ INSTRUCTION_INTERNO = f"""{_INSTRUCCION_BASE}
 - `obtener_detalle_propiedad(nombre)`: ficha completa con dirección, coordenadas,
   desglose de camas, metros habitables y ratings por categoría. Úsala cuando el
   usuario pregunte por una villa concreta o pida más detalles.
+- `consultar_web(url)`: información corporativa de la web (política de privacidad,
+  aviso legal, condiciones, contacto, destinos…).
 
 ## Contexto de uso interno
 Eres la versión para agentes de ventas y equipo interno. Puedes mostrar la dirección
@@ -356,6 +467,8 @@ INSTRUCTION_ADMIN = f"""{_INSTRUCCION_BASE}
   un rating mínimo.
 - `obtener_detalle_propiedad(nombre)`: ficha completa con dirección, coordenadas,
   desglose de camas, metros habitables y ratings por categoría.
+- `consultar_web(url)`: información corporativa de la web (política de privacidad,
+  aviso legal, condiciones, contacto, destinos…).
 
 ## Contexto de uso
 Eres la versión de administración. Tienes acceso completo a todos los datos disponibles.
@@ -371,7 +484,7 @@ agent_cliente = Agent(
     model="gemini-2.5-flash",
     description="Asistente público de villas Abahana (rol: cliente)",
     instruction=INSTRUCTION_CLIENTE,
-    tools=[listar_propiedades, buscar_propiedades, buscar_por_valoracion],
+    tools=[listar_propiedades, buscar_propiedades, buscar_por_valoracion, consultar_web],
 )
 
 agent_interno = Agent(
@@ -379,7 +492,7 @@ agent_interno = Agent(
     model="gemini-2.5-flash",
     description="Asistente interno de villas Abahana (rol: interno)",
     instruction=INSTRUCTION_INTERNO,
-    tools=[listar_propiedades, buscar_propiedades, buscar_por_valoracion, obtener_detalle_propiedad],
+    tools=[listar_propiedades, buscar_propiedades, buscar_por_valoracion, obtener_detalle_propiedad, consultar_web],
 )
 
 agent_admin = Agent(
@@ -387,7 +500,7 @@ agent_admin = Agent(
     model="gemini-2.5-flash",
     description="Asistente de administración de villas Abahana (rol: admin)",
     instruction=INSTRUCTION_ADMIN,
-    tools=[listar_propiedades, buscar_propiedades, buscar_por_valoracion, obtener_detalle_propiedad],
+    tools=[listar_propiedades, buscar_propiedades, buscar_por_valoracion, obtener_detalle_propiedad, consultar_web],
 )
 
 AGENTS: dict[str, Agent] = {
