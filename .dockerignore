@@ -1,0 +1,16 @@
+.venv/
+.git/
+.adk/
+.claude/
+.env
+__pycache__/
+agente_villas/__pycache__/
+*.pyc
+*.pyo
+*.db
+main.py
+create_table.py
+DOCUMENTACION.md
+Dockerfile
+.dockerignore
+deploy.ps1

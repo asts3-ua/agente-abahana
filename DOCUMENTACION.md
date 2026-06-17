@@ -144,6 +144,8 @@ agente_abahana/
 ├── requirements.txt     ← Dependencias Python
 ├── agent.py             ← Agente, herramientas, BigQuery y scraping web
 ├── main.py              ← Interfaz de línea de comandos (CLI interactivo)
+├── Dockerfile           ← Imagen Docker para Cloud Run
+├── deploy.ps1           ← Script de despliegue a Cloud Run
 └── agente_villas/
     └── __init__.py      ← Re-exporta root_agent para compatibilidad con ADK web
 ```
@@ -208,6 +210,8 @@ Accede a cualquier página de `abahanavillas.com` en tiempo real y devuelve text
 
 ## 7. Cómo ejecutar
 
+### Local (desarrollo)
+
 ```powershell
 # 1. Activar entorno virtual
 .venv\Scripts\Activate.ps1
@@ -221,10 +225,33 @@ python main.py
 # 3b. Con rol específico
 python main.py --rol interno
 
-# 3c. Lanzar interfaz web ADK (recomendado para pruebas)
+# 3c. Lanzar interfaz web ADK (recomendado para pruebas locales)
 adk web
 # Abre http://localhost:8000 en el navegador
 ```
+
+### Cloud Run (acceso para internos)
+
+Despliega el agente como servicio web permanente en Google Cloud. Los internos acceden por URL sin instalar nada.
+
+```powershell
+# Primer deploy (crea service account, asigna permisos, construye imagen, despliega)
+gcloud auth login
+gcloud config set project abahanaweb
+.\deploy.ps1
+
+# Redeployes posteriores (tras cambios en agent.py)
+.\deploy.ps1 -SkipIAM
+```
+
+El script imprime la URL del servicio al terminar. La primera build tarda ~8-10 min (descarga Playwright/Chromium en Cloud Build). Los redeployes tardan ~3-5 min.
+
+**Detalles del despliegue:**
+- Imagen: Python 3.12 + Playwright/Chromium + `adk web`
+- Rol activo: `interno` (el `root_agent` de `agente_villas/__init__.py`)
+- Sesiones: en memoria (se pierden al reiniciar el contenedor — válido para testing)
+- Instancias: 0 cuando no hay tráfico (coste cero), máximo 3 en paralelo
+- Recursos por instancia: 2 vCPU, 2 GB RAM
 
 ---
 
