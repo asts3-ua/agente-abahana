@@ -19,11 +19,11 @@ Agente:  "Abahana Villas tiene dos oficinas de check-in:
           Oficina de Calpe: Avda. Jaime I El Conquistador, nº31. +34 965 838 233
           Oficina de Moraira: C.C. Moravit. Ctra. Moraira-Calpe, nº306. +34 965 595 615"
 
-Usuario: "¿Cuál es la política de privacidad?"
-Agente:  [Accede a la web en tiempo real y resume el contenido de esa página]
+Usuario: "¿Cuándo son las fiestas en Calpe?"
+Agente:  [Busca en internet y responde con fechas y fuentes oficiales]
 ```
 
-**Estado actual: funcional con datos reales.** 891 propiedades desde la capa Silver de BigQuery + acceso en tiempo real a la web corporativa.
+**Estado actual: funcional con datos reales.** 891 propiedades desde la capa Silver de BigQuery + acceso en tiempo real a la web corporativa + búsqueda en internet (Google Search via Vertex AI).
 
 ---
 
@@ -39,6 +39,11 @@ Agente:  [Accede a la web en tiempo real y resume el contenido de esa página]
 ### Google ADK (Agent Development Kit) — El framework
 - **¿Qué es?** Kit de desarrollo de Google para crear agentes de IA.
 - **¿Qué hace?** Gestiona la conversación, envía las preguntas a Gemini, ejecuta las herramientas Python y devuelve la respuesta.
+
+### Google Search Grounding — Búsqueda en internet
+- **¿Qué es?** Herramienta nativa de ADK que conecta Gemini con Google Search en tiempo real.
+- **¿Para qué?** Responder preguntas sobre información externa no disponible en BigQuery ni en la web corporativa: fiestas locales, eventos, clima, atracciones turísticas, horarios de pueblos de la Costa Blanca.
+- **Patrón:** Agent-as-Tool — un sub-agente dedicado (`agente_busqueda_internet`) envuelto en `AgentTool` para convivir con las herramientas BigQuery y `consultar_web`.
 
 ### Playwright — Navegador headless para la web
 - **¿Qué es?** Biblioteca que controla un navegador Chromium real sin interfaz gráfica.
@@ -78,11 +83,12 @@ Agente:  [Accede a la web en tiempo real y resume el contenido de esa página]
 │  │  buscar_propiedades()         → BigQuery     │   │
 │  │  buscar_por_valoracion()      → BigQuery     │   │
 │  │  obtener_detalle_propiedad()  → BigQuery     │   │
-│  │  consultar_web()              → Web real     │   │
+│  │  consultar_web()              → Web corporativa│   │
+│  │  agente_busqueda_internet()   → Google Search  │   │
 │  └──────────────────────────────────────────────┘   │
-└────────────┬─────────────────────────┬──────────────┘
-             │                         │
-             ▼                         ▼
+└────────────┬─────────────────┬──────────────────────┘
+             │                 │
+             ▼                 ▼
 ┌─────────────────────┐   ┌────────────────────────────┐
 │   GOOGLE BIGQUERY   │   │  WEB CORPORATIVA           │
 │   silver_clean      │   │  abahanavillas.com         │
@@ -91,6 +97,13 @@ Agente:  [Accede a la web en tiempo real y resume el contenido de esa página]
 │  int_etendo_bookings│   │  renderiza JS → extrae     │
 │                     │   │  texto limpio              │
 └─────────────────────┘   └────────────────────────────┘
+                                    │
+                                    ▼
+                          ┌────────────────────────────┐
+                          │  GOOGLE SEARCH (Vertex AI) │
+                          │  fiestas, eventos, clima,  │
+                          │  atracciones, turismo…     │
+                          └────────────────────────────┘
 ```
 
 ### Flujo de una consulta de villa
@@ -110,6 +123,14 @@ Agente:  [Accede a la web en tiempo real y resume el contenido de esa página]
 5. **BeautifulSoup** limpia el HTML (quita nav, footer, scripts, imágenes, formularios, etc.)
 6. **Gemini** recibe el texto limpio y responde en lenguaje natural
 
+### Flujo de una consulta con búsqueda en internet
+
+1. **Usuario** escribe: "¿Cuándo son las fiestas en Calpe?"
+2. **ADK** envía la pregunta a **Gemini 2.5 Flash**
+3. **Gemini** decide llamar a `agente_busqueda_internet` con la consulta
+4. El **sub-agente** usa **Google Search** (Vertex AI grounding) para buscar información actual
+5. **Gemini** recibe los resultados con fuentes y responde en lenguaje natural con citas
+
 ---
 
 ## 4. Sistema de roles
@@ -122,9 +143,10 @@ El agente tiene tres variantes según el tipo de usuario. Cada una tiene acceso 
 | `buscar_propiedades` | ✓ | ✓ | ✓ |
 | `buscar_por_valoracion` | ✓ | ✓ | ✓ |
 | `consultar_web` | ✓ | ✓ | ✓ |
+| `agente_busqueda_internet` | ✓ | ✓ | ✓ |
 | `obtener_detalle_propiedad` | ✗ | ✓ | ✓ |
 
-- **cliente** — acceso público: catálogo, búsqueda, valoraciones, web corporativa.
+- **cliente** — acceso público: catálogo, búsqueda, valoraciones, web corporativa, búsqueda en internet.
 - **interno** — agentes de ventas: incluye ficha completa con dirección, coordenadas y ratings desglosados.
 - **admin** — administración: igual que interno, preparado para herramientas sensibles futuras.
 
@@ -201,6 +223,14 @@ Accede a cualquier página de `abahanavillas.com` en tiempo real y devuelve text
 - **Seguridad:** Solo permite URLs del dominio `abahanavillas.com`.
 - **Restricción técnica:** Playwright es async pero las tools de ADK corren en un event loop ya activo. Se resuelve lanzando Playwright en un hilo separado con su propio event loop.
 
+### `agente_busqueda_internet` *(todos los roles)*
+Busca información actual en internet via Google Search (Vertex AI grounding). Envuelto como sub-agente con el patrón Agent-as-Tool.
+
+- **Cuándo usarla:** fiestas locales, eventos, clima, atracciones turísticas, horarios de mercados, datos de pueblos (Calpe, Altea, Moraira, Dénia…).
+- **Cuándo NO usarla:** información de villas (BigQuery) o web corporativa de Abahana (`consultar_web`).
+- **Cómo funciona:** Gemini invoca el sub-agente, que ejecuta Google Search y devuelve respuesta con fuentes citadas.
+- **Compliance:** en producción hay que mostrar las sugerencias/fuentes de búsqueda según la [política de Google](https://cloud.google.com/vertex-ai/generative-ai/docs/grounding/grounding-search-suggestions).
+
 **Seguridad en consultas SQL:**
 - Queries parametrizadas — sin interpolación de strings del usuario en SQL
 - `maximum_bytes_billed = 10 MB` por consulta — evita costes inesperados
@@ -271,9 +301,11 @@ El script imprime la URL del servicio al terminar. La primera build tarda ~8-10 
 | Gemini 2.5 Flash — Input | ~$0.15 / millón de tokens |
 | Gemini 2.5 Flash — Output | ~$0.60 / millón de tokens |
 | BigQuery — Consultas | $5 por TB (primeros 10 TB/mes gratis) |
+| Google Search grounding (Vertex AI) | Coste adicional por consulta con grounding |
 
 Estimación para testing: menos de 1€/mes. Las consultas son pequeñas y la tabla tiene 891 filas.
 Consultas web con Playwright consumen más tokens de Gemini (~2.000-5.000 tokens por página). Vigilar si el uso es intensivo.
+Las búsquedas en internet via Google Search grounding tienen coste adicional por consulta en Vertex AI.
 
 ---
 
@@ -285,6 +317,7 @@ Consultas web con Playwright consumen más tokens de Gemini (~2.000-5.000 tokens
 - **Sesión en memoria:** Las conversaciones no persisten entre reinicios del servidor.
 - **Playwright lento:** Cada consulta web tarda ~5-8 segundos (Chromium lanza, renderiza, cierra). No apto para uso con alta concurrencia.
 - **Web dinámica:** Si la web cambia de estructura o añade protección anti-bot, el scraping puede romperse.
+- **Búsqueda en internet:** Cada consulta con Google Search grounding tiene latencia adicional (~3-8 s) y coste extra en Vertex AI. Los resultados dependen de fuentes externas — priorizar ayuntamientos y turismo oficial.
 
 ---
 
@@ -325,4 +358,5 @@ Consultas web con Playwright consumen más tokens de Gemini (~2.000-5.000 tokens
 - **Por qué Playwright y no `requests`:** La web de Abahana es una SPA. El HTML estático solo contiene ~369 caracteres de contenido real. Todo lo demás lo inyecta JavaScript. `requests` no ejecuta JS.
 - **Por qué un hilo separado para Playwright:** Las tools de ADK se ejecutan dentro de un event loop de asyncio ya activo. `asyncio.run()` no puede anidarse en un loop existente. La solución es crear un thread separado con su propio event loop donde corre Playwright.
 - **Python:** 3.13 con entorno virtual `.venv`.
-- **Dependencias principales:** `google-adk[bigquery]`, `google-cloud-bigquery`, `google-genai`, `python-dotenv`, `playwright`, `beautifulsoup4`, `requests`.
+- **Por qué Agent-as-Tool para Google Search:** ADK no permite mezclar `google_search` con otras herramientas en el mismo agente. El sub-agente dedicado se envuelve en `AgentTool` con `propagate_grounding_metadata=True` para preservar las citas.
+- **Dependencias principales:** `google-adk[bigquery]>=1.16.0`, `google-cloud-bigquery`, `google-genai`, `python-dotenv`, `playwright`, `beautifulsoup4`, `requests`.

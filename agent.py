@@ -17,6 +17,8 @@ from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 from google.adk.agents import Agent
+from google.adk.tools import google_search
+from google.adk.tools.agent_tool import AgentTool
 from google.cloud import bigquery
 
 log = logging.getLogger("agente-villas")
@@ -421,6 +423,15 @@ en la Costa Blanca (España).
 - Infiere la URL según el contexto (ej. política de privacidad →
   https://www.abahanavillas.com/es/politica-de-privacidad/).
 - Si la primera URL falla o no tiene contenido relevante, prueba variaciones.
+
+## Búsqueda en internet
+- Usa `agente_busqueda_internet` para información externa no disponible en BigQuery
+  ni en abahanavillas.com: fiestas locales, eventos, clima, atracciones turísticas,
+  horarios de mercados, datos de pueblos (Calpe, Altea, Moraira, Dénia…).
+- No inventes fechas ni eventos; si no hay datos internos, busca en internet.
+- Para preguntas mixtas (ej. "villas en Calpe y cuándo son las fiestas"), combina
+  herramientas de BigQuery con búsqueda en internet.
+- Cita las fuentes cuando uses información obtenida de internet.
 """.strip()
 
 INSTRUCTION_CLIENTE = f"""{_INSTRUCCION_BASE}
@@ -434,6 +445,8 @@ INSTRUCTION_CLIENTE = f"""{_INSTRUCCION_BASE}
   un rating mínimo.
 - `consultar_web(url)`: información corporativa de la web (política de privacidad,
   aviso legal, condiciones, contacto, destinos…).
+- `agente_busqueda_internet`: búsqueda en internet (fiestas, eventos, clima,
+  atracciones, horarios de pueblos de la Costa Blanca…).
 """.strip()
 
 INSTRUCTION_INTERNO = f"""{_INSTRUCCION_BASE}
@@ -450,6 +463,8 @@ INSTRUCTION_INTERNO = f"""{_INSTRUCCION_BASE}
   usuario pregunte por una villa concreta o pida más detalles.
 - `consultar_web(url)`: información corporativa de la web (política de privacidad,
   aviso legal, condiciones, contacto, destinos…).
+- `agente_busqueda_internet`: búsqueda en internet (fiestas, eventos, clima,
+  atracciones, horarios de pueblos de la Costa Blanca…).
 
 ## Contexto de uso interno
 Eres la versión para agentes de ventas y equipo interno. Puedes mostrar la dirección
@@ -469,10 +484,41 @@ INSTRUCTION_ADMIN = f"""{_INSTRUCCION_BASE}
   desglose de camas, metros habitables y ratings por categoría.
 - `consultar_web(url)`: información corporativa de la web (política de privacidad,
   aviso legal, condiciones, contacto, destinos…).
+- `agente_busqueda_internet`: búsqueda en internet (fiestas, eventos, clima,
+  atracciones, horarios de pueblos de la Costa Blanca…).
 
 ## Contexto de uso
 Eres la versión de administración. Tienes acceso completo a todos los datos disponibles.
 """.strip()
+
+
+# ---------------------------------------------------------------------------
+# Sub-agente de búsqueda en internet (patrón Agent-as-Tool)
+# ---------------------------------------------------------------------------
+
+agente_busqueda_internet = Agent(
+    name="agente_busqueda_internet",
+    model="gemini-2.5-flash",
+    description=(
+        "Busca información actual en internet: fiestas locales, eventos, "
+        "clima, atracciones turísticas, horarios y datos de pueblos de la Costa Blanca."
+    ),
+    instruction="""
+Eres un especialista en búsqueda web para Abahana Villas.
+- Responde SIEMPRE en español.
+- Busca información actual y verificable (fechas de fiestas, eventos, clima, etc.).
+- Prioriza fuentes oficiales: ayuntamientos, turismo, medios locales.
+- Incluye fechas concretas cuando existan.
+- Cita las fuentes al final de tu respuesta.
+- Si no encuentras información fiable, dilo claramente.
+""".strip(),
+    tools=[google_search],
+)
+
+herramienta_busqueda_internet = AgentTool(
+    agent=agente_busqueda_internet,
+    propagate_grounding_metadata=True,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -484,7 +530,13 @@ agent_cliente = Agent(
     model="gemini-2.5-flash",
     description="Asistente público de villas Abahana (rol: cliente)",
     instruction=INSTRUCTION_CLIENTE,
-    tools=[listar_propiedades, buscar_propiedades, buscar_por_valoracion, consultar_web],
+    tools=[
+        listar_propiedades,
+        buscar_propiedades,
+        buscar_por_valoracion,
+        consultar_web,
+        herramienta_busqueda_internet,
+    ],
 )
 
 agent_interno = Agent(
@@ -492,7 +544,14 @@ agent_interno = Agent(
     model="gemini-2.5-flash",
     description="Asistente interno de villas Abahana (rol: interno)",
     instruction=INSTRUCTION_INTERNO,
-    tools=[listar_propiedades, buscar_propiedades, buscar_por_valoracion, obtener_detalle_propiedad, consultar_web],
+    tools=[
+        listar_propiedades,
+        buscar_propiedades,
+        buscar_por_valoracion,
+        obtener_detalle_propiedad,
+        consultar_web,
+        herramienta_busqueda_internet,
+    ],
 )
 
 agent_admin = Agent(
@@ -500,7 +559,14 @@ agent_admin = Agent(
     model="gemini-2.5-flash",
     description="Asistente de administración de villas Abahana (rol: admin)",
     instruction=INSTRUCTION_ADMIN,
-    tools=[listar_propiedades, buscar_propiedades, buscar_por_valoracion, obtener_detalle_propiedad, consultar_web],
+    tools=[
+        listar_propiedades,
+        buscar_propiedades,
+        buscar_por_valoracion,
+        obtener_detalle_propiedad,
+        consultar_web,
+        herramienta_busqueda_internet,
+    ],
 )
 
 AGENTS: dict[str, Agent] = {
