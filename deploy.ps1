@@ -56,9 +56,14 @@ gcloud run deploy $SERVICE `
     --cpu=2 `
     --concurrency=10 `
     --timeout=120 `
-    --min-instances=0 `
-    --max-instances=3
+    --min-instances=1 `
+    --max-instances=3 `
+    --session-affinity
+
+# Nota: --allow-unauthenticated en la capa Cloud Run.
+# La autenticación real la gestiona Streamlit via Google OAuth (secrets.toml).
+# Subir a --no-allow-unauthenticated + Cloud IAP cuando se formalice la infra.
 
 Write-Host ""
 Write-Host "Deploy completado. La URL del servicio aparece arriba."
-Write-Host "Comparte esa URL con los internos. No necesitan instalar nada."
+Write-Host "Acceso controlado por Streamlit (Google OAuth). Dominios: @abahana.com + @inferia.io"
