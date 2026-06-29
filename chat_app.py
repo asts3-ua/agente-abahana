@@ -16,6 +16,7 @@ import secrets as _secrets
 import time
 import urllib.parse
 import uuid
+from pathlib import Path
 
 import requests
 import streamlit as st
@@ -24,9 +25,18 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
 from agent import AGENTS
+from conversation_store import get_conversation_store
 
 APP_NAME = "abahana_chat"
 ALLOWED_DOMAINS = {"abahana.com", "inferia.io"}
+
+LOGO_PATH = Path(__file__).parent / "assets" / "logo.png"
+
+# Paleta corporativa Abahana Villas
+COLOR_BG = "#F5F2E9"
+COLOR_PRIMARY = "#1E2B3C"
+COLOR_ACCENT = "#7089C4"
+COLOR_ACCENT_LIGHT = "#A0B4E0"
 
 DOMAIN_ROLES = {
     "abahana.com": "interno",
@@ -211,12 +221,126 @@ def _run_agent(role: str, user_id: str, session_id: str, message: str) -> str:
 # UI principal
 # ---------------------------------------------------------------------------
 
+def _inject_brand_css() -> None:
+    st.markdown(
+        f"""
+        <style>
+        @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap');
+
+        html, body, [class*="css"] {{
+            font-family: 'Montserrat', sans-serif !important;
+        }}
+
+        .stApp {{
+            background-color: {COLOR_BG};
+        }}
+
+        [data-testid="stHeader"] {{
+            background-color: {COLOR_BG};
+        }}
+
+        [data-testid="stSidebar"] {{
+            background-color: #FFFFFF;
+            border-right: 1px solid {COLOR_ACCENT_LIGHT};
+        }}
+
+        h1, h2, h3, [data-testid="stMarkdownContainer"] p strong {{
+            color: {COLOR_PRIMARY} !important;
+            font-weight: 600;
+            letter-spacing: 0.04em;
+        }}
+
+        [data-testid="stCaptionContainer"] p {{
+            color: {COLOR_ACCENT} !important;
+        }}
+
+        [data-testid="stChatMessage"] {{
+            background-color: #FFFFFF;
+            border: 1px solid {COLOR_ACCENT_LIGHT};
+            border-radius: 0.75rem;
+        }}
+
+        [data-testid="stChatInput"] textarea {{
+            border-color: {COLOR_ACCENT_LIGHT} !important;
+        }}
+
+        [data-testid="stChatInput"] textarea:focus {{
+            border-color: {COLOR_ACCENT} !important;
+            box-shadow: 0 0 0 1px {COLOR_ACCENT} !important;
+        }}
+
+        .stButton > button {{
+            background-color: {COLOR_ACCENT} !important;
+            color: white !important;
+            border: none !important;
+            border-radius: 0.5rem !important;
+            font-weight: 600 !important;
+            letter-spacing: 0.03em;
+        }}
+
+        .stButton > button:hover {{
+            background-color: {COLOR_PRIMARY} !important;
+        }}
+
+        [data-testid="stAlert"] {{
+            border-radius: 0.5rem;
+        }}
+
+        hr {{
+            border-color: {COLOR_ACCENT_LIGHT} !important;
+        }}
+
+        #MainMenu, footer, header[data-testid="stHeader"] {{
+            visibility: hidden;
+        }}
+
+        .brand-header {{
+            text-align: center;
+            padding: 1.5rem 0 0.5rem;
+        }}
+
+        .brand-header img {{
+            max-width: 320px;
+            width: 100%;
+            height: auto;
+        }}
+
+        .brand-subtitle {{
+            color: {COLOR_PRIMARY};
+            font-size: 1.1rem;
+            font-weight: 500;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+            margin-top: 0.75rem;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_brand_header(subtitle: str = "Asistente Virtual") -> None:
+    if LOGO_PATH.exists():
+        logo_b64 = base64.b64encode(LOGO_PATH.read_bytes()).decode()
+        st.markdown(
+            f'<div class="brand-header">'
+            f'<img src="data:image/png;base64,{logo_b64}" alt="Abahana Villas" />'
+            f'<div class="brand-subtitle">{subtitle}</div>'
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.title("Asistente Abahana Villas")
+
+
 def main() -> None:
+    page_icon = str(LOGO_PATH) if LOGO_PATH.exists() else "🏖️"
     st.set_page_config(
         page_title="Asistente Abahana Villas",
-        page_icon="🏖️",
+        page_icon=page_icon,
         layout="centered",
     )
+    _inject_brand_css()
 
     # Procesar callback OAuth si viene de Google
     _handle_oauth_callback()
@@ -225,14 +349,15 @@ def main() -> None:
 
     # Login obligatorio
     if not email:
-        st.title("Asistente Abahana Villas")
+        _render_brand_header()
         st.info("Accede con tu cuenta corporativa de Google.")
         auth_url = _auth_url()
         st.markdown(
             f'<a href="{auth_url}" target="_self" style="'
-            "display:inline-block;padding:0.4rem 1rem;background-color:#FF4B4B;"
+            f"display:inline-block;padding:0.6rem 1.5rem;background-color:{COLOR_ACCENT};"
             "color:white;border-radius:0.5rem;text-decoration:none;font-weight:600;"
-            'font-size:1rem;">Iniciar sesión con Google</a>',
+            f'font-size:1rem;letter-spacing:0.03em;font-family:Montserrat,sans-serif;">'
+            "Iniciar sesión con Google</a>",
             unsafe_allow_html=True,
         )
         st.stop()
@@ -240,7 +365,7 @@ def main() -> None:
     # Verificar dominio
     domain = email.split("@")[-1].lower()
     if domain not in ALLOWED_DOMAINS:
-        st.title("Asistente Abahana Villas")
+        _render_brand_header()
         st.error(f"La cuenta **{email}** no tiene acceso. Solo cuentas @abahana.com e @inferia.io.")
         if st.button("Iniciar sesión con otra cuenta"):
             st.session_state.pop("_auth_email", None)
@@ -262,7 +387,7 @@ def main() -> None:
     role = _get_role(email)
 
     # Cabecera
-    st.title("Asistente Abahana Villas")
+    _render_brand_header()
     st.caption(f"👤 {email}")
 
     st.divider()
@@ -280,6 +405,8 @@ def main() -> None:
         with st.chat_message("user"):
             st.markdown(prompt)
 
+        error_msg: str | None = None
+        started = time.perf_counter()
         with st.chat_message("assistant"):
             with st.spinner("Consultando..."):
                 try:
@@ -292,13 +419,30 @@ def main() -> None:
                     if not response:
                         response = "_(sin respuesta del agente)_"
                 except Exception as exc:
+                    error_msg = str(exc)
                     response = f"Error: {exc}"
             st.markdown(response)
+
+        response_ms = int((time.perf_counter() - started) * 1000)
+        get_conversation_store().save_turn(
+            session_id=st.session_state.session_id,
+            user_id=email,
+            user_role=role,
+            user_message=prompt,
+            assistant_message=response,
+            app_name=APP_NAME,
+            response_ms=response_ms,
+            error=error_msg,
+        )
 
         st.session_state.messages.append({"role": "assistant", "content": response})
 
     # Cerrar sesión
     with st.sidebar:
+        if role == "admin":
+            stored = get_conversation_store().count_turns()
+            if stored is not None:
+                st.caption(f"Turnos almacenados: {stored:,}")
         if st.button("Cerrar sesión"):
             st.session_state.clear()
             st.rerun()
