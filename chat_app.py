@@ -217,6 +217,64 @@ def _run_agent(role: str, user_id: str, session_id: str, message: str) -> str:
     return asyncio.run(_run())
 
 
+def _user_message_before(messages: list[dict], assistant_index: int) -> str:
+    for j in range(assistant_index - 1, -1, -1):
+        if messages[j].get("role") == "user":
+            return messages[j].get("content", "")
+    return ""
+
+
+def _feedback_context_for_agent(messages: list[dict]) -> str:
+    """Contexto de valoraciones de la sesión actual para el siguiente turno."""
+    lines: list[str] = []
+    for i, msg in enumerate(messages):
+        rating = msg.get("rating")
+        if msg.get("role") != "assistant" or rating is None:
+            continue
+        question = _user_message_before(messages, i)
+        snippet = question[:180] + ("…" if len(question) > 180 else "")
+        if rating == 1:
+            lines.append(f"👍 Respuesta bien valorada a: «{snippet}»")
+        elif rating == -1:
+            lines.append(f"👎 Respuesta mal valorada a: «{snippet}»")
+    if not lines:
+        return ""
+    return (
+        "[Retroalimentación del usuario en esta conversación]\n"
+        + "\n".join(lines[-5:])
+        + "\nAjusta tu respuesta según esta retroalimentación.\n\n"
+    )
+
+
+def _render_assistant_feedback(msg: dict, index: int) -> None:
+    turn_id = msg.get("turn_id")
+    if not turn_id:
+        return
+
+    current_rating = msg.get("rating")
+    if current_rating is not None:
+        label = "👍 Gracias" if current_rating == 1 else "👎 Gracias, lo mejoraremos"
+        st.caption(label)
+        return
+
+    feedback = st.feedback("thumbs", key=f"feedback_{turn_id}_{index}")
+    if feedback is None:
+        return
+
+    rating = 1 if feedback == 1 else -1
+    get_conversation_store().save_rating(turn_id, rating)
+    msg["rating"] = rating
+    st.rerun()
+
+
+def _render_chat_history(messages: list[dict]) -> None:
+    for i, msg in enumerate(messages):
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+            if msg["role"] == "assistant":
+                _render_assistant_feedback(msg, i)
+
+
 # ---------------------------------------------------------------------------
 # UI principal
 # ---------------------------------------------------------------------------
@@ -313,6 +371,10 @@ def _inject_brand_css() -> None:
             text-transform: uppercase;
             margin-top: 0.75rem;
         }}
+
+        [data-testid="stFeedback"] {{
+            margin-top: -0.25rem;
+        }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -393,9 +455,7 @@ def main() -> None:
     st.divider()
 
     # Historial
-    for msg in st.session_state.messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+    _render_chat_history(st.session_state.messages)
 
     # Input
     if prompt := st.chat_input(
@@ -404,6 +464,8 @@ def main() -> None:
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
+
+        agent_prompt = _feedback_context_for_agent(st.session_state.messages) + prompt
 
         error_msg: str | None = None
         started = time.perf_counter()
@@ -414,7 +476,7 @@ def main() -> None:
                         role=role,
                         user_id=email,
                         session_id=st.session_state.session_id,
-                        message=prompt,
+                        message=agent_prompt,
                     )
                     if not response:
                         response = "_(sin respuesta del agente)_"
@@ -424,7 +486,7 @@ def main() -> None:
             st.markdown(response)
 
         response_ms = int((time.perf_counter() - started) * 1000)
-        get_conversation_store().save_turn(
+        turn_id = get_conversation_store().save_turn(
             session_id=st.session_state.session_id,
             user_id=email,
             user_role=role,
@@ -435,7 +497,12 @@ def main() -> None:
             error=error_msg,
         )
 
-        st.session_state.messages.append({"role": "assistant", "content": response})
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": response,
+            "turn_id": turn_id,
+        })
+        st.rerun()
 
     # Cerrar sesión
     with st.sidebar:
@@ -443,6 +510,11 @@ def main() -> None:
             stored = get_conversation_store().count_turns()
             if stored is not None:
                 st.caption(f"Turnos almacenados: {stored:,}")
+            ratings = get_conversation_store().count_ratings()
+            if ratings:
+                st.caption(
+                    f"👍 {ratings['thumbs_up']:,}  ·  👎 {ratings['thumbs_down']:,}"
+                )
         if st.button("Cerrar sesión"):
             st.session_state.clear()
             st.rerun()

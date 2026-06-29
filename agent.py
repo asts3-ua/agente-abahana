@@ -460,6 +460,22 @@ def buscar_internet(consulta: str) -> dict[str, Any]:
     return {"respuesta": texto, "fuentes": fuentes}
 
 
+def consultar_feedback_negativo() -> dict[str, Any]:
+    """Consulta respuestas recientemente mal valoradas por los usuarios (👎).
+
+    Usa esta herramienta cuando quieras evitar repetir errores frecuentes
+    o cuando el usuario indique que una respuesta anterior no fue útil.
+    Devuelve ejemplos de preguntas y respuestas que recibieron valoración negativa.
+
+    Returns:
+        Diccionario con 'examples' (lista) y 'count'.
+    """
+    from conversation_store import get_conversation_store
+
+    examples = get_conversation_store().get_recent_negative_examples(limit=8)
+    return {"examples": examples, "count": len(examples)}
+
+
 # ---------------------------------------------------------------------------
 # Instrucciones por rol
 # ---------------------------------------------------------------------------
@@ -496,6 +512,12 @@ en la Costa Blanca (España). Ayudas con villas Y con información turística lo
 - Para preguntas mixtas (ej. "villas en Calpe y cuándo son las fiestas"), combina
   herramientas de BigQuery con buscar_internet.
 - Cita las fuentes cuando uses información obtenida de internet.
+
+## Retroalimentación de usuarios
+- El usuario puede valorar tus respuestas con 👍 o 👎.
+- Si recibes contexto de retroalimentación en el mensaje, ajústalo en consecuencia.
+- Usa `consultar_feedback_negativo()` si necesitas ver qué respuestas han fallado
+  recientemente en otras conversaciones para no repetir los mismos errores.
 """.strip()
 
 INSTRUCTION_CLIENTE = f"""{_INSTRUCCION_BASE}
@@ -511,6 +533,7 @@ INSTRUCTION_CLIENTE = f"""{_INSTRUCCION_BASE}
   aviso legal, condiciones, contacto, destinos…).
 - `buscar_internet(consulta)`: búsqueda en internet (fiestas, eventos, clima,
   atracciones, horarios de pueblos de la Costa Blanca…). OBLIGATORIO para esas preguntas.
+- `consultar_feedback_negativo()`: respuestas mal valoradas recientemente por usuarios.
 """.strip()
 
 INSTRUCTION_INTERNO = f"""{_INSTRUCCION_BASE}
@@ -529,6 +552,7 @@ INSTRUCTION_INTERNO = f"""{_INSTRUCCION_BASE}
   aviso legal, condiciones, contacto, destinos…).
 - `buscar_internet(consulta)`: búsqueda en internet (fiestas, eventos, clima,
   atracciones, horarios de pueblos de la Costa Blanca…). OBLIGATORIO para esas preguntas.
+- `consultar_feedback_negativo()`: respuestas mal valoradas recientemente por usuarios.
 
 ## Contexto de uso interno
 Eres la versión para agentes de ventas y equipo interno. Puedes mostrar la dirección
@@ -550,6 +574,7 @@ INSTRUCTION_ADMIN = f"""{_INSTRUCCION_BASE}
   aviso legal, condiciones, contacto, destinos…).
 - `buscar_internet(consulta)`: búsqueda en internet (fiestas, eventos, clima,
   atracciones, horarios de pueblos de la Costa Blanca…). OBLIGATORIO para esas preguntas.
+- `consultar_feedback_negativo()`: respuestas mal valoradas recientemente por usuarios.
 
 ## Contexto de uso
 Eres la versión de administración. Tienes acceso completo a todos los datos disponibles.
@@ -574,6 +599,7 @@ agent_cliente = Agent(
         buscar_por_valoracion,
         consultar_web,
         buscar_internet,
+        consultar_feedback_negativo,
     ],
 )
 
@@ -592,6 +618,7 @@ agent_interno = Agent(
         obtener_detalle_propiedad,
         consultar_web,
         buscar_internet,
+        consultar_feedback_negativo,
     ],
 )
 
@@ -610,6 +637,7 @@ agent_admin = Agent(
         obtener_detalle_propiedad,
         consultar_web,
         buscar_internet,
+        consultar_feedback_negativo,
     ],
 )
 
