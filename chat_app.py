@@ -273,7 +273,9 @@ def main() -> None:
             st.markdown(msg["content"])
 
     # Input
-    if prompt := st.chat_input("Pregunta sobre villas, zonas, amenidades..."):
+    if prompt := st.chat_input(
+        "Pregunta sobre villas, fiestas, eventos, clima, zonas, amenidades..."
+    ):
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)

@@ -16,10 +16,10 @@ from typing import Any
 from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
+from google import genai
 from google.adk.agents import Agent
-from google.adk.tools import google_search
-from google.adk.tools.agent_tool import AgentTool
 from google.cloud import bigquery
+from google.genai import types as genai_types
 
 log = logging.getLogger("agente-villas")
 
@@ -30,6 +30,19 @@ TABLA_BOOKINGS = f"`{PROJECT_ID}.{DATASET}.int_etendo_bookings`"
 
 _bq = bigquery.Client(project=PROJECT_ID)
 _BILLING_CAP = 10 * 1024 * 1024  # 10 MB por consulta
+_VERTEX_LOCATION = os.environ.get("GOOGLE_CLOUD_LOCATION", "europe-west1")
+_genai_client: genai.Client | None = None
+
+
+def _get_genai_client() -> genai.Client:
+    global _genai_client
+    if _genai_client is None:
+        _genai_client = genai.Client(
+            vertexai=os.environ.get("GOOGLE_GENAI_USE_VERTEXAI", "true").lower() == "true",
+            project=PROJECT_ID,
+            location=_VERTEX_LOCATION,
+        )
+    return _genai_client
 
 
 # ---------------------------------------------------------------------------
@@ -399,22 +412,72 @@ def consultar_web(url: str) -> dict[str, Any]:
     }
 
 
+def buscar_internet(consulta: str) -> dict[str, Any]:
+    """Busca información actual en internet via Google Search.
+
+    OBLIGATORIO para preguntas sobre fiestas locales, eventos, clima,
+    atracciones turísticas, horarios de mercados y datos de pueblos de la
+    Costa Blanca (Calpe, Altea, Moraira, Dénia, Benidorm…).
+
+    Args:
+        consulta: Pregunta o tema a buscar, en español.
+
+    Returns:
+        Diccionario con 'respuesta' (texto) y 'fuentes' (lista de URLs).
+    """
+    try:
+        response = _get_genai_client().models.generate_content(
+            model="gemini-2.5-flash",
+            contents=consulta.strip(),
+            config=genai_types.GenerateContentConfig(
+                tools=[genai_types.Tool(google_search=genai_types.GoogleSearch())],
+                system_instruction=(
+                    "Eres un asistente de búsqueda para Abahana Villas (Costa Blanca). "
+                    "Responde SIEMPRE en español con información verificable y actual. "
+                    "Prioriza fuentes oficiales: ayuntamientos, turismo, medios locales. "
+                    "Incluye fechas concretas cuando existan."
+                ),
+            ),
+        )
+    except Exception as e:
+        log.exception("buscar_internet: error en Google Search")
+        return {"respuesta": "", "fuentes": [], "error": str(e)}
+
+    texto = response.text or ""
+    fuentes: list[dict[str, str]] = []
+    if response.candidates:
+        metadata = response.candidates[0].grounding_metadata
+        if metadata and metadata.grounding_chunks:
+            vistos: set[str] = set()
+            for chunk in metadata.grounding_chunks:
+                if chunk.web and chunk.web.uri and chunk.web.uri not in vistos:
+                    vistos.add(chunk.web.uri)
+                    fuentes.append({
+                        "titulo": chunk.web.title or chunk.web.uri,
+                        "url": chunk.web.uri,
+                    })
+
+    return {"respuesta": texto, "fuentes": fuentes}
+
+
 # ---------------------------------------------------------------------------
 # Instrucciones por rol
 # ---------------------------------------------------------------------------
 
 _INSTRUCCION_BASE = """
 Eres el asistente virtual de Abahana Villas, empresa de alquiler de villas vacacionales
-en la Costa Blanca (España).
+en la Costa Blanca (España). Ayudas con villas Y con información turística local.
 
 ## Reglas generales
 - Responde SIEMPRE en español.
 - Para ubicación usa pueblo_cercano (Altea, Calpe, Moraira…) o zona_nombre.
 - Muestra el rating_medio cuando uses buscar_por_valoracion.
 - Puedes combinar varios filtros en una sola llamada.
-- Nunca inventes datos. Si no hay resultados, díselo y sugiere alternativas.
+- Nunca inventes datos. Si no hay resultados en BigQuery, sugiere alternativas.
 - Muestra los datos de forma clara: nombre, ubicación, capacidad, amenidades.
 - No tenemos información de precios por noche en el sistema actual.
+- NUNCA digas que solo puedes ayudar con villas si la pregunta es sobre turismo,
+  fiestas, eventos o clima: usa `buscar_internet` primero.
 
 ## Web corporativa
 - URL base: https://www.abahanavillas.com/es/
@@ -424,13 +487,14 @@ en la Costa Blanca (España).
   https://www.abahanavillas.com/es/politica-de-privacidad/).
 - Si la primera URL falla o no tiene contenido relevante, prueba variaciones.
 
-## Búsqueda en internet
-- Usa `agente_busqueda_internet` para información externa no disponible en BigQuery
-  ni en abahanavillas.com: fiestas locales, eventos, clima, atracciones turísticas,
-  horarios de mercados, datos de pueblos (Calpe, Altea, Moraira, Dénia…).
-- No inventes fechas ni eventos; si no hay datos internos, busca en internet.
+## Búsqueda en internet — OBLIGATORIO para turismo local
+- Si preguntan por fiestas, eventos, clima, atracciones, horarios o datos de pueblos,
+  DEBES llamar a `buscar_internet(consulta=...)` ANTES de responder.
+- No digas que no tienes esa información sin haber buscado en internet.
+- Ejemplo: "¿cuándo son las fiestas de Calpe?" →
+  buscar_internet(consulta="fechas fiestas patronales Calpe 2026")
 - Para preguntas mixtas (ej. "villas en Calpe y cuándo son las fiestas"), combina
-  herramientas de BigQuery con búsqueda en internet.
+  herramientas de BigQuery con buscar_internet.
 - Cita las fuentes cuando uses información obtenida de internet.
 """.strip()
 
@@ -445,8 +509,8 @@ INSTRUCTION_CLIENTE = f"""{_INSTRUCCION_BASE}
   un rating mínimo.
 - `consultar_web(url)`: información corporativa de la web (política de privacidad,
   aviso legal, condiciones, contacto, destinos…).
-- `agente_busqueda_internet`: búsqueda en internet (fiestas, eventos, clima,
-  atracciones, horarios de pueblos de la Costa Blanca…).
+- `buscar_internet(consulta)`: búsqueda en internet (fiestas, eventos, clima,
+  atracciones, horarios de pueblos de la Costa Blanca…). OBLIGATORIO para esas preguntas.
 """.strip()
 
 INSTRUCTION_INTERNO = f"""{_INSTRUCCION_BASE}
@@ -463,8 +527,8 @@ INSTRUCTION_INTERNO = f"""{_INSTRUCCION_BASE}
   usuario pregunte por una villa concreta o pida más detalles.
 - `consultar_web(url)`: información corporativa de la web (política de privacidad,
   aviso legal, condiciones, contacto, destinos…).
-- `agente_busqueda_internet`: búsqueda en internet (fiestas, eventos, clima,
-  atracciones, horarios de pueblos de la Costa Blanca…).
+- `buscar_internet(consulta)`: búsqueda en internet (fiestas, eventos, clima,
+  atracciones, horarios de pueblos de la Costa Blanca…). OBLIGATORIO para esas preguntas.
 
 ## Contexto de uso interno
 Eres la versión para agentes de ventas y equipo interno. Puedes mostrar la dirección
@@ -484,41 +548,12 @@ INSTRUCTION_ADMIN = f"""{_INSTRUCCION_BASE}
   desglose de camas, metros habitables y ratings por categoría.
 - `consultar_web(url)`: información corporativa de la web (política de privacidad,
   aviso legal, condiciones, contacto, destinos…).
-- `agente_busqueda_internet`: búsqueda en internet (fiestas, eventos, clima,
-  atracciones, horarios de pueblos de la Costa Blanca…).
+- `buscar_internet(consulta)`: búsqueda en internet (fiestas, eventos, clima,
+  atracciones, horarios de pueblos de la Costa Blanca…). OBLIGATORIO para esas preguntas.
 
 ## Contexto de uso
 Eres la versión de administración. Tienes acceso completo a todos los datos disponibles.
 """.strip()
-
-
-# ---------------------------------------------------------------------------
-# Sub-agente de búsqueda en internet (patrón Agent-as-Tool)
-# ---------------------------------------------------------------------------
-
-agente_busqueda_internet = Agent(
-    name="agente_busqueda_internet",
-    model="gemini-2.5-flash",
-    description=(
-        "Busca información actual en internet: fiestas locales, eventos, "
-        "clima, atracciones turísticas, horarios y datos de pueblos de la Costa Blanca."
-    ),
-    instruction="""
-Eres un especialista en búsqueda web para Abahana Villas.
-- Responde SIEMPRE en español.
-- Busca información actual y verificable (fechas de fiestas, eventos, clima, etc.).
-- Prioriza fuentes oficiales: ayuntamientos, turismo, medios locales.
-- Incluye fechas concretas cuando existan.
-- Cita las fuentes al final de tu respuesta.
-- Si no encuentras información fiable, dilo claramente.
-""".strip(),
-    tools=[google_search],
-)
-
-herramienta_busqueda_internet = AgentTool(
-    agent=agente_busqueda_internet,
-    propagate_grounding_metadata=True,
-)
 
 
 # ---------------------------------------------------------------------------
@@ -528,21 +563,27 @@ herramienta_busqueda_internet = AgentTool(
 agent_cliente = Agent(
     name="abahana_villas_agent_cliente",
     model="gemini-2.5-flash",
-    description="Asistente público de villas Abahana (rol: cliente)",
+    description=(
+        "Asistente de Abahana Villas: villas vacacionales, web corporativa "
+        "e información turística local (fiestas, eventos, clima)."
+    ),
     instruction=INSTRUCTION_CLIENTE,
     tools=[
         listar_propiedades,
         buscar_propiedades,
         buscar_por_valoracion,
         consultar_web,
-        herramienta_busqueda_internet,
+        buscar_internet,
     ],
 )
 
 agent_interno = Agent(
     name="abahana_villas_agent_interno",
     model="gemini-2.5-flash",
-    description="Asistente interno de villas Abahana (rol: interno)",
+    description=(
+        "Asistente interno de Abahana Villas: villas, fichas completas, web corporativa "
+        "e información turística local (fiestas, eventos, clima)."
+    ),
     instruction=INSTRUCTION_INTERNO,
     tools=[
         listar_propiedades,
@@ -550,14 +591,17 @@ agent_interno = Agent(
         buscar_por_valoracion,
         obtener_detalle_propiedad,
         consultar_web,
-        herramienta_busqueda_internet,
+        buscar_internet,
     ],
 )
 
 agent_admin = Agent(
     name="abahana_villas_agent_admin",
     model="gemini-2.5-flash",
-    description="Asistente de administración de villas Abahana (rol: admin)",
+    description=(
+        "Asistente de administración de Abahana Villas: villas, fichas completas, "
+        "web corporativa e información turística local (fiestas, eventos, clima)."
+    ),
     instruction=INSTRUCTION_ADMIN,
     tools=[
         listar_propiedades,
@@ -565,7 +609,7 @@ agent_admin = Agent(
         buscar_por_valoracion,
         obtener_detalle_propiedad,
         consultar_web,
-        herramienta_busqueda_internet,
+        buscar_internet,
     ],
 )
 
