@@ -797,6 +797,104 @@ def consultar_feedback_negativo() -> dict[str, Any]:
     return {"examples": examples, "count": len(examples)}
 
 
+def listar_tablas_disponibles() -> dict[str, Any]:
+    """Lista las tablas disponibles en el dataset silver_clean, con descripción si existe.
+
+    Usa esta herramienta para explorar qué tablas hay cuando ninguna otra
+    herramienta cubra lo que se pregunta, o si sospechas que una tabla fija
+    (villa, reserva...) ha cambiado de nombre.
+
+    Returns:
+        Diccionario con 'tables' (lista de {table_name, descripcion}).
+    """
+    query = f"""
+        SELECT t.table_name, o.option_value AS descripcion
+        FROM `{PROJECT_ID}.{DATASET}.INFORMATION_SCHEMA.TABLES` t
+        LEFT JOIN `{PROJECT_ID}.{DATASET}.INFORMATION_SCHEMA.TABLE_OPTIONS` o
+            ON t.table_name = o.table_name AND o.option_name = 'description'
+        ORDER BY t.table_name
+    """
+    try:
+        rows = list(_bq.query(
+            query,
+            job_config=bigquery.QueryJobConfig(maximum_bytes_billed=_BILLING_CAP),
+        ).result())
+    except Exception as e:
+        log.exception("listar_tablas_disponibles: error en BigQuery")
+        return {"tables": [], "error": str(e)}
+    return {"tables": [_row_to_dict(r) for r in rows]}
+
+
+def describir_tabla(nombre_tabla: str) -> dict[str, Any]:
+    """Devuelve las columnas y tipos de una tabla del dataset silver_clean.
+
+    Usa esto antes de `ejecutar_sql` para confirmar nombres exactos de
+    columnas, sobre todo si una tabla fija ha podido cambiar de estructura.
+
+    Args:
+        nombre_tabla: nombre exacto de la tabla (ver listar_tablas_disponibles).
+
+    Returns:
+        Diccionario con 'columns' (lista de {column_name, data_type}).
+    """
+    query = f"""
+        SELECT column_name, data_type
+        FROM `{PROJECT_ID}.{DATASET}.INFORMATION_SCHEMA.COLUMNS`
+        WHERE table_name = @nombre_tabla
+        ORDER BY ordinal_position
+    """
+    params = [bigquery.ScalarQueryParameter("nombre_tabla", "STRING", nombre_tabla)]
+    try:
+        rows = list(_bq.query(
+            query,
+            job_config=bigquery.QueryJobConfig(query_parameters=params, maximum_bytes_billed=_BILLING_CAP),
+        ).result())
+    except Exception as e:
+        log.exception("describir_tabla: error en BigQuery")
+        return {"columns": [], "error": str(e)}
+    return {"columns": [_row_to_dict(r) for r in rows]}
+
+
+def ejecutar_sql(query: str) -> dict[str, Any]:
+    """Ejecuta una consulta SQL de solo lectura (SELECT/WITH) sobre silver_clean.
+
+    Usa esta herramienta SOLO cuando ninguna otra tool cubra lo que necesitas,
+    o cuando una tabla fija (villa, reserva...) haya cambiado de nombre o
+    columnas. Antes de usarla, llama a `listar_tablas_disponibles()` y
+    `describir_tabla(...)` para confirmar los nombres exactos.
+
+    IMPORTANTE — trampas conocidas del dataset:
+    - `stg_etendo_Villa` trae filas duplicadas por villa_id. Si la consultas,
+      añade `QUALIFY ROW_NUMBER() OVER (PARTITION BY villa_id ORDER BY
+      fecha_actualizacion DESC) = 1` para quedarte con una fila por villa.
+    - Para relacionar `stg_etendo_Planta`/`stg_etendo_Banio` con una villa usa
+      `villa_id` (no `identificador`/`villa_nombre`, que no casan).
+    - Solo se permiten SELECT/WITH (nada de INSERT/UPDATE/DELETE/DDL).
+    - El resultado se limita a 50 filas.
+
+    Args:
+        query: sentencia SQL SELECT/WITH completa.
+
+    Returns:
+        Diccionario con 'rows' (máx. 50), 'count' y, si aplica, 'error'.
+    """
+    normalized = query.strip().upper()
+    if not (normalized.startswith("SELECT") or normalized.startswith("WITH")):
+        return {"rows": [], "count": 0, "error": "Solo se permiten consultas SELECT o WITH."}
+
+    try:
+        rows = list(_bq.query(
+            query,
+            job_config=bigquery.QueryJobConfig(maximum_bytes_billed=_BILLING_CAP),
+        ).result(max_results=50))
+    except Exception as e:
+        log.exception("ejecutar_sql: error en BigQuery")
+        return {"rows": [], "count": 0, "error": str(e)}
+
+    data = [_row_to_dict(r) for r in rows]
+    return {"rows": data, "count": len(data)}
+
+
 # ---------------------------------------------------------------------------
 # Instrucciones por rol
 # ---------------------------------------------------------------------------
@@ -887,6 +985,11 @@ INSTRUCTION_INTERNO = f"""{_INSTRUCCION_BASE}
 - `buscar_internet(consulta)`: búsqueda en internet (fiestas, eventos, clima,
   atracciones, horarios de pueblos de la Costa Blanca…). OBLIGATORIO para esas preguntas.
 - `consultar_feedback_negativo()`: respuestas parciales o no resueltas recientemente, con motivos.
+- `listar_tablas_disponibles()` / `describir_tabla(nombre_tabla)` / `ejecutar_sql(query)`:
+  úsalas SOLO si ninguna herramienta anterior cubre la pregunta, o si una tabla fija
+  parece haber cambiado de nombre/columnas. Explora primero con las dos primeras antes
+  de escribir la query. Ten en cuenta las trampas documentadas en `ejecutar_sql`
+  (duplicados en stg_etendo_Villa, join por villa_id en Planta/Banio).
 
 ## Contexto de uso interno
 Eres la versión para agentes de ventas y equipo interno. Puedes mostrar la dirección
@@ -919,6 +1022,11 @@ INSTRUCTION_ADMIN = f"""{_INSTRUCCION_BASE}
 - `buscar_internet(consulta)`: búsqueda en internet (fiestas, eventos, clima,
   atracciones, horarios de pueblos de la Costa Blanca…). OBLIGATORIO para esas preguntas.
 - `consultar_feedback_negativo()`: respuestas parciales o no resueltas recientemente, con motivos.
+- `listar_tablas_disponibles()` / `describir_tabla(nombre_tabla)` / `ejecutar_sql(query)`:
+  úsalas SOLO si ninguna herramienta anterior cubre la pregunta, o si una tabla fija
+  parece haber cambiado de nombre/columnas. Explora primero con las dos primeras antes
+  de escribir la query. Ten en cuenta las trampas documentadas en `ejecutar_sql`
+  (duplicados en stg_etendo_Villa, join por villa_id en Planta/Banio).
 
 ## Contexto de uso
 Eres la versión de administración. Tienes acceso completo a todos los datos disponibles.
@@ -965,6 +1073,9 @@ agent_interno = Agent(
         consultar_web,
         buscar_internet,
         consultar_feedback_negativo,
+        listar_tablas_disponibles,
+        describir_tabla,
+        ejecutar_sql,
     ],
 )
 
@@ -986,6 +1097,9 @@ agent_admin = Agent(
         consultar_web,
         buscar_internet,
         consultar_feedback_negativo,
+        listar_tablas_disponibles,
+        describir_tabla,
+        ejecutar_sql,
     ],
 )
 
