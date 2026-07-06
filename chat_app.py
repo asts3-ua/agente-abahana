@@ -31,6 +31,7 @@ APP_NAME = "abahana_chat"
 ALLOWED_DOMAINS = {"abahana.com", "inferia.io"}
 
 LOGO_PATH = Path(__file__).parent / "assets" / "logo.png"
+AGENT_AVATAR_PATH = Path(__file__).parent / "assets" / "agent-concierge.svg"
 
 # Paleta corporativa Abahana Villas
 COLOR_BG = "#F5F2E9"
@@ -47,6 +48,46 @@ ROLE_LABELS = {
     "cliente": "Cliente",
     "interno": "Uso Interno",
     "admin": "Administración",
+}
+
+WELCOME_MESSAGE = (
+    "Hola, soy tu asistente de **Abahana Villas**. Puedo ayudarte a encontrar villas, "
+    "consultar información turística de la Costa Blanca y resolver dudas sobre la web corporativa.\n\n"
+    "Elige una sugerencia para empezar o escribe tu pregunta abajo."
+)
+
+SUGGESTIONS_BY_ROLE: dict[str, list[str]] = {
+    "cliente": [
+        "Villas con piscina privada para 8 personas en Moraira",
+        "¿Cuándo son las fiestas patronales de Calpe?",
+        "Villas bien valoradas en Altea con vistas al mar",
+        "¿Qué tiempo hace en la Costa Blanca esta semana?",
+    ],
+    "interno": [
+        "Villas disponibles en Jávea con 4 habitaciones",
+        "Reservas confirmadas en Moraira este mes",
+        "¿Cuándo son las fiestas de Altea este año?",
+        "Resumen de reservas por zona en 2026",
+    ],
+    "admin": [
+        "Catálogo de villas con piscina en Calpe",
+        "Reservas canceladas en los últimos 30 días",
+        "Villas mejor valoradas en Moraira",
+        "Resumen de facturación por zona este año",
+    ],
+}
+
+FEEDBACK_TAG_OPTIONS = {
+    "faltan_datos": "Faltan datos",
+    "no_entendio_intencion": "No entendió la intención",
+    "resultados_poco_relevantes": "Resultados poco relevantes",
+    "respuesta_generica": "Respuesta demasiado genérica",
+}
+
+FEEDBACK_LABEL_DISPLAY = {
+    "util": "Útil",
+    "parcial": "Parcial",
+    "no_resolvio": "No resolvió",
 }
 
 _session_service = InMemorySessionService()
@@ -224,19 +265,30 @@ def _user_message_before(messages: list[dict], assistant_index: int) -> str:
     return ""
 
 
+def _assistant_avatar() -> str | None:
+    return str(AGENT_AVATAR_PATH) if AGENT_AVATAR_PATH.exists() else None
+
+
 def _feedback_context_for_agent(messages: list[dict]) -> str:
     """Contexto de valoraciones de la sesión actual para el siguiente turno."""
     lines: list[str] = []
     for i, msg in enumerate(messages):
+        if msg.get("role") != "assistant":
+            continue
+        label = msg.get("feedback_label")
         rating = msg.get("rating")
-        if msg.get("role") != "assistant" or rating is None:
+        if label is None and rating is None:
             continue
         question = _user_message_before(messages, i)
         snippet = question[:180] + ("…" if len(question) > 180 else "")
-        if rating == 1:
-            lines.append(f"👍 Respuesta bien valorada a: «{snippet}»")
-        elif rating == -1:
-            lines.append(f"👎 Respuesta mal valorada a: «{snippet}»")
+        if label == "util" or rating == 1:
+            lines.append(f"✓ Respuesta útil a: «{snippet}»")
+        elif label == "parcial" or rating == 0:
+            detail = _format_feedback_detail(msg)
+            lines.append(f"~ Respuesta parcial a: «{snippet}»{detail}")
+        elif label == "no_resolvio" or rating == -1:
+            detail = _format_feedback_detail(msg)
+            lines.append(f"✗ Respuesta no resolvió: «{snippet}»{detail}")
     if not lines:
         return ""
     return (
@@ -246,33 +298,180 @@ def _feedback_context_for_agent(messages: list[dict]) -> str:
     )
 
 
+def _format_feedback_detail(msg: dict) -> str:
+    parts: list[str] = []
+    tags = msg.get("feedback_tags") or []
+    if tags:
+        tag_labels = [FEEDBACK_TAG_OPTIONS.get(t, t) for t in tags]
+        parts.append(f" Motivos: {', '.join(tag_labels)}.")
+    comment = (msg.get("feedback_comment") or "").strip()
+    if comment:
+        parts.append(f" Comentario: «{comment[:120]}».")
+    return "".join(parts)
+
+
+def _save_message_feedback(
+    msg: dict,
+    *,
+    label: str,
+    tags: list[str] | None = None,
+    comment: str | None = None,
+) -> None:
+    turn_id = msg.get("turn_id")
+    if not turn_id:
+        return
+    get_conversation_store().save_feedback(
+        turn_id,
+        label=label,
+        tags=tags,
+        comment=comment,
+    )
+    msg["feedback_label"] = label
+    msg["feedback_tags"] = tags or []
+    msg["feedback_comment"] = (comment or "").strip() or None
+    msg["rating"] = {"util": 1, "parcial": 0, "no_resolvio": -1}[label]
+
+
 def _render_assistant_feedback(msg: dict, index: int) -> None:
     turn_id = msg.get("turn_id")
     if not turn_id:
         return
 
-    current_rating = msg.get("rating")
-    if current_rating is not None:
-        label = "👍 Gracias" if current_rating == 1 else "👎 Gracias, lo mejoraremos"
-        st.caption(label)
+    feedback_key = f"feedback_{turn_id}_{index}"
+    draft_key = f"feedback_draft_{turn_id}_{index}"
+
+    if msg.get("feedback_label"):
+        label = FEEDBACK_LABEL_DISPLAY.get(msg["feedback_label"], "Enviado")
+        st.caption(f"Gracias por tu feedback · {label}")
         return
 
-    feedback = st.feedback("thumbs", key=f"feedback_{turn_id}_{index}")
-    if feedback is None:
+    draft_label = st.session_state.get(draft_key)
+    if draft_label in ("parcial", "no_resolvio"):
+        st.markdown(
+            '<div class="feedback-card"><span class="feedback-title">'
+            "Cuéntanos un poco más</span></div>",
+            unsafe_allow_html=True,
+        )
+        selected_tags = st.multiselect(
+            "Motivos (opcional)",
+            options=list(FEEDBACK_TAG_OPTIONS.keys()),
+            format_func=lambda k: FEEDBACK_TAG_OPTIONS[k],
+            key=f"{feedback_key}_tags",
+        )
+        comment = st.text_area(
+            "Comentario (opcional)",
+            placeholder="¿Qué faltó o qué mejorarías?",
+            key=f"{feedback_key}_comment",
+            height=80,
+        )
+        col_send, col_cancel = st.columns([1, 1])
+        with col_send:
+            if st.button("Enviar feedback", key=f"{feedback_key}_send", type="primary"):
+                _save_message_feedback(
+                    msg,
+                    label=draft_label,
+                    tags=selected_tags,
+                    comment=comment,
+                )
+                st.session_state.pop(draft_key, None)
+                st.rerun()
+        with col_cancel:
+            if st.button("Cancelar", key=f"{feedback_key}_cancel"):
+                st.session_state.pop(draft_key, None)
+                st.rerun()
         return
 
-    rating = 1 if feedback == 1 else -1
-    get_conversation_store().save_rating(turn_id, rating)
-    msg["rating"] = rating
-    st.rerun()
+    st.markdown(
+        '<div class="feedback-card"><span class="feedback-title">'
+        "¿Te ha ayudado esta respuesta?</span></div>",
+        unsafe_allow_html=True,
+    )
+    col_util, col_parcial, col_no = st.columns(3)
+    with col_util:
+        if st.button("Útil", key=f"{feedback_key}_util", use_container_width=True):
+            _save_message_feedback(msg, label="util")
+            st.rerun()
+    with col_parcial:
+        if st.button("Parcial", key=f"{feedback_key}_parcial", use_container_width=True):
+            st.session_state[draft_key] = "parcial"
+            st.rerun()
+    with col_no:
+        if st.button("No resolvió", key=f"{feedback_key}_no", use_container_width=True):
+            st.session_state[draft_key] = "no_resolvio"
+            st.rerun()
 
 
 def _render_chat_history(messages: list[dict]) -> None:
+    avatar = _assistant_avatar()
     for i, msg in enumerate(messages):
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-            if msg["role"] == "assistant":
+        if msg["role"] == "assistant":
+            with st.chat_message("assistant", avatar=avatar):
+                st.markdown(msg["content"])
                 _render_assistant_feedback(msg, i)
+        else:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+
+
+def _get_suggestions(role: str) -> list[str]:
+    return SUGGESTIONS_BY_ROLE.get(role, SUGGESTIONS_BY_ROLE["cliente"])
+
+
+def _render_welcome_empty_state(role: str) -> None:
+    avatar = _assistant_avatar()
+    with st.chat_message("assistant", avatar=avatar):
+        st.markdown(WELCOME_MESSAGE)
+        st.markdown("**Sugerencias para empezar**")
+        for i, suggestion in enumerate(_get_suggestions(role)):
+            if st.button(suggestion, key=f"suggestion_{i}", use_container_width=True):
+                st.session_state.pending_prompt = suggestion
+                st.rerun()
+
+
+def _process_user_prompt(prompt: str, *, role: str, email: str) -> None:
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    agent_prompt = _feedback_context_for_agent(st.session_state.messages) + prompt
+
+    error_msg: str | None = None
+    started = time.perf_counter()
+    avatar = _assistant_avatar()
+    with st.chat_message("assistant", avatar=avatar):
+        with st.spinner("Consultando..."):
+            try:
+                response = _run_agent(
+                    role=role,
+                    user_id=email,
+                    session_id=st.session_state.session_id,
+                    message=agent_prompt,
+                )
+                if not response:
+                    response = "_(sin respuesta del agente)_"
+            except Exception as exc:
+                error_msg = str(exc)
+                response = f"Error: {exc}"
+        st.markdown(response)
+
+    response_ms = int((time.perf_counter() - started) * 1000)
+    turn_id = get_conversation_store().save_turn(
+        session_id=st.session_state.session_id,
+        user_id=email,
+        user_role=role,
+        user_message=prompt,
+        assistant_message=response,
+        app_name=APP_NAME,
+        response_ms=response_ms,
+        error=error_msg,
+    )
+
+    st.session_state.messages.append({
+        "role": "assistant",
+        "content": response,
+        "turn_id": turn_id,
+    })
+    st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -372,8 +571,22 @@ def _inject_brand_css() -> None:
             margin-top: 0.75rem;
         }}
 
-        [data-testid="stFeedback"] {{
-            margin-top: -0.25rem;
+        .feedback-card {{
+            margin-top: 0.5rem;
+            padding: 0.65rem 0.85rem;
+            background: #F8F6F1;
+            border: 1px solid {COLOR_ACCENT_LIGHT};
+            border-radius: 0.6rem;
+        }}
+
+        .feedback-title {{
+            color: {COLOR_PRIMARY};
+            font-size: 0.85rem;
+            font-weight: 600;
+        }}
+
+        [data-testid="stChatMessage"] [data-testid="stImage"] img {{
+            border-radius: 0.5rem;
         }}
         </style>
         """,
@@ -454,55 +667,22 @@ def main() -> None:
 
     st.divider()
 
+    # Bienvenida y sugerencias en chat vacío
+    if not st.session_state.messages and not st.session_state.get("pending_prompt"):
+        _render_welcome_empty_state(role)
+
     # Historial
     _render_chat_history(st.session_state.messages)
+
+    # Sugerencia clicada desde bienvenida
+    if pending := st.session_state.pop("pending_prompt", None):
+        _process_user_prompt(pending, role=role, email=email)
 
     # Input
     if prompt := st.chat_input(
         "Pregunta sobre villas, fiestas, eventos, clima, zonas, amenidades..."
     ):
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
-
-        agent_prompt = _feedback_context_for_agent(st.session_state.messages) + prompt
-
-        error_msg: str | None = None
-        started = time.perf_counter()
-        with st.chat_message("assistant"):
-            with st.spinner("Consultando..."):
-                try:
-                    response = _run_agent(
-                        role=role,
-                        user_id=email,
-                        session_id=st.session_state.session_id,
-                        message=agent_prompt,
-                    )
-                    if not response:
-                        response = "_(sin respuesta del agente)_"
-                except Exception as exc:
-                    error_msg = str(exc)
-                    response = f"Error: {exc}"
-            st.markdown(response)
-
-        response_ms = int((time.perf_counter() - started) * 1000)
-        turn_id = get_conversation_store().save_turn(
-            session_id=st.session_state.session_id,
-            user_id=email,
-            user_role=role,
-            user_message=prompt,
-            assistant_message=response,
-            app_name=APP_NAME,
-            response_ms=response_ms,
-            error=error_msg,
-        )
-
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": response,
-            "turn_id": turn_id,
-        })
-        st.rerun()
+        _process_user_prompt(prompt, role=role, email=email)
 
     # Cerrar sesión
     with st.sidebar:
@@ -513,7 +693,9 @@ def main() -> None:
             ratings = get_conversation_store().count_ratings()
             if ratings:
                 st.caption(
-                    f"👍 {ratings['thumbs_up']:,}  ·  👎 {ratings['thumbs_down']:,}"
+                    f"Útil {ratings['util']:,}  ·  "
+                    f"Parcial {ratings['parcial']:,}  ·  "
+                    f"No resolvió {ratings['no_resolvio']:,}"
                 )
         if st.button("Cerrar sesión"):
             st.session_state.clear()

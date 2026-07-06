@@ -8,13 +8,14 @@ Guarda cada turno pregunta/respuesta para análisis posterior y mejora continua.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sqlite3
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 log = logging.getLogger("conversation-store")
 
@@ -25,6 +26,18 @@ SQLITE_PATH = Path(os.environ.get("CONVERSATIONS_SQLITE_PATH", "data/conversatio
 BACKEND = os.environ.get("CONVERSATIONS_BACKEND", "auto").lower()
 
 Backend = Literal["bigquery", "sqlite"]
+
+FEEDBACK_LABELS = {"util", "parcial", "no_resolvio"}
+FEEDBACK_SCORES = {"util": 3, "parcial": 2, "no_resolvio": 1}
+LEGACY_RATINGS = {"util": 1, "parcial": 0, "no_resolvio": -1}
+
+_FEEDBACK_COLUMNS: list[tuple[str, str]] = [
+    ("feedback_score", "INTEGER"),
+    ("feedback_label", "TEXT"),
+    ("feedback_tags", "TEXT"),
+    ("feedback_comment", "TEXT"),
+    ("feedback_at", "TEXT"),
+]
 
 
 class ConversationStore:
@@ -61,6 +74,11 @@ class ConversationStore:
             "app_name": app_name,
             "rating": None,
             "rated_at": None,
+            "feedback_score": None,
+            "feedback_label": None,
+            "feedback_tags": None,
+            "feedback_comment": None,
+            "feedback_at": None,
         }
         try:
             backend = self._resolve_backend()
@@ -74,28 +92,61 @@ class ConversationStore:
             return None
 
     def save_rating(self, turn_id: str, rating: int) -> None:
-        """Guarda valoración del usuario: 1 = 👍, -1 = 👎."""
+        """Compatibilidad legacy: 1 = útil, -1 = no útil."""
         if rating not in (1, -1):
             raise ValueError("rating debe ser 1 o -1")
-        rated_at = datetime.now(timezone.utc).isoformat()
+        label = "util" if rating == 1 else "no_resolvio"
+        self.save_feedback(turn_id, label=label)
+
+    def save_feedback(
+        self,
+        turn_id: str,
+        *,
+        label: str,
+        tags: list[str] | None = None,
+        comment: str | None = None,
+    ) -> None:
+        """Guarda feedback estructurado: util | parcial | no_resolvio."""
+        if label not in FEEDBACK_LABELS:
+            raise ValueError(f"label debe ser uno de {FEEDBACK_LABELS}")
+
+        feedback_at = datetime.now(timezone.utc).isoformat()
+        score = FEEDBACK_SCORES[label]
+        rating = LEGACY_RATINGS[label]
+        tags_json = json.dumps(tags or [], ensure_ascii=False)
+        comment_clean = (comment or "").strip() or None
+
+        payload = {
+            "rating": rating,
+            "rated_at": feedback_at,
+            "feedback_score": score,
+            "feedback_label": label,
+            "feedback_tags": tags_json,
+            "feedback_comment": comment_clean,
+            "feedback_at": feedback_at,
+        }
         try:
             backend = self._resolve_backend()
             if backend == "bigquery":
-                self._save_rating_bigquery(turn_id, rating, rated_at)
+                self._save_feedback_bigquery(turn_id, payload)
             else:
-                self._save_rating_sqlite(turn_id, rating, rated_at)
+                self._save_feedback_sqlite(turn_id, payload)
         except Exception:
-            log.exception("No se pudo guardar la valoración turn_id=%s", turn_id)
+            log.exception("No se pudo guardar el feedback turn_id=%s", turn_id)
 
     def get_recent_negative_examples(self, limit: int = 8) -> list[dict]:
-        """Ejemplos recientes mal valorados para que el agente aprenda patrones."""
+        """Ejemplos recientes mal valorados (compatibilidad con agente)."""
+        return self.get_recent_problematic_examples(limit=limit)
+
+    def get_recent_problematic_examples(self, limit: int = 8) -> list[dict]:
+        """Ejemplos recientes con feedback parcial o negativo."""
         try:
             backend = self._resolve_backend()
             if backend == "bigquery":
-                return self._recent_negative_bigquery(limit)
-            return self._recent_negative_sqlite(limit)
+                return self._recent_problematic_bigquery(limit)
+            return self._recent_problematic_sqlite(limit)
         except Exception:
-            log.exception("No se pudo obtener feedback negativo reciente")
+            log.exception("No se pudo obtener feedback problemático reciente")
             return []
 
     def _resolve_backend(self) -> Backend:
@@ -111,7 +162,6 @@ class ConversationStore:
             self._backend = "bigquery"
             return self._backend
 
-        # auto: intentar BigQuery, caer a SQLite
         try:
             self._init_bigquery()
             self._backend = "bigquery"
@@ -142,20 +192,7 @@ class ConversationStore:
         try:
             client.get_table(table_ref)
         except NotFound:
-            schema = [
-                bigquery.SchemaField("turn_id", "STRING", mode="REQUIRED"),
-                bigquery.SchemaField("session_id", "STRING", mode="REQUIRED"),
-                bigquery.SchemaField("user_id", "STRING", mode="REQUIRED"),
-                bigquery.SchemaField("user_role", "STRING"),
-                bigquery.SchemaField("user_message", "STRING"),
-                bigquery.SchemaField("assistant_message", "STRING"),
-                bigquery.SchemaField("created_at", "TIMESTAMP"),
-                bigquery.SchemaField("response_ms", "INTEGER"),
-                bigquery.SchemaField("error", "STRING"),
-                bigquery.SchemaField("app_name", "STRING"),
-                bigquery.SchemaField("rating", "INTEGER"),
-                bigquery.SchemaField("rated_at", "TIMESTAMP"),
-            ]
+            schema = self._bq_schema_fields(bigquery)
             table = bigquery.Table(table_ref, schema=schema)
             table.time_partitioning = bigquery.TimePartitioning(
                 type_=bigquery.TimePartitioningType.DAY,
@@ -164,12 +201,32 @@ class ConversationStore:
             client.create_table(table)
             log.info("Tabla BigQuery creada: %s.%s.%s", PROJECT_ID, BQ_DATASET, BQ_TABLE)
         else:
-            self._ensure_bq_rating_columns(client, table_ref)
+            self._ensure_bq_columns(client, table_ref)
 
         self._bq_client = client
         self._bq_table_id = f"{PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}"
 
-    def _ensure_bq_rating_columns(self, client, table_ref) -> None:
+    @staticmethod
+    def _bq_schema_fields(bigquery) -> list:
+        fields = [
+            bigquery.SchemaField("turn_id", "STRING", mode="REQUIRED"),
+            bigquery.SchemaField("session_id", "STRING", mode="REQUIRED"),
+            bigquery.SchemaField("user_id", "STRING", mode="REQUIRED"),
+            bigquery.SchemaField("user_role", "STRING"),
+            bigquery.SchemaField("user_message", "STRING"),
+            bigquery.SchemaField("assistant_message", "STRING"),
+            bigquery.SchemaField("created_at", "TIMESTAMP"),
+            bigquery.SchemaField("response_ms", "INTEGER"),
+            bigquery.SchemaField("error", "STRING"),
+            bigquery.SchemaField("app_name", "STRING"),
+            bigquery.SchemaField("rating", "INTEGER"),
+            bigquery.SchemaField("rated_at", "TIMESTAMP"),
+        ]
+        for name, bq_type in _FEEDBACK_COLUMNS:
+            fields.append(bigquery.SchemaField(name, bq_type))
+        return fields
+
+    def _ensure_bq_columns(self, client, table_ref) -> None:
         from google.cloud import bigquery
 
         table = client.get_table(table_ref)
@@ -179,10 +236,13 @@ class ConversationStore:
             new_fields.append(bigquery.SchemaField("rating", "INTEGER"))
         if "rated_at" not in names:
             new_fields.append(bigquery.SchemaField("rated_at", "TIMESTAMP"))
+        for name, bq_type in _FEEDBACK_COLUMNS:
+            if name not in names:
+                new_fields.append(bigquery.SchemaField(name, bq_type))
         if new_fields:
             table.schema = list(table.schema) + new_fields
             client.update_table(table, ["schema"])
-            log.info("Columnas de valoración añadidas a %s.%s", BQ_DATASET, BQ_TABLE)
+            log.info("Columnas de feedback añadidas a %s.%s", BQ_DATASET, BQ_TABLE)
 
     def _save_bigquery(self, row: dict) -> None:
         self._init_bigquery()
@@ -195,35 +255,50 @@ class ConversationStore:
         if errors:
             raise RuntimeError(f"BigQuery insert errors: {errors}")
 
+    def _sqlite_create_table_sql(self) -> str:
+        feedback_cols = ", ".join(f"{name} {col_type}" for name, col_type in _FEEDBACK_COLUMNS)
+        return f"""
+            CREATE TABLE IF NOT EXISTS chat_turns (
+                turn_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                user_role TEXT,
+                user_message TEXT,
+                assistant_message TEXT,
+                created_at TEXT NOT NULL,
+                response_ms INTEGER,
+                error TEXT,
+                app_name TEXT,
+                rating INTEGER,
+                rated_at TEXT,
+                {feedback_cols}
+            )
+        """
+
+    def _ensure_sqlite_columns(self, conn: sqlite3.Connection) -> None:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(chat_turns)")}
+        if "rating" not in cols:
+            conn.execute("ALTER TABLE chat_turns ADD COLUMN rating INTEGER")
+        if "rated_at" not in cols:
+            conn.execute("ALTER TABLE chat_turns ADD COLUMN rated_at TEXT")
+        for name, col_type in _FEEDBACK_COLUMNS:
+            if name not in cols:
+                conn.execute(f"ALTER TABLE chat_turns ADD COLUMN {name} {col_type}")
+
     def _save_sqlite(self, row: dict) -> None:
         SQLITE_PATH.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(SQLITE_PATH) as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS chat_turns (
-                    turn_id TEXT PRIMARY KEY,
-                    session_id TEXT NOT NULL,
-                    user_id TEXT NOT NULL,
-                    user_role TEXT,
-                    user_message TEXT,
-                    assistant_message TEXT,
-                    created_at TEXT NOT NULL,
-                    response_ms INTEGER,
-                    error TEXT,
-                    app_name TEXT,
-                    rating INTEGER,
-                    rated_at TEXT
-                )
-                """
-            )
-            self._ensure_sqlite_rating_columns(conn)
+            conn.execute(self._sqlite_create_table_sql())
+            self._ensure_sqlite_columns(conn)
             conn.execute(
                 """
                 INSERT INTO chat_turns (
                     turn_id, session_id, user_id, user_role,
                     user_message, assistant_message, created_at,
-                    response_ms, error, app_name, rating, rated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    response_ms, error, app_name, rating, rated_at,
+                    feedback_score, feedback_label, feedback_tags,
+                    feedback_comment, feedback_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     row["turn_id"],
@@ -238,45 +313,78 @@ class ConversationStore:
                     row["app_name"],
                     row.get("rating"),
                     row.get("rated_at"),
+                    row.get("feedback_score"),
+                    row.get("feedback_label"),
+                    row.get("feedback_tags"),
+                    row.get("feedback_comment"),
+                    row.get("feedback_at"),
                 ),
             )
             conn.commit()
 
-    def _ensure_sqlite_rating_columns(self, conn: sqlite3.Connection) -> None:
-        cols = {row[1] for row in conn.execute("PRAGMA table_info(chat_turns)")}
-        if "rating" not in cols:
-            conn.execute("ALTER TABLE chat_turns ADD COLUMN rating INTEGER")
-        if "rated_at" not in cols:
-            conn.execute("ALTER TABLE chat_turns ADD COLUMN rated_at TEXT")
-
-    def _save_rating_sqlite(self, turn_id: str, rating: int, rated_at: str) -> None:
+    def _save_feedback_sqlite(self, turn_id: str, payload: dict[str, Any]) -> None:
         SQLITE_PATH.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(SQLITE_PATH) as conn:
-            self._ensure_sqlite_rating_columns(conn)
+            self._ensure_sqlite_columns(conn)
             conn.execute(
-                "UPDATE chat_turns SET rating = ?, rated_at = ? WHERE turn_id = ?",
-                (rating, rated_at, turn_id),
+                """
+                UPDATE chat_turns SET
+                    rating = ?, rated_at = ?,
+                    feedback_score = ?, feedback_label = ?,
+                    feedback_tags = ?, feedback_comment = ?, feedback_at = ?
+                WHERE turn_id = ?
+                """,
+                (
+                    payload["rating"],
+                    payload["rated_at"],
+                    payload["feedback_score"],
+                    payload["feedback_label"],
+                    payload["feedback_tags"],
+                    payload["feedback_comment"],
+                    payload["feedback_at"],
+                    turn_id,
+                ),
             )
             conn.commit()
 
-    def _save_rating_bigquery(self, turn_id: str, rating: int, rated_at: str) -> None:
+    def _save_feedback_bigquery(self, turn_id: str, payload: dict[str, Any]) -> None:
         from google.cloud import bigquery
 
         self._init_bigquery()
         assert self._bq_client is not None and self._bq_table_id is not None
 
-        rated_at_bq = rated_at.replace("+00:00", "Z")
+        feedback_at_bq = payload["feedback_at"].replace("+00:00", "Z")
         query = f"""
             UPDATE `{self._bq_table_id}`
-            SET rating = @rating, rated_at = @rated_at
+            SET
+                rating = @rating,
+                rated_at = @rated_at,
+                feedback_score = @feedback_score,
+                feedback_label = @feedback_label,
+                feedback_tags = @feedback_tags,
+                feedback_comment = @feedback_comment,
+                feedback_at = @feedback_at
             WHERE turn_id = @turn_id
         """
         job = self._bq_client.query(
             query,
             job_config=bigquery.QueryJobConfig(
                 query_parameters=[
-                    bigquery.ScalarQueryParameter("rating", "INT64", rating),
-                    bigquery.ScalarQueryParameter("rated_at", "TIMESTAMP", rated_at_bq),
+                    bigquery.ScalarQueryParameter("rating", "INT64", payload["rating"]),
+                    bigquery.ScalarQueryParameter("rated_at", "TIMESTAMP", feedback_at_bq),
+                    bigquery.ScalarQueryParameter(
+                        "feedback_score", "INT64", payload["feedback_score"]
+                    ),
+                    bigquery.ScalarQueryParameter(
+                        "feedback_label", "STRING", payload["feedback_label"]
+                    ),
+                    bigquery.ScalarQueryParameter(
+                        "feedback_tags", "STRING", payload["feedback_tags"]
+                    ),
+                    bigquery.ScalarQueryParameter(
+                        "feedback_comment", "STRING", payload["feedback_comment"]
+                    ),
+                    bigquery.ScalarQueryParameter("feedback_at", "TIMESTAMP", feedback_at_bq),
                     bigquery.ScalarQueryParameter("turn_id", "STRING", turn_id),
                 ]
             ),
@@ -284,38 +392,39 @@ class ConversationStore:
         job.result()
         if job.num_dml_affected_rows == 0:
             log.warning(
-                "UPDATE de valoración no afectó filas (posible buffer de streaming): turn_id=%s",
+                "UPDATE de feedback no afectó filas (posible buffer de streaming): turn_id=%s",
                 turn_id,
             )
 
-    def _recent_negative_sqlite(self, limit: int) -> list[dict]:
+    def _recent_problematic_sqlite(self, limit: int) -> list[dict]:
         if not SQLITE_PATH.exists():
             return []
         with sqlite3.connect(SQLITE_PATH) as conn:
-            self._ensure_sqlite_rating_columns(conn)
+            self._ensure_sqlite_columns(conn)
             rows = conn.execute(
                 """
-                SELECT user_message, assistant_message, rated_at
+                SELECT user_message, assistant_message, feedback_label,
+                       feedback_tags, feedback_comment, feedback_at
                 FROM chat_turns
-                WHERE rating = -1
-                ORDER BY rated_at DESC
+                WHERE feedback_label IN ('parcial', 'no_resolvio')
+                   OR rating IN (0, -1)
+                ORDER BY COALESCE(feedback_at, rated_at) DESC
                 LIMIT ?
                 """,
                 (limit,),
             ).fetchall()
-        return [
-            {"user_message": r[0], "assistant_message": r[1], "rated_at": r[2]}
-            for r in rows
-        ]
+        return [self._row_to_feedback_example(r) for r in rows]
 
-    def _recent_negative_bigquery(self, limit: int) -> list[dict]:
+    def _recent_problematic_bigquery(self, limit: int) -> list[dict]:
         self._init_bigquery()
         assert self._bq_client is not None and self._bq_table_id is not None
         query = f"""
-            SELECT user_message, assistant_message, rated_at
+            SELECT user_message, assistant_message, feedback_label,
+                   feedback_tags, feedback_comment, feedback_at
             FROM `{self._bq_table_id}`
-            WHERE rating = -1
-            ORDER BY rated_at DESC
+            WHERE feedback_label IN ('parcial', 'no_resolvio')
+               OR rating IN (0, -1)
+            ORDER BY COALESCE(feedback_at, rated_at) DESC
             LIMIT @limit
         """
         from google.cloud import bigquery
@@ -329,13 +438,36 @@ class ConversationStore:
             ),
         ).result()
         return [
-            {
-                "user_message": row.user_message,
-                "assistant_message": row.assistant_message,
-                "rated_at": str(row.rated_at) if row.rated_at else None,
-            }
+            self._row_to_feedback_example(
+                (
+                    row.user_message,
+                    row.assistant_message,
+                    row.feedback_label,
+                    row.feedback_tags,
+                    row.feedback_comment,
+                    str(row.feedback_at) if row.feedback_at else None,
+                )
+            )
             for row in rows
         ]
+
+    @staticmethod
+    def _row_to_feedback_example(row: tuple) -> dict:
+        tags_raw = row[3]
+        tags: list[str] = []
+        if tags_raw:
+            try:
+                tags = json.loads(tags_raw)
+            except json.JSONDecodeError:
+                tags = [tags_raw]
+        return {
+            "user_message": row[0],
+            "assistant_message": row[1],
+            "feedback_label": row[2],
+            "feedback_tags": tags,
+            "feedback_comment": row[4],
+            "feedback_at": row[5],
+        }
 
     def count_turns(self) -> int | None:
         """Devuelve el número de turnos almacenados (útil para admins)."""
@@ -356,7 +488,7 @@ class ConversationStore:
             return None
 
     def count_ratings(self) -> dict[str, int] | None:
-        """Cuenta valoraciones positivas y negativas."""
+        """Cuenta feedback por categoría (útil, parcial, no resuelto)."""
         try:
             backend = self._resolve_backend()
             if backend == "bigquery":
@@ -365,25 +497,50 @@ class ConversationStore:
                 result = self._bq_client.query(
                     f"""
                     SELECT
-                      COUNTIF(rating = 1) AS thumbs_up,
-                      COUNTIF(rating = -1) AS thumbs_down
+                      COUNTIF(feedback_label = 'util' OR rating = 1) AS util,
+                      COUNTIF(feedback_label = 'parcial' OR rating = 0) AS parcial,
+                      COUNTIF(feedback_label = 'no_resolvio' OR rating = -1) AS no_resolvio
                     FROM `{self._bq_table_id}`
-                    WHERE rating IS NOT NULL
+                    WHERE rating IS NOT NULL OR feedback_label IS NOT NULL
                     """
                 ).result()
                 row = next(result)
-                return {"thumbs_up": row.thumbs_up, "thumbs_down": row.thumbs_down}
+                return {
+                    "util": row.util,
+                    "parcial": row.parcial,
+                    "no_resolvio": row.no_resolvio,
+                    "thumbs_up": row.util,
+                    "thumbs_down": row.no_resolvio,
+                }
             if not SQLITE_PATH.exists():
-                return {"thumbs_up": 0, "thumbs_down": 0}
+                return {"util": 0, "parcial": 0, "no_resolvio": 0, "thumbs_up": 0, "thumbs_down": 0}
             with sqlite3.connect(SQLITE_PATH) as conn:
-                self._ensure_sqlite_rating_columns(conn)
-                up = conn.execute(
-                    "SELECT COUNT(*) FROM chat_turns WHERE rating = 1"
+                self._ensure_sqlite_columns(conn)
+                util = conn.execute(
+                    """
+                    SELECT COUNT(*) FROM chat_turns
+                    WHERE feedback_label = 'util' OR rating = 1
+                    """
                 ).fetchone()[0]
-                down = conn.execute(
-                    "SELECT COUNT(*) FROM chat_turns WHERE rating = -1"
+                parcial = conn.execute(
+                    """
+                    SELECT COUNT(*) FROM chat_turns
+                    WHERE feedback_label = 'parcial' OR rating = 0
+                    """
                 ).fetchone()[0]
-                return {"thumbs_up": up, "thumbs_down": down}
+                no_resolvio = conn.execute(
+                    """
+                    SELECT COUNT(*) FROM chat_turns
+                    WHERE feedback_label = 'no_resolvio' OR rating = -1
+                    """
+                ).fetchone()[0]
+                return {
+                    "util": util,
+                    "parcial": parcial,
+                    "no_resolvio": no_resolvio,
+                    "thumbs_up": util,
+                    "thumbs_down": no_resolvio,
+                }
         except Exception:
             log.exception("No se pudo contar valoraciones")
             return None

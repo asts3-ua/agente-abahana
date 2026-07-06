@@ -674,18 +674,18 @@ def resumen_reservas(
 
 
 def consultar_feedback_negativo() -> dict[str, Any]:
-    """Consulta respuestas recientemente mal valoradas por los usuarios (👎).
+    """Consulta respuestas recientemente mal valoradas o parciales por los usuarios.
 
     Usa esta herramienta cuando quieras evitar repetir errores frecuentes
     o cuando el usuario indique que una respuesta anterior no fue útil.
-    Devuelve ejemplos de preguntas y respuestas que recibieron valoración negativa.
+    Devuelve ejemplos con motivos y comentarios cuando estén disponibles.
 
     Returns:
         Diccionario con 'examples' (lista) y 'count'.
     """
     from conversation_store import get_conversation_store
 
-    examples = get_conversation_store().get_recent_negative_examples(limit=8)
+    examples = get_conversation_store().get_recent_problematic_examples(limit=8)
     return {"examples": examples, "count": len(examples)}
 
 
@@ -727,10 +727,12 @@ en la Costa Blanca (España). Ayudas con villas Y con información turística lo
 - Cita las fuentes cuando uses información obtenida de internet.
 
 ## Retroalimentación de usuarios
-- El usuario puede valorar tus respuestas con 👍 o 👎.
+- El usuario puede valorar tus respuestas como **Útil**, **Parcial** o **No resolvió**.
+- En valoraciones parciales o negativas puede indicar motivos (datos faltantes, mala interpretación,
+  resultados poco relevantes, respuesta genérica) y un comentario libre.
 - Si recibes contexto de retroalimentación en el mensaje, ajústalo en consecuencia.
-- Usa `consultar_feedback_negativo()` si necesitas ver qué respuestas han fallado
-  recientemente en otras conversaciones para no repetir los mismos errores.
+- Usa `consultar_feedback_negativo()` si necesitas ver qué respuestas han fallado o quedado
+  incompletas recientemente en otras conversaciones para no repetir los mismos errores.
 """.strip()
 
 INSTRUCTION_CLIENTE = f"""{_INSTRUCCION_BASE}
@@ -745,7 +747,7 @@ INSTRUCTION_CLIENTE = f"""{_INSTRUCCION_BASE}
   aviso legal, condiciones, contacto, destinos…).
 - `buscar_internet(consulta)`: búsqueda en internet (fiestas, eventos, clima,
   atracciones, horarios de pueblos de la Costa Blanca…). OBLIGATORIO para esas preguntas.
-- `consultar_feedback_negativo()`: respuestas mal valoradas recientemente por usuarios.
+- `consultar_feedback_negativo()`: respuestas parciales o no resueltas recientemente, con motivos.
 """.strip()
 
 INSTRUCTION_INTERNO = f"""{_INSTRUCCION_BASE}
@@ -772,7 +774,7 @@ INSTRUCTION_INTERNO = f"""{_INSTRUCCION_BASE}
   aviso legal, condiciones, contacto, destinos…).
 - `buscar_internet(consulta)`: búsqueda en internet (fiestas, eventos, clima,
   atracciones, horarios de pueblos de la Costa Blanca…). OBLIGATORIO para esas preguntas.
-- `consultar_feedback_negativo()`: respuestas mal valoradas recientemente por usuarios.
+- `consultar_feedback_negativo()`: respuestas parciales o no resueltas recientemente, con motivos.
 
 ## Contexto de uso interno
 Eres la versión para agentes de ventas y equipo interno. Puedes mostrar la dirección
@@ -801,7 +803,7 @@ INSTRUCTION_ADMIN = f"""{_INSTRUCCION_BASE}
   aviso legal, condiciones, contacto, destinos…).
 - `buscar_internet(consulta)`: búsqueda en internet (fiestas, eventos, clima,
   atracciones, horarios de pueblos de la Costa Blanca…). OBLIGATORIO para esas preguntas.
-- `consultar_feedback_negativo()`: respuestas mal valoradas recientemente por usuarios.
+- `consultar_feedback_negativo()`: respuestas parciales o no resueltas recientemente, con motivos.
 
 ## Contexto de uso
 Eres la versión de administración. Tienes acceso completo a todos los datos disponibles.
