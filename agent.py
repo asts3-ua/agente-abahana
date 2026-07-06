@@ -28,6 +28,15 @@ PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "abahanaweb")
 DATASET = "silver_clean"
 TABLA_VILLA = f"`{PROJECT_ID}.{DATASET}.stg_etendo_Villa`"
 TABLA_RESERVAS = f"`{PROJECT_ID}.{DATASET}.stg_etendo_Reserva`"
+TABLA_PLANTA = f"`{PROJECT_ID}.{DATASET}.stg_etendo_Planta`"
+TABLA_BANIO = f"`{PROJECT_ID}.{DATASET}.stg_etendo_Banio`"
+TABLA_FICHA_TECNICA = f"`{PROJECT_ID}.{DATASET}.stg_etendo_opxdes_ficha_tecnica`"
+
+# stg_etendo_Villa trae filas duplicadas por villa_id (misma villa varias veces).
+# Este filtro se aplica siempre para quedarnos con una sola fila por villa.
+_DEDUP_VILLA = (
+    "QUALIFY ROW_NUMBER() OVER (PARTITION BY villa_id ORDER BY fecha_actualizacion DESC) = 1"
+)
 
 _bq = bigquery.Client(project=PROJECT_ID, location="EU")
 _BILLING_CAP = 50 * 1024 * 1024  # 50 MB — tablas silver_clean materializadas
@@ -64,18 +73,36 @@ def listar_propiedades() -> dict[str, Any]:
     sin especificar filtros.
     """
     query = f"""
+        WITH villa_dedup AS (
+            SELECT *
+            FROM {TABLA_VILLA}
+            WHERE es_activo = TRUE AND es_visible = TRUE
+            {_DEDUP_VILLA}
+        ),
+        ficha AS (
+            SELECT
+                propiedad_codigo,
+                ANY_VALUE(tiene_internet) AS tiene_internet,
+                ANY_VALUE(tiene_aire_salon) AS tiene_aire_acondicionado,
+                ANY_VALUE(tiene_lavadora) AS tiene_lavadora,
+                ANY_VALUE(tiene_lavavajillas) AS tiene_lavavajillas
+            FROM {TABLA_FICHA_TECNICA}
+            WHERE propiedad_codigo IS NOT NULL
+            GROUP BY propiedad_codigo
+        )
         SELECT
-            nombre, tipovilla_nombre_comercial, tipovilla_descripcion,
-            capacidad_pax, capacidad_camas, numero_banos, numero_plantas,
-            m2_habitables, m2_parcela,
-            tiene_piscina_privada, tiene_piscina_comun, piscina_climatizada,
-            tiene_jardin, tiene_garaje, admite_animales,
-            pueblo_cercano, zona, region,
-            rating_exterior, rating_interior, rating_vistas,
-            es_activo, es_visible, es_recomendada
-        FROM {TABLA_VILLA}
-        WHERE es_activo = TRUE AND es_visible = TRUE
-        ORDER BY nombre
+            v.nombre, v.tipovilla_nombre_comercial, v.tipovilla_descripcion,
+            v.capacidad_pax, v.capacidad_camas, v.numero_banos, v.numero_plantas,
+            v.m2_habitables, v.m2_parcela,
+            v.tiene_piscina_privada, v.tiene_piscina_comun, v.piscina_climatizada,
+            v.tiene_jardin, v.tiene_garaje, v.admite_animales,
+            f.tiene_internet, f.tiene_aire_acondicionado, f.tiene_lavadora, f.tiene_lavavajillas,
+            v.pueblo_cercano, v.zona, v.region,
+            v.rating_exterior, v.rating_interior, v.rating_vistas,
+            v.es_activo, v.es_visible, v.es_recomendada
+        FROM villa_dedup v
+        LEFT JOIN ficha f ON SAFE_CAST(v.codigo_busqueda AS INT64) = f.propiedad_codigo
+        ORDER BY v.nombre
     """
     try:
         rows = list(_bq.query(
@@ -98,6 +125,10 @@ def buscar_propiedades(
     metros_habitables_min: int | None = None,
     piscina: bool | None = None,
     admite_animales: bool | None = None,
+    internet: bool | None = None,
+    aire_acondicionado: bool | None = None,
+    lavadora: bool | None = None,
+    lavavajillas: bool | None = None,
     texto: str | None = None,
 ) -> dict[str, Any]:
     """Busca propiedades aplicando cualquier combinación de filtros.
@@ -114,62 +145,97 @@ def buscar_propiedades(
         metros_habitables_min: Metros habitables mínimos.
         piscina: True para exigir piscina privada.
         admite_animales: True para propiedades que admiten mascotas.
+        internet: True para exigir wifi/internet.
+        aire_acondicionado: True para exigir aire acondicionado (dato registrado
+            a nivel de salón, puede no cubrir el resto de la villa).
+        lavadora: True para exigir lavadora.
+        lavavajillas: True para exigir lavavajillas.
         texto: Busca en nombre y tipo de villa.
 
     Returns:
         Diccionario con 'matches' (lista de propiedades, máx. 20) y 'count'.
     """
-    conditions: list[str] = ["es_activo = TRUE", "es_visible = TRUE"]
+    conditions: list[str] = ["v.es_activo = TRUE", "v.es_visible = TRUE"]
     params: list[bigquery.ScalarQueryParameter] = []
 
     if ubicacion:
-        conditions.append("LOWER(pueblo_cercano) LIKE LOWER(@ubicacion)")
+        conditions.append("LOWER(v.pueblo_cercano) LIKE LOWER(@ubicacion)")
         params.append(bigquery.ScalarQueryParameter("ubicacion", "STRING", f"%{ubicacion.strip()}%"))
 
     if zona:
-        conditions.append("LOWER(zona) LIKE LOWER(@zona)")
+        conditions.append("LOWER(v.zona) LIKE LOWER(@zona)")
         params.append(bigquery.ScalarQueryParameter("zona", "STRING", f"%{zona.strip()}%"))
 
     if capacidad_min is not None:
-        conditions.append("capacidad_pax >= @capacidad_min")
+        conditions.append("v.capacidad_pax >= @capacidad_min")
         params.append(bigquery.ScalarQueryParameter("capacidad_min", "INT64", capacidad_min))
 
     if camas_min is not None:
-        conditions.append("capacidad_camas >= @camas_min")
+        conditions.append("v.capacidad_camas >= @camas_min")
         params.append(bigquery.ScalarQueryParameter("camas_min", "INT64", camas_min))
 
     if banos_min is not None:
-        conditions.append("numero_banos >= @banos_min")
+        conditions.append("v.numero_banos >= @banos_min")
         params.append(bigquery.ScalarQueryParameter("banos_min", "INT64", banos_min))
 
     if metros_habitables_min is not None:
-        conditions.append("m2_habitables >= @metros_habitables_min")
+        conditions.append("v.m2_habitables >= @metros_habitables_min")
         params.append(bigquery.ScalarQueryParameter("metros_habitables_min", "INT64", int(metros_habitables_min)))
 
     if piscina is not None:
-        conditions.append(f"tiene_piscina_privada = {'TRUE' if piscina else 'FALSE'}")
+        conditions.append(f"v.tiene_piscina_privada = {'TRUE' if piscina else 'FALSE'}")
 
     if admite_animales is not None:
-        conditions.append(f"admite_animales = {'TRUE' if admite_animales else 'FALSE'}")
+        conditions.append(f"v.admite_animales = {'TRUE' if admite_animales else 'FALSE'}")
+
+    if internet is not None:
+        conditions.append(f"f.tiene_internet = {'TRUE' if internet else 'FALSE'}")
+
+    if aire_acondicionado is not None:
+        conditions.append(f"f.tiene_aire_acondicionado = {'TRUE' if aire_acondicionado else 'FALSE'}")
+
+    if lavadora is not None:
+        conditions.append(f"f.tiene_lavadora = {'TRUE' if lavadora else 'FALSE'}")
+
+    if lavavajillas is not None:
+        conditions.append(f"f.tiene_lavavajillas = {'TRUE' if lavavajillas else 'FALSE'}")
 
     if texto:
         conditions.append(
-            "(LOWER(nombre) LIKE LOWER(@texto) OR LOWER(tipovilla_descripcion) LIKE LOWER(@texto))"
+            "(LOWER(v.nombre) LIKE LOWER(@texto) OR LOWER(v.tipovilla_descripcion) LIKE LOWER(@texto))"
         )
         params.append(bigquery.ScalarQueryParameter("texto", "STRING", f"%{texto.strip()}%"))
 
     where = f"WHERE {' AND '.join(conditions)}"
     query = f"""
+        WITH villa_dedup AS (
+            SELECT *
+            FROM {TABLA_VILLA}
+            {_DEDUP_VILLA}
+        ),
+        ficha AS (
+            SELECT
+                propiedad_codigo,
+                ANY_VALUE(tiene_internet) AS tiene_internet,
+                ANY_VALUE(tiene_aire_salon) AS tiene_aire_acondicionado,
+                ANY_VALUE(tiene_lavadora) AS tiene_lavadora,
+                ANY_VALUE(tiene_lavavajillas) AS tiene_lavavajillas
+            FROM {TABLA_FICHA_TECNICA}
+            WHERE propiedad_codigo IS NOT NULL
+            GROUP BY propiedad_codigo
+        )
         SELECT
-            nombre, tipovilla_nombre_comercial, tipovilla_descripcion,
-            capacidad_pax, capacidad_camas, numero_banos,
-            m2_habitables,
-            tiene_piscina_privada, tiene_jardin, tiene_garaje, admite_animales,
-            pueblo_cercano, zona, region,
-            rating_exterior, rating_interior, rating_vistas
-        FROM {TABLA_VILLA}
+            v.nombre, v.tipovilla_nombre_comercial, v.tipovilla_descripcion,
+            v.capacidad_pax, v.capacidad_camas, v.numero_banos,
+            v.m2_habitables,
+            v.tiene_piscina_privada, v.tiene_jardin, v.tiene_garaje, v.admite_animales,
+            f.tiene_internet, f.tiene_aire_acondicionado, f.tiene_lavadora, f.tiene_lavavajillas,
+            v.pueblo_cercano, v.zona, v.region,
+            v.rating_exterior, v.rating_interior, v.rating_vistas
+        FROM villa_dedup v
+        LEFT JOIN ficha f ON SAFE_CAST(v.codigo_busqueda AS INT64) = f.propiedad_codigo
         {where}
-        ORDER BY nombre
+        ORDER BY v.nombre
         LIMIT 20
     """
 
@@ -247,6 +313,7 @@ def buscar_por_valoracion(
                 ) AS rating_medio
             FROM {TABLA_VILLA}
             WHERE es_activo = TRUE AND es_visible = TRUE
+            {_DEDUP_VILLA}
         )
         SELECT * FROM base
         {where}
@@ -275,7 +342,10 @@ def obtener_detalle_propiedad(nombre: str) -> dict[str, Any]:
 
     Usa cuando el usuario pregunte por una villa concreta por su nombre,
     quiera más información sobre una propiedad, o pida ver todos los detalles.
-    Incluye dirección completa, coordenadas, métricas de habitaciones y ratings.
+    Incluye dirección completa, coordenadas, métricas de habitaciones, ratings,
+    amenidades (internet, aire acondicionado, lavadora, lavavajillas) y el
+    desglose real de los baños (cuántos tienen bañera, ducha, jacuzzi, bidé
+    o son en-suite).
 
     Args:
         nombre: Nombre o parte del nombre de la propiedad.
@@ -285,18 +355,56 @@ def obtener_detalle_propiedad(nombre: str) -> dict[str, Any]:
     """
     params = [bigquery.ScalarQueryParameter("nombre", "STRING", f"%{nombre.strip()}%")]
     query = f"""
+        WITH villa_dedup AS (
+            SELECT *
+            FROM {TABLA_VILLA}
+            WHERE LOWER(nombre) LIKE LOWER(@nombre) AND es_activo = TRUE
+            {_DEDUP_VILLA}
+        ),
+        banios_detalle AS (
+            SELECT
+                v.villa_id,
+                COUNT(b.banio_id) AS banios_con_detalle,
+                COUNTIF(b.tiene_baniera OR b.tiene_baniera_suelta) AS banios_con_banera,
+                COUNTIF(
+                    b.tiene_ducha OR b.tiene_ducha_plato OR b.tiene_ducha_obra
+                    OR b.tiene_ducha_hidromasaje
+                ) AS banios_con_ducha,
+                COUNTIF(b.tiene_jacuzzi OR b.tiene_baniera_jacuzzi) AS banios_con_jacuzzi,
+                COUNTIF(b.tiene_bide) AS banios_con_bide,
+                COUNTIF(b.es_ensuite) AS banios_ensuite
+            FROM villa_dedup v
+            JOIN {TABLA_PLANTA} p ON v.villa_id = p.villa_id
+            JOIN {TABLA_BANIO} b ON b.planta_id = p.planta_id AND b.es_activo = TRUE
+            GROUP BY v.villa_id
+        ),
+        ficha AS (
+            SELECT
+                propiedad_codigo,
+                ANY_VALUE(tiene_internet) AS tiene_internet,
+                ANY_VALUE(tiene_aire_salon) AS tiene_aire_acondicionado,
+                ANY_VALUE(tiene_lavadora) AS tiene_lavadora,
+                ANY_VALUE(tiene_lavavajillas) AS tiene_lavavajillas
+            FROM {TABLA_FICHA_TECNICA}
+            WHERE propiedad_codigo IS NOT NULL
+            GROUP BY propiedad_codigo
+        )
         SELECT
-            nombre, tipovilla_nombre_comercial, tipovilla_descripcion,
-            anio_construccion, m2_parcela, m2_habitables,
-            capacidad_pax, capacidad_camas, numero_banos, numero_plantas,
-            tiene_piscina_privada, tiene_piscina_comun, piscina_climatizada,
-            tiene_jardin, tiene_garaje, admite_animales,
-            pueblo_cercano, zona, region, direccion,
-            latitud, longitud,
-            rating_exterior, rating_interior, rating_vistas,
-            propietario_nombre, es_recomendada, es_novedad
-        FROM {TABLA_VILLA}
-        WHERE LOWER(nombre) LIKE LOWER(@nombre) AND es_activo = TRUE
+            v.nombre, v.tipovilla_nombre_comercial, v.tipovilla_descripcion,
+            v.anio_construccion, v.m2_parcela, v.m2_habitables,
+            v.capacidad_pax, v.capacidad_camas, v.numero_banos, v.numero_plantas,
+            v.tiene_piscina_privada, v.tiene_piscina_comun, v.piscina_climatizada,
+            v.tiene_jardin, v.tiene_garaje, v.admite_animales,
+            f.tiene_internet, f.tiene_aire_acondicionado, f.tiene_lavadora, f.tiene_lavavajillas,
+            bd.banios_con_detalle, bd.banios_con_banera, bd.banios_con_ducha,
+            bd.banios_con_jacuzzi, bd.banios_con_bide, bd.banios_ensuite,
+            v.pueblo_cercano, v.zona, v.region, v.direccion,
+            v.latitud, v.longitud,
+            v.rating_exterior, v.rating_interior, v.rating_vistas,
+            v.propietario_nombre, v.es_recomendada, v.es_novedad
+        FROM villa_dedup v
+        LEFT JOIN banios_detalle bd ON v.villa_id = bd.villa_id
+        LEFT JOIN ficha f ON SAFE_CAST(v.codigo_busqueda AS INT64) = f.propiedad_codigo
         LIMIT 5
     """
 
@@ -740,7 +848,8 @@ INSTRUCTION_CLIENTE = f"""{_INSTRUCCION_BASE}
 ## Herramientas disponibles
 - `listar_propiedades()`: catálogo completo sin filtros.
 - `buscar_propiedades(...)`: búsqueda con filtros: ubicación, zona, capacidad, camas,
-  baños, metros habitables, piscina privada, mascotas.
+  baños, metros habitables, piscina privada, mascotas, internet, aire acondicionado,
+  lavadora, lavavajillas.
 - `buscar_por_valoracion(...)`: cuando el usuario pida villas bien valoradas o con
   un rating mínimo (rating_exterior, rating_interior, rating_vistas en escala 1-6).
 - `consultar_web(url)`: información corporativa de la web (política de privacidad,
@@ -755,12 +864,15 @@ INSTRUCTION_INTERNO = f"""{_INSTRUCCION_BASE}
 ## Herramientas disponibles
 - `listar_propiedades()`: catálogo completo sin filtros.
 - `buscar_propiedades(...)`: búsqueda con filtros: ubicación, zona, capacidad, camas,
-  baños, metros habitables, piscina privada, mascotas.
+  baños, metros habitables, piscina privada, mascotas, internet, aire acondicionado,
+  lavadora, lavavajillas.
 - `buscar_por_valoracion(...)`: cuando el usuario pida villas bien valoradas o con
   un rating mínimo.
 - `obtener_detalle_propiedad(nombre)`: ficha completa con dirección, coordenadas,
-  desglose de camas, metros habitables y ratings por categoría. Úsala cuando el
-  usuario pregunte por una villa concreta o pida más detalles.
+  desglose de camas, metros habitables, ratings por categoría, amenidades
+  (internet, aire acondicionado, lavadora, lavavajillas) y desglose real de los
+  baños (cuántos tienen bañera, ducha, jacuzzi, bidé o son en-suite). Úsala
+  cuando el usuario pregunte por una villa concreta o pida más detalles.
 - `consultar_reservas(...)`: reservas individuales con fechas de entrada/salida,
   importe, cliente y estado. Filtra por villa, ubicación, zona, piscina, rango de
   fechas, estado_reserva ('RE'=realizada, 'PE'=pendiente, 'CA'=cancelada,
@@ -786,11 +898,14 @@ INSTRUCTION_ADMIN = f"""{_INSTRUCCION_BASE}
 ## Herramientas disponibles
 - `listar_propiedades()`: catálogo completo sin filtros.
 - `buscar_propiedades(...)`: búsqueda con filtros: ubicación, zona, capacidad, camas,
-  baños, metros habitables, piscina privada, mascotas.
+  baños, metros habitables, piscina privada, mascotas, internet, aire acondicionado,
+  lavadora, lavavajillas.
 - `buscar_por_valoracion(...)`: cuando el usuario pida villas bien valoradas o con
   un rating mínimo (rating_exterior, rating_interior, rating_vistas en escala 1-6).
 - `obtener_detalle_propiedad(nombre)`: ficha completa con dirección, coordenadas,
-  metros, ratings y propietario.
+  metros, ratings, propietario, amenidades (internet, aire acondicionado,
+  lavadora, lavavajillas) y desglose real de los baños (bañera, ducha, jacuzzi,
+  bidé, en-suite).
 - `consultar_reservas(...)`: reservas individuales con fechas de entrada/salida,
   importe y estado. Filtra por villa, ubicación, zona, piscina, rango de fechas,
   estado_reserva ('RE'=realizada, 'PE'=pendiente, 'CA'=cancelada, 'NS'=no show,

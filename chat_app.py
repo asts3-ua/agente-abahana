@@ -90,7 +90,12 @@ FEEDBACK_LABEL_DISPLAY = {
     "no_resolvio": "No resolvió",
 }
 
-_session_service = InMemorySessionService()
+@st.cache_resource
+def _get_session_service() -> InMemorySessionService:
+    return InMemorySessionService()
+
+
+_session_service = _get_session_service()
 
 # ---------------------------------------------------------------------------
 # OAuth config (leído de secrets.toml → [google_oauth])
