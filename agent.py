@@ -29,7 +29,7 @@ DATASET = "silver_clean"
 TABLA_VILLA = f"`{PROJECT_ID}.{DATASET}.stg_etendo_Villa`"
 TABLA_RESERVAS = f"`{PROJECT_ID}.{DATASET}.stg_etendo_Reserva`"
 TABLA_PLANTA = f"`{PROJECT_ID}.{DATASET}.stg_etendo_Planta`"
-TABLA_BANIO = f"`{PROJECT_ID}.{DATASET}.stg_etendo_Banio`"
+TABLA_BANIO = f"`{PROJECT_ID}.{DATASET}.stg_etendo_OV_Banios`"
 TABLA_FICHA_TECNICA = f"`{PROJECT_ID}.{DATASET}.stg_etendo_opxdes_ficha_tecnica`"
 
 # stg_etendo_Villa trae filas duplicadas por villa_id (misma villa varias veces).
@@ -370,9 +370,9 @@ def obtener_detalle_propiedad(nombre: str) -> dict[str, Any]:
                     b.tiene_ducha OR b.tiene_ducha_plato OR b.tiene_ducha_obra
                     OR b.tiene_ducha_hidromasaje
                 ) AS banios_con_ducha,
-                COUNTIF(b.tiene_jacuzzi OR b.tiene_baniera_jacuzzi) AS banios_con_jacuzzi,
+                COUNTIF(b.tiene_jacuzzi OR b.tiene_jacuzzi_baniera) AS banios_con_jacuzzi,
                 COUNTIF(b.tiene_bide) AS banios_con_bide,
-                COUNTIF(b.es_ensuite) AS banios_ensuite
+                COUNTIF(b.es_en_suite) AS banios_ensuite
             FROM villa_dedup v
             JOIN {TABLA_PLANTA} p ON v.villa_id = p.villa_id
             JOIN {TABLA_BANIO} b ON b.planta_id = p.planta_id AND b.es_activo = TRUE
