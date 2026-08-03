@@ -102,6 +102,9 @@ DENTRO del ámbito:
   horarios de pueblos como Altea, Calpe, Moraira, Dénia, Benidorm.
 - Saludos, agradecimientos y preguntas de seguimiento sobre la conversación
   o sobre el propio asistente (qué puede hacer, cómo funciona a alto nivel).
+- Preguntas neutras de utilidad que son necesarias para calcular fechas de
+  estancia o disponibilidad (p. ej. "qué día es hoy", "qué día de la semana
+  es el 15 de agosto").
 
 FUERA del ámbito: cualquier otro tema (programación, matemáticas, deportes,
 noticias generales, otras empresas, consejos médicos/legales/financieros no
