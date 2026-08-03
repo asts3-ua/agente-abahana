@@ -1,0 +1,253 @@
+tabla,columna,descripcion,codigo,nombre
+OBRE_Resource,EM_Ovjch_Statelimpieza,ListadoEstadosLimpieza,LL,Lista
+OBRE_Resource,EM_Ovjch_Statelimpieza,ListadoEstadosLimpieza,ND,No disponible
+OBRE_Resource,EM_Ovjch_Statelimpieza,ListadoEstadosLimpieza,DD,Disponible
+OBRE_Resource,EM_Ovjch_Statelimpieza,ListadoEstadosLimpieza,RL,Repaso Limpieza
+OBRE_Resource,EM_Ovjch_Statelimpieza,ListadoEstadosLimpieza,EC,Estancia
+OBRE_Resource,EM_Ovjch_Statelimpieza,ListadoEstadosLimpieza,LC,Limpieza en Curso
+OBRE_Resource,EM_Ovjch_Statelimpieza,ListadoEstadosLimpieza,LF,Limpieza Finalizada
+opxdes_ficha_tecnica,Acceso,Lista Acceso Peatonal,O,Otro
+opxdes_ficha_tecnica,Acceso,Lista Acceso Peatonal,LL,LLano
+opxdes_ficha_tecnica,Acceso,Lista Acceso Peatonal,E,Escalera
+opxdes_ficha_tecnica,BBQ_Portatil,Barbacoa,car,Carbon
+opxdes_ficha_tecnica,BBQ_Portatil,Barbacoa,gas,Gas
+opxdes_ficha_tecnica,Clas_Energetica,Clasificación Energética Nueva,C,C
+opxdes_ficha_tecnica,Clas_Energetica,Clasificación Energética Nueva,AP,A+
+opxdes_ficha_tecnica,Clas_Energetica,Clasificación Energética Nueva,E,E
+opxdes_ficha_tecnica,Clas_Energetica,Clasificación Energética Nueva,F,F
+opxdes_ficha_tecnica,Clas_Energetica,Clasificación Energética Nueva,G,G
+opxdes_ficha_tecnica,Clas_Energetica,Clasificación Energética Nueva,D,D
+opxdes_ficha_tecnica,Clas_Energetica,Clasificación Energética Nueva,APP,A++
+opxdes_ficha_tecnica,Clas_Energetica,Clasificación Energética Nueva,APPP,A+++
+opxdes_ficha_tecnica,Clas_Energetica,Clasificación Energética Nueva,B,B
+opxdes_ficha_tecnica,Clas_Energetica,Clasificación Energética Nueva,A,A
+opxdes_ficha_tecnica,EM_Ovjch_Acceso_Coche,Lista Acceso Coche,R,Rampa
+opxdes_ficha_tecnica,EM_Ovjch_Acceso_Coche,Lista Acceso Coche,LL,LLano
+opxdes_ficha_tecnica,EM_Ovjch_Acceso_Coche,Lista Acceso Coche,O,Otro
+opxdes_ficha_tecnica,EM_Ovjch_Barbacoa,Lista Tipo Barbacoa,OE,Obra Eléctrica
+opxdes_ficha_tecnica,EM_Ovjch_Barbacoa,Lista Tipo Barbacoa,OC,Obra Carbón
+opxdes_ficha_tecnica,EM_Ovjch_Barbacoa,Lista Tipo Barbacoa,OG,Obra Gas
+opxdes_ficha_tecnica,EM_Ovjch_Barbacoa,Lista Tipo Barbacoa,PGN,Portatil Gas Normal
+opxdes_ficha_tecnica,EM_Ovjch_Barbacoa,Lista Tipo Barbacoa,PGP,Portatil Gas Premium
+opxdes_ficha_tecnica,EM_Ovjch_Cafeteras,Modelo de Cafeteras,N,Nespresso
+opxdes_ficha_tecnica,EM_Ovjch_Cafeteras,Modelo de Cafeteras,S,Senseo
+opxdes_ficha_tecnica,EM_Ovjch_Cafeteras,Modelo de Cafeteras,T,Tassimo
+opxdes_ficha_tecnica,EM_Ovjch_Cafeteras,Modelo de Cafeteras,CE,Cafetera Express
+opxdes_ficha_tecnica,EM_Ovjch_Cafeteras,Modelo de Cafeteras,CG,Cafetera de Goteo
+opxdes_ficha_tecnica,EM_Ovjch_Cafeteras,Modelo de Cafeteras,CI,Cafetera italiana
+opxdes_ficha_tecnica,EM_Ovjch_Cafeteras,Modelo de Cafeteras,DG,Dolce Gusto
+opxdes_ficha_tecnica,EM_Ovjch_Escaleras,Lista Escaleras,I,Interior
+opxdes_ficha_tecnica,EM_Ovjch_Escaleras,Lista Escaleras,A,Ambas
+opxdes_ficha_tecnica,EM_Ovjch_Escaleras,Lista Escaleras,E,Exterior
+opxdes_ficha_tecnica,EM_Ovjch_Juegos,Lista Consola de Juegos,XB,Xbox
+opxdes_ficha_tecnica,EM_Ovjch_Juegos,Lista Consola de Juegos,NW,Wii
+opxdes_ficha_tecnica,EM_Ovjch_Juegos,Lista Consola de Juegos,OT,Otros
+opxdes_ficha_tecnica,EM_Ovjch_Juegos,Lista Consola de Juegos,PS,Playstation
+opxdes_ficha_tecnica,EM_Ovjch_Listaaguacaliente,Lista Tipo Agua Caliente,A,Altherma
+opxdes_ficha_tecnica,EM_Ovjch_Listaaguacaliente,Lista Tipo Agua Caliente,T,Termo Eléctrico
+opxdes_ficha_tecnica,EM_Ovjch_Listaaguacaliente,Lista Tipo Agua Caliente,S,Solar
+opxdes_ficha_tecnica,EM_Ovjch_Listaaguacaliente,Lista Tipo Agua Caliente,CGA,Caldera Gas
+opxdes_ficha_tecnica,EM_Ovjch_Listaaguacaliente,Lista Tipo Agua Caliente,CG,Caldera Gasoil
+opxdes_ficha_tecnica,EM_Ovjch_Orientacion,Lista Orientación,S,Sur
+opxdes_ficha_tecnica,EM_Ovjch_Orientacion,Lista Orientación,E,Este
+opxdes_ficha_tecnica,EM_Ovjch_Orientacion,Lista Orientación,N,Norte
+opxdes_ficha_tecnica,EM_Ovjch_Orientacion,Lista Orientación,O,Oeste
+opxdes_ficha_tecnica,EM_Ovjch_Puerta_Garaje,Lista Puerta Acceso,ACP,Automática/Con Puerta Peatonal
+opxdes_ficha_tecnica,EM_Ovjch_Puerta_Garaje,Lista Puerta Acceso,SP,Automática/Sin Puerta Peatonal
+opxdes_ficha_tecnica,EM_Ovjch_Puerta_Garaje,Lista Puerta Acceso,A,Automática
+opxdes_ficha_tecnica,EM_Ovjch_Puerta_Garaje,Lista Puerta Acceso,MP,Manual/Sin Puerta Peatonal
+opxdes_ficha_tecnica,EM_Ovjch_Puerta_Garaje,Lista Puerta Acceso,MCP,Manual/Con Puerta Peatonal
+opxdes_ficha_tecnica,EM_Ovjch_Puerta_Garaje,Lista Puerta Acceso,M,Manual
+opxdes_ficha_tecnica,EM_Ovjch_Puerta_Parking,Lista Puerta Acceso,MP,Manual/Sin Puerta Peatonal
+opxdes_ficha_tecnica,EM_Ovjch_Puerta_Parking,Lista Puerta Acceso,MCP,Manual/Con Puerta Peatonal
+opxdes_ficha_tecnica,EM_Ovjch_Puerta_Parking,Lista Puerta Acceso,M,Manual
+opxdes_ficha_tecnica,EM_Ovjch_Puerta_Parking,Lista Puerta Acceso,ACP,Automática/Con Puerta Peatonal
+opxdes_ficha_tecnica,EM_Ovjch_Puerta_Parking,Lista Puerta Acceso,A,Automática
+opxdes_ficha_tecnica,EM_Ovjch_Puerta_Parking,Lista Puerta Acceso,SP,Automática/Sin Puerta Peatonal
+opxdes_ficha_tecnica,EM_Ovjch_Tipowifi,Lista Tipo Wifi,F300,Fibra > 300 MG
+opxdes_ficha_tecnica,EM_Ovjch_Tipowifi,Lista Tipo Wifi,F10E300,Fibra entre 10-300 MG
+opxdes_ficha_tecnica,EM_Ovjch_Tipowifi,Lista Tipo Wifi,F,FIBRA
+opxdes_ficha_tecnica,EM_Ovjch_Tipowifi,Lista Tipo Wifi,A10E99,Adsl entre 10-99 MG
+opxdes_ficha_tecnica,EM_Ovjch_Tipowifi,Lista Tipo Wifi,R,Radio
+opxdes_ficha_tecnica,EM_Ovjch_Tipowifi,Lista Tipo Wifi,A10,Adsl inferior 10 MG
+opxdes_ficha_tecnica,EM_Ovjch_Tipowifi,Lista Tipo Wifi,A,ADSL
+opxdes_ficha_tecnica,EM_Ovjch_Usoalarma,Lista Uso Alarma,L,Lagrima
+opxdes_ficha_tecnica,EM_Ovjch_Usoalarma,Lista Uso Alarma,C,Clave
+opxdes_ficha_tecnica,EM_Ovjch_Usoalarma,Lista Uso Alarma,LC,Lagrima/Clave
+opxdes_ficha_tecnica,EM_Ovjch_Usoalarma,Lista Uso Alarma,M,Mando
+opxdes_ficha_tecnica,EM_Ovjch_Usoalarma,Lista Uso Alarma,ND,No dispone
+opxdes_ficha_tecnica,EM_Ovjch_Usoalarma,Lista Uso Alarma,SU,Sin uso
+opxdes_ficha_tecnica,EM_Ovjch_Usoalarma,Lista Uso Alarma,UP,Uso Propietario
+opxdes_ficha_tecnica,Satelite,Satelite,hot,HotBird
+opxdes_ficha_tecnica,Satelite,Satelite,as19,Astra 19.2
+opxdes_ficha_tecnica,Satelite,Satelite,as23,Astra 23.5
+opxdes_ficha_tecnica,Satelite,Satelite,as28,Astra 28.2
+opxdes_ficha_tecnica,Satelite,Satelite,fre,FreeSky
+opxdes_ficha_tecnica,Satelite,Satelite,no,No
+opxdes_ficha_tecnica,Satelite,Satelite,as,Astra
+opxdes_ficha_tecnica,Tipo_Parcela,Tipo Parcela Villa,P,Plana
+opxdes_ficha_tecnica,Tipo_Parcela,Tipo Parcela Villa,A,Abierta
+opxdes_ficha_tecnica,Tipo_Parcela,Tipo Parcela Villa,C,Cerrada
+opxdes_ficha_tecnica,Tipo_Parcela,Tipo Parcela Villa,I,Inclinada
+opxdes_ficha_tecnica,Tipo_Parcela,Tipo Parcela Villa,S,Semi
+opxdes_ficha_tecnica,Tipo_Terreno,Tipo Terreno,lla,Llano
+opxdes_ficha_tecnica,Tipo_Terreno,Tipo Terreno,inc,Inclinado
+OV_Banios,EM_Ovjch_Mampara,Tipo Mampara Ducha,C,Cristal
+OV_Banios,EM_Ovjch_Mampara,Tipo Mampara Ducha,CO,Cortina
+OV_Banios,EM_Ovjch_Mampara,Tipo Mampara Ducha,A,Acrílico
+OV_Banios,EM_Ovjch_Mampara,Tipo Mampara Ducha,F,Fijo
+OV_Banios,EM_Ovjch_Tipo_Lavabo,Lista Tipo Lavabo,D,Doble
+OV_Banios,EM_Ovjch_Tipo_Lavabo,Lista Tipo Lavabo,S,Simple
+OV_Banios,OV_Aguacal,AguaCal,gas,Gas
+OV_Banios,OV_Aguacal,AguaCal,ele,Eléctrico
+OV_Banios,OV_Aguacal,AguaCal,goil,Gasoil
+OV_Banios,OV_Aguacal,AguaCal,sol,Solar
+OV_Banios,OV_Calefaccion,Calefaccion,ele,Eléctrico
+OV_Banios,OV_Calefaccion,Calefaccion,cen,Central
+OV_Banios,OV_Calefaccion,Calefaccion,not,No
+OV_Banios,OV_Calefaccion,Calefaccion,rad,Radiador
+OV_Banios,OV_Calefaccion,Calefaccion,sol,Solar
+OV_Banios,OV_Calefaccion,Calefaccion,spl,Aire Acondicionado
+OV_Banios,OV_Tipo_Ducha,Tipo ducha,ob,Obra
+OV_Banios,OV_Tipo_Ducha,Tipo ducha,it,Italiana
+OV_Banios,OV_Tipo_Ducha,Tipo ducha,pd,Plato ducha
+OV_Cocina,OV_Frigorifico,Frigorifico,fr,Frigorifico
+OV_Cocina,OV_Frigorifico,Frigorifico,am,Americano
+OV_Cocina,OV_Frigorifico,Frigorifico,co,Combi
+OV_Cocina,OV_Tipo_Cafetera,Tipo Cafetera,D,Dolce Gusto
+OV_Cocina,OV_Tipo_Cafetera,Tipo Cafetera,N,Nespresso
+OV_Cocina,OV_Tipo_Cafetera,Tipo Cafetera,G,Cafetera de Goteo
+OV_Cocina,OV_Tipo_Cocina,Tipo Cocina,EXT,Cocina Exterior
+OV_Cocina,OV_Tipo_Cocina,Tipo Cocina,CAM,Cocina Americana
+OV_Cocina,OV_Tipo_Cocina,Tipo Cocina,IND,Cocina Independiente
+OV_Datos_Adicionales,OV_Perros_Admitidos,listamascotas,Y,Si
+OV_Datos_Adicionales,OV_Perros_Admitidos,listamascotas,P,Preguntar
+OV_Datos_Adicionales,OV_Perros_Admitidos,listamascotas,N,No
+OV_Datos_Adicionales,OV_Suelos_De,Suelos de,gr,Gres
+OV_Datos_Adicionales,OV_Suelos_De,Suelos de,ba,Barro
+OV_Datos_Adicionales,OV_Suelos_De,Suelos de,ma,Marmol
+OV_Datos_Adicionales,OV_Suelos_De,Suelos de,md,Madera
+OV_Datos_Adicionales,OV_Suelos_De,Suelos de,mq,Moqueta
+OV_Dormitorios,OV_Calefaccion,Calefaccion,sol,Solar
+OV_Dormitorios,OV_Calefaccion,Calefaccion,cen,Central
+OV_Dormitorios,OV_Calefaccion,Calefaccion,ele,Eléctrico
+OV_Dormitorios,OV_Calefaccion,Calefaccion,not,No
+OV_Dormitorios,OV_Calefaccion,Calefaccion,rad,Radiador
+OV_Dormitorios,OV_Calefaccion,Calefaccion,spl,Aire Acondicionado
+OV_Exterior,EM_Ovjch_Barbacoaplancha,Lista Barbacoa plancha,E,Eléctrica
+OV_Exterior,EM_Ovjch_Barbacoaplancha,Lista Barbacoa plancha,G,Gas
+OV_Exterior,EM_Ovjch_Gas_Barbacoa,Lista Gas Barbacoa,GT,Gas Tanque
+OV_Exterior,EM_Ovjch_Gas_Barbacoa,Lista Gas Barbacoa,BG,Bombonas Grandes
+OV_Exterior,EM_Ovjch_Gas_Barbacoa,Lista Gas Barbacoa,BP,Bombonas Pequeñas
+OV_Exterior,EM_Ovjch_Gas_Barbacoa,Lista Gas Barbacoa,GC,Gas Comunidad
+OV_Exterior,EM_Ovjch_Toldo,Lista Tipo Toldo Ficha Técnica,EM,Eléctrico con mando
+OV_Exterior,EM_Ovjch_Toldo,Lista Tipo Toldo Ficha Técnica,EI,Eléctrico con interruptor
+OV_Exterior,EM_Ovjch_Toldo,Lista Tipo Toldo Ficha Técnica,M,Manual
+OV_Exterior,EM_Ovjch_Toldo,Lista Tipo Toldo Ficha Técnica,ES,Eléctrico con sensor de cerrar
+OV_Exterior,OV_Cesped,Tipo Césped,A,Artificial
+OV_Exterior,OV_Cesped,Tipo Césped,NO,No
+OV_Exterior,OV_Cesped,Tipo Césped,N,Natural
+OV_Exterior,OV_Cesped,Tipo Césped,AN,Artificial/Natural
+OV_Exterior,OV_Escalera_Piscina,Tipo Escalera Piscina,M,Metálica
+OV_Exterior,OV_Escalera_Piscina,Tipo Escalera Piscina,P,Playa
+OV_Exterior,OV_Escalera_Piscina,Tipo Escalera Piscina,O,Obra
+OV_Exterior,OV_Escalera_Piscina,Tipo Escalera Piscina,MO,Metálica/Obra
+OV_Exterior,OV_Fuegos,Fuegos,in,Inducción
+OV_Exterior,OV_Fuegos,Fuegos,ga,Gas
+OV_Exterior,OV_Fuegos,Fuegos,el,Electrico
+OV_Exterior,OV_Fuegos,Fuegos,vi,Vitroceramica
+OV_Exterior,OV_Fuegos,Fuegos,no,No
+OV_Exterior,OV_Piscina,Piscina,no,No
+OV_Exterior,OV_Piscina,Piscina,Pr,Privada
+OV_Exterior,OV_Piscina,Piscina,cm,Comunitaria
+OV_Exterior,OV_Puerta,Puerta acceso parcela,au,Automatica
+OV_Exterior,OV_Puerta,Puerta acceso parcela,no,Normal
+OV_Exterior,OV_Puerta,Puerta acceso parcela,co,Corredera
+OV_Exterior,OV_T_Bbq,Lista Tipo Barbacoa portátil,P,Piedra
+OV_Exterior,OV_T_Bbq,Lista Tipo Barbacoa portátil,C,Carbón
+OV_Exterior,OV_T_Bbq,Lista Tipo Barbacoa portátil,EP,Eléctrica/Piedra
+OV_Exterior,OV_T_Bbq,Lista Tipo Barbacoa portátil,E,Eléctrica
+OV_Exterior,OV_T_Bbq,Lista Tipo Barbacoa portátil,G,Gas
+OV_Exterior,OV_T_Bbq,Lista Tipo Barbacoa portátil,GP,Gas/Piedra
+ovjch_camas,Tamanyo,Lista medidas colchones,K,200X200
+ovjch_camas,Tamanyo,Lista medidas colchones,O,140X200
+ovjch_camas,Tamanyo,Lista medidas colchones,N,140X190
+ovjch_camas,Tamanyo,Lista medidas colchones,M,160X200
+ovjch_camas,Tamanyo,Lista medidas colchones,L,200X190
+ovjch_camas,Tamanyo,Lista medidas colchones,J,180X200
+ovjch_camas,Tamanyo,Lista medidas colchones,I,180X190
+ovjch_camas,Tamanyo,Lista medidas colchones,H,150X200
+ovjch_camas,Tamanyo,Lista medidas colchones,G,150X190
+ovjch_camas,Tamanyo,Lista medidas colchones,F,135X200
+ovjch_camas,Tamanyo,Lista medidas colchones,E,135X190
+ovjch_camas,Tamanyo,Lista medidas colchones,D,90X200
+ovjch_camas,Tamanyo,Lista medidas colchones,C,90X190
+ovjch_camas,Tamanyo,Lista medidas colchones,B,80X200
+ovjch_camas,Tamanyo,Lista medidas colchones,A,80X190
+ovjch_camas,Tipocamas,Lista Tipo Camas,CD,Cama Doble
+ovjch_camas,Tipocamas,Lista Tipo Camas,CDG,Cama doble grande
+ovjch_camas,Tipocamas,Lista Tipo Camas,SC,Sofa Cama
+ovjch_camas,Tipocamas,Lista Tipo Camas,L,Literas
+ovjch_camas,Tipocamas,Lista Tipo Camas,CS,Cama Simple
+ovjch_camas,Tipocamas,Lista Tipo Camas,CP,Cama Partida
+ovjch_camas,Tipocamas,Lista Tipo Camas,CN,Cama Nido
+ovjch_camas,Tipokit,Lista Kit Camas,S,S
+ovjch_camas,Tipokit,Lista Kit Camas,L,L
+ovjch_camas,Tipokit,Lista Kit Camas,XL,XL
+OV_Salon,EM_Ovjch_Tipotela_Sofa,Lista Tipo Tela Sofá,O,Otro
+OV_Salon,EM_Ovjch_Tipotela_Sofa,Lista Tipo Tela Sofá,PO,Polipiel
+OV_Salon,EM_Ovjch_Tipotela_Sofa,Lista Tipo Tela Sofá,T,Tela
+OV_Salon,EM_Ovjch_Tipotela_Sofa,Lista Tipo Tela Sofá,P,Piel
+OV_Salon,EM_Ovjch_Tipotela_Sofacama,Lista Tipo Tela Sofá,O,Otro
+OV_Salon,EM_Ovjch_Tipotela_Sofacama,Lista Tipo Tela Sofá,PO,Polipiel
+OV_Salon,EM_Ovjch_Tipotela_Sofacama,Lista Tipo Tela Sofá,T,Tela
+OV_Salon,EM_Ovjch_Tipotela_Sofacama,Lista Tipo Tela Sofá,P,Piel
+OV_Salon,OV_Calefaccion,Calefaccion,sol,Solar
+OV_Salon,OV_Calefaccion,Calefaccion,cen,Central
+OV_Salon,OV_Calefaccion,Calefaccion,ele,Eléctrico
+OV_Salon,OV_Calefaccion,Calefaccion,not,No
+OV_Salon,OV_Calefaccion,Calefaccion,rad,Radiador
+OV_Salon,OV_Calefaccion,Calefaccion,spl,Aire Acondicionado
+OV_Salon,OV_Chimenea,Chimenea,hie,Hierro
+OV_Salon,OV_Chimenea,Chimenea,obr,Obra
+OV_Salon,OV_Chimenea,Chimenea,no,No
+OV_Salon,OV_Satelite,Satelite,fre,FreeSky
+OV_Salon,OV_Satelite,Satelite,as23,Astra 23.5
+OV_Salon,OV_Satelite,Satelite,as19,Astra 19.2
+OV_Salon,OV_Satelite,Satelite,as,Astra
+OV_Salon,OV_Satelite,Satelite,no,No
+OV_Salon,OV_Satelite,Satelite,hot,HotBird
+OV_Salon,OV_Satelite,Satelite,as28,Astra 28.2
+OV_Salon,OV_Sofa_Cama,Sofa Cama,2,2 Personas
+OV_Salon,OV_Sofa_Cama,Sofa Cama,1,1 Personas
+OV_Salon,OV_Sofa_Cama,Sofa Cama,no,No
+OV_Salon,OV_Tipo_Sofa,Tipo sofa,cu,Cuero
+OV_Salon,OV_Tipo_Sofa,Tipo sofa,te,Tela
+OV_Salon,OV_Tipo_Sofa,Tipo sofa,ot,Otros
+OV_Salon,OV_Tipo_Sofa,Tipo sofa,po,Polipiel
+Order,EM_Opxdes_Tipo,Tipo de reservas OPX,Reserva TTOO,Reserva TTOO
+Order,EM_Opxdes_Tipo,Tipo de reservas OPX,Reserva,Reserva
+Order,EM_Opxdes_Tipo,Tipo de reservas OPX,Reserva Agencia,Reserva Agencia
+Order,EM_Opxdes_Tipo,Tipo de reservas OPX,Reserva Propietario,Reserva Propietario
+Order,EM_Ovjch_Estadoreserva,ListadoEstadosReserva,BO,Borrador
+Order,EM_Ovjch_Estadoreserva,ListadoEstadosReserva,RE,Reserva
+Order,EM_Ovjch_Estadoreserva,ListadoEstadosReserva,RB,ReservaBono
+Order,EM_Ovjch_Estadoreserva,ListadoEstadosReserva,PR,PreReserva
+Order,EM_Ovjch_Estadoreserva,ListadoEstadosReserva,PE,Perdida
+Order,EM_Ovjch_Estadoreserva,ListadoEstadosReserva,NS,NoShow
+Order,EM_Ovjch_Estadoreserva,ListadoEstadosReserva,CA,Cancelacion
+Order,EM_Ov_Tipoestancia,tipoestancia,VUT,VUT
+Order,EM_Ov_Tipoestancia,tipoestancia,HOS,Hospedaje
+Order,EM_Ov_Tipoestancia,tipoestancia,LE,Larga estancia
+Order,EM_Tica_Subtipo,Sub tipo de Reservas Propietario,ND,No Disponible
+Order,EM_Tica_Subtipo,Sub tipo de Reservas Propietario,MT,Mantenimiento
+Order,EM_Tica_Subtipo,Sub tipo de Reservas Propietario,BC,Bloqueo Contrato
+Order,EM_Tica_Subtipo,Sub tipo de Reservas Propietario,PR,Propietario
+Order,DocStatus,Order_Document Status,CO,Completada
+Order,DocStatus,Order_Document Status,DR,Borrador
+Order,DocStatus,Order_Document Status,CL,Cerrada
+Order,DocStatus,Order_Document Status,VO,Anulada
+ov_ocupacion,Estado,Estado ocupación,0,Libre
+ov_ocupacion,Estado,Estado ocupación,1,BLoqueado
+ov_ocupacion,Estado,Estado ocupación,2,Pre reserva
+ov_ocupacion,Estado,Estado ocupación,3,Reserva

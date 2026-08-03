@@ -1,0 +1,131 @@
+Entidad,Tablas en Etendo (BD),Entidad API,Notas de mapeo,,,,,
+VILLA Y ESTRUCTURA FÍSICA,,,,,,,,
+Villa,"obre_resource: tabla principal (código, nombre, activa, url)
+ov_tipovilla: clasificación y tipo de villa
+opxdes_ficha_tecnica: equipamiento detallado
+ov_propietario: propietario de la villa
+ov_villaprop: relación villa-propietario (copropiedad)
+c_bpartner_location: dirección física","OBRE_Resource
+OV_Tipovilla
+opxdes_ficha_tecnica
+OV_Propietario
+Location","Una villa del nuevo modelo se construye uniendo estas seis tablas mediante JOIN en la ingesta. obre_resource es la tabla raíz, el resto se vinculan por su ID.",,,,,
+Planta,"ov_plantas: número de planta, descripción, jacuzzi, sauna
+obre_resource (FK): vinculación a la villa","OV_Plantas
+OBRE_Resource",Una fila por planta de cada villa.,,cambiar a tipo tabla ,,,mirar los que son de tipo view y cambiarlos a tipo tabla 
+"Estancia (Salón, Cocina, Dormitorio)","ov_salon: sofá, sofácama, comedor, TV, cortinas
+ov_cocina: tipo fuego, lavavajillas, frigorífico, horno
+ov_dormitorios: tipo cama, baño en suite, armario
+obre_resource (FK): vinculación a la villa","OV_Salon
+OV_Cocinas
+OV_Dormitorios
+OBRE_Resource","Tres tablas físicas separadas en Etendo. Al ingestar se unifican en la entidad Estancia con un campo tipo que distingue entre salón, cocina y dormitorio.",,,,,cambiar los valores duplicados 
+Baño,"ov_banios: ducha, bañeraJacuzzi, lavabo, wc, enSuite, secador
+obre_resource (FK): vinculación a la villa","OV_Banios
+OBRE_Resource",Vinculada al dormitorio correspondiente cuando enSuite es true.,,,,,mirar porque hay dos Banios 
+Alarma,"ov_alarmas: código, activación, desactivación, anotaciones",Ov_Alarmas (0 filas),Tabla propia confirmada en BD. La prueba contra la API devuelve 0 filas — revisar si hay datos o si el filtro de organización excluye esta tabla.,,,,,
+ContratoSeguro y CompañiaSeguro,"obre_resource: campo EM_Ovjch_Seguro_Rc_Alq (seguro RC)
+obre_resource: campo EM_Ovjch_N_Poliza (nº póliza)
+obre_resource: campo EM_Ov_Seguro (nombre compañía)","OBRE_Resource
+OBRE_Resource
+OBRE_Resource",No existe tabla propia en Etendo. Todos los campos de seguro están en obre_resource. Se construyen al ingestar extrayendo esos campos de Villa.,,,,,
+DISPONIBILIDAD Y PRECIO,,,,,,,,
+EstadoDiaVilla,"ov_ocupacion: estado por día (libre/ocupado/bloqueado)
+obre_occupancy: ocupación del recurso
+opxdes_calendario: restricciones de entrada/salida, estancia mínima","OV_Ocupacion (0 filas)
+obre_occupancy (0 filas)
+opxdes_calendario",Abstracción: tres tablas se unifican en una sola entidad del nuevo modelo. ov_ocupacion y obre_occupancy dan 0 filas en la prueba de API — pendiente de revisar.,,,,,
+PrecioTarifa,"ov_tarifaventa: precios de venta por villa y período
+ov_tarifacompra: precios de compra (lo que paga Abahana al propietario)
+ov_productprice: precios por producto
+ov_productpriceso: precios de venta por producto","ov_tarifaventa (0 filas)
+OV_TarifaCompra (0 filas)
+OV_ProductPrice (0 filas)
+OV_Productpriceso (0 filas)",ov_tarifaventa y ov_tarifacompra son tablas separadas. La tarifa de venta es lo que cobra Abahana al cliente; la de compra es lo que le paga al propietario. Las 4 tablas dan 0 filas en la API — revisar.,,,,,
+Tarifa,"m_pricelist: cabecera (nombre, moneda, flags de tipo)
+ov_tarifaventa: detalle precios de venta
+ov_tarifacompra: detalle precios de compra","PricingPriceList
+ov_tarifaventa (0 filas)
+OV_TarifaCompra (0 filas)",m_pricelist es la lista de precios de Etendo y sí funciona en la API. Los descuentos de last minute y oferta se definen en las líneas del contrato (c_projectline).,,,,,
+Oferta,"ov_offer: ofertas activas (tipo, descuento, vigencia)
+ov_tipooferta: catálogo de tipos (last minute, novedad...)","ov_offer
+ov_tipooferta",Tablas propias de Abahana confirmadas en BD y funcionando en la API.,,,,,
+CONTRATO,,,,,,,,
+Contrato,"c_project: cabecera (nombre, tipo, fechas, propietario, villa)
+c_projectline: líneas anuales (tarifa, facturación, responsable, firmado)
+ov_incidencias: incidencias asociadas al contrato
+ov_incidencias_deta: detalle de cada incidencia","Project
+ProjectLine (0 filas)
+OV_Incidencias (0 filas)
+OV_Incidencias_deta (0 filas)","En Etendo los contratos reutilizan las tablas de proyectos. Project funciona en la API; ProjectLine, OV_Incidencias y OV_Incidencias_deta dan 0 filas — revisar.",,,,,
+PagosContrato,"ov_pagoscontrato: pagos del contrato al propietario
+ov_vencimientos: vencimientos esperados
+fin_payment_schedule: plan de pagos estándar de Etendo","ov_pagoscontrato (0 filas)
+ov_vencimientos (0 filas)
+FIN_Payment_Schedule",ov_vencimientos y ov_pagoscontrato son las tablas personalizadas de Abahana y dan 0 filas en la API. fin_payment_schedule sí funciona.,,,,,
+RESERVA Y COMERCIAL,,,,,,,,
+Reserva,"c_order: cabecera (localizador, fechas, estado, villa, cliente, pax)
+c_orderline: líneas de producto de la reserva
+obre_reservation: datos específicos del recurso reservado","Order
+OrderLine
+OBRE_Reservation","Abstracción de tres tablas en una entidad. Las tres funcionan en la API (Order, OrderLine, OBRE_Reservation).",,,,,
+LineaReserva,"c_orderline: cantidad, precioUnitario, importe, descuento",OrderLine,Misma tabla física que LineaActuacion. Funciona en la API como OrderLine.,,,,,
+PropuestaAlquiler,"c_order (tipo = propuesta): precio, fechas, estado
+Copper CRM (sistema externo): seguimiento, motivo pérdida","Order
+—",Requiere ingesta de dos fuentes distintas: Etendo (Order) para los datos de la propuesta y Copper CRM vía API REST para el seguimiento comercial.,,,,,
+PlanFacturacion,"fin_payment_schedule: vencimientos esperados, pendiente, métodoPago
+ov_vencimientos: versión personalizada de Abahana
+fin_payment: cobros efectivos realizados","FIN_Payment_Schedule
+ov_vencimientos (0 filas)
+FIN_Payment",fin_payment_schedule y fin_payment funcionan en la API. ov_vencimientos da 0 filas — revisar.,,,,,
+ACTUACIONES,,,,,,,,
+Actuacion,"c_order (tipo = actuación): fechas, tipo ejecución, villa, proveedor
+c_orderline: líneas de coste de la actuación","Order
+OrderLine","Misma tabla que Reserva (c_order/Order) con tipo de documento diferente. Campos propios: factPropietario, movimientoSaldo, importePropietario.",,,,,
+LineaActuacion,"c_orderline: cantidad, precioUnitario, importePropietario",OrderLine,Misma tabla física que LineaReserva vinculada a un c_order de tipo actuación.,,,,,
+PRODUCTO,,,,,,,,
+Producto,"m_product: catálogo unificado (alquiler, limpieza, energía, extras)
+m_product_category: agrupación por tipo de producto","Product
+ProductCategory",Un mismo producto puede aparecer en una LineaReserva (venta al cliente) y en una LineaActuacion (compra al proveedor) con precios distintos. Ambas funcionan en la API.,,,,,
+ProductoProveedor,m_product_po: precio de compra por proveedor específico,ApprovedVendor (0 filas),En la API la entidad se llama ApprovedVendor (nombre distinto al de la BD). Da 0 filas en la prueba — revisar.,,,,,
+TERCEROS,,,,,,,,
+Tercero,"c_bpartner: tabla unificada con flags de rol
+c_bpartner_location: dirección del tercero
+ad_user: acceso al sistema si aplica","BusinessPartner
+Location
+ADUser","Un mismo registro puede tener varios flags activos a la vez: IsCustomer, IsVendor, IsEmployee, IsSalesRep, EM_Opxdes_Propietario, EM_Opxdes_Huesped. Las tres tablas funcionan en la API.",,,,,
+Persona (extends Tercero),"c_bpartner: apellidos, fechaNacimiento, lugarNacimiento, nacionalidad",BusinessPartner,Subclase para personas físicas. Se distingue de Empresa por la presencia de campos de fecha de nacimiento y DNI.,,,,,
+Empresa (extends Tercero),"c_bpartner: nombreComercial, nombreFiscal, NIF/CIF, representante legal",BusinessPartner,Subclase para personas jurídicas.,,,,,
+Cliente (extends Persona/Empresa),c_bpartner: IsCustomer = true,BusinessPartner,No es tabla separada. c_bpartner con IsCustomer=true.,,,,,
+Huésped (extends Persona),"c_bpartner: EM_Opxdes_Huesped = true
+c_bpartner: EM_Ov_Dnihuesped (DNI para registro legal)","BusinessPartner
+BusinessPartner",Puede coincidir con el cliente o ser una persona distinta. Puede haber múltiples huéspedes por reserva.,,,,,
+Proveedor (extends Empresa),"c_bpartner: IsVendor = true
+ov_jardineros: jardineros asignados a villas
+ov_piscineros: piscineros asignados a villas","BusinessPartner
+OV_Jardineros (0 filas)
+Ov_Piscineros (0 filas)",ov_jardineros y ov_piscineros son tablas propias confirmadas en BD pero dan 0 filas en la API — revisar.,,,,,
+Empleado (extends Persona),"c_bpartner: IsEmployee = true
+ad_user: acceso al sistema Etendo","BusinessPartner
+ADUser","Campos específicos: esJardinero (EM_Opxdes_Jardinero), esPiscinero (EM_Opxdes_Piscinero), esEquipoLimpieza. ADUser funciona en la API.",,,,,
+Agencia (extends Empresa),"c_bpartner: IsSalesRep = true
+c_bpartner: EM_Ovjch_Portal (indica si es OTA: Airbnb, Booking...)","BusinessPartner
+BusinessPartner",La comisión de agencia se guarda en c_order (ImporteComisionAgencia) en cada reserva.,,,,,
+Propietario (extends Persona/Empresa),"c_bpartner: EM_Opxdes_Propietario = true
+ov_propietario: datos específicos del propietario
+ov_villaprop: relación propietario-villa (muchos a muchos)","BusinessPartner
+OV_Propietario
+OV_Villaprop (0 filas)",ov_villaprop permite copropiedad (una villa con varios propietarios). Da 0 filas en la API — revisar. Los datos bancarios para liquidación mensual están en c_bpartner.,,,,,
+ENUMERADOS,,,,,,,,
+TipoEstadoReserva,ad_ref_list: lista de referencia del sistema,ADList (HTTP 401),"Valores: Petición, Propuesta, PreReserva, Reserva, Anulación. La entidad API correspondiente (ADList) devuelve HTTP 401 — falta permiso.",,,,,
+TipoUnidad,c_uom: unidad de medida de Etendo,UOM,"Valores: porNoche, porEstancia, porPersona. En la API es UOM y funciona correctamente.",,,,,
+TipoEjecucion,ad_ref_list: lista de referencia del sistema,ADList (HTTP 401),"Valores para tipo de actuación: limpieza, mantenimiento, incidencia, revisión calidad. Misma entidad ADList con HTTP 401.",,,,,
+TipoEstadoOcupacion,"ad_ref_list: lista de referencia
+ov_ocupacion: campo estado","ADList (HTTP 401)
+OV_Ocupacion (0 filas)","Valores: bloqueado, libre, ocupado. Ambas fuentes dan problemas en la API (401 y 0 filas respectivamente).",,,,,
+TipoTarifa,"m_pricelist: flags (esTarifaVenta, preciosDeVillas...)
+ov_tarifaventa / ov_tarifacompra: tablas separadas por tipo","PricingPriceList
+ov_tarifaventa (0 filas)",No es enum explícito en Etendo. m_pricelist funciona (PricingPriceList); las tarifas de venta/compra dan 0 filas.,,,,,
+TipoEstancia,ov_salon / ov_cocina / ov_dormitorios / ov_banios,OV_Salon,No existe como enum. ov_cocina (OV_Cocinas) da 0 filas; el resto funcionan correctamente.,,,,,
+TipoTercero,c_bpartner: flags booleanos independientes,BusinessPartner,"No es enum sino flags: IsCustomer, IsVendor, IsEmployee, IsSalesRep, EM_Opxdes_Propietario, EM_Opxdes_Huesped. Una persona puede tener varios activos.",,,,,
+TipoProducto,m_product_category: categoría de producto,ProductCategory,"Distingue entre artículo, servicio, recurso, alquiler vacacional. ProductCategory funciona en la API.",,,,,
