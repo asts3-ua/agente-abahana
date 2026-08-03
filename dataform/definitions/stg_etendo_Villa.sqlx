@@ -1,0 +1,107 @@
+config {
+  type: "table",
+  name: "stg_etendo_Villa",
+  description: "Staging: Villas (1 fila por villa_id; join corregido via ficha técnica)"
+}
+
+WITH resource_raw AS (
+  SELECT ingestion_dt, run_id, payload AS json
+  FROM ${ref("etendo_OBRE_Resource")}
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY LAX_STRING(payload.id)
+    ORDER BY ingestion_dt DESC, run_id DESC
+  ) = 1
+),
+ficha_raw AS (
+  SELECT ingestion_dt, run_id, payload AS json
+  FROM ${ref("etendo_opxdes_ficha_tecnica")}
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY LAX_STRING(payload.id)
+    ORDER BY ingestion_dt DESC, run_id DESC
+  ) = 1
+),
+tipovilla_raw AS (
+  SELECT ingestion_dt, run_id, payload AS json
+  FROM ${ref("etendo_OV_Tipovilla")}
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY LAX_STRING(payload.id)
+    ORDER BY ingestion_dt DESC, run_id DESC
+  ) = 1
+),
+propietario_raw AS (
+  SELECT ingestion_dt, run_id, payload AS json
+  FROM ${ref("etendo_OV_Propietario")}
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY LAX_STRING(payload.id)
+    ORDER BY ingestion_dt DESC, run_id DESC
+  ) = 1
+),
+enriched AS (
+  SELECT
+    LAX_STRING(r.json.id)                                                                AS villa_id,
+    LAX_STRING(r.json.name)                                                              AS nombre,
+    LAX_STRING(r.json['_identifier'])                                                    AS identificador,
+    LAX_STRING(r.json.searchKey)                                                         AS codigo_busqueda,
+    LAX_STRING(f.json.tipovilla)                                                         AS tipovilla_id,
+    LAX_STRING(tv.json.name)                                                             AS tipovilla_nombre_comercial,
+    LAX_STRING(tv.json.description)                                                      AS tipovilla_descripcion,
+    LAX_STRING(prop.json.bpartner)                                                       AS propietario_id,
+    LAX_STRING(prop.json['bpartner$_identifier'])                                          AS propietario_nombre,
+    SAFE_CAST(LAX_BOOL(prop.json.pORDefecto) AS BOOL)                                   AS es_propietario_por_defecto,
+    LAX_STRING(f.json.location)                                                          AS location_id,
+    LAX_STRING(f.json['location$_identifier'])                                             AS direccion,
+    LAX_STRING(f.json.pueblocercano)                                                     AS pueblo_cercano,
+    LAX_STRING(f.json['zona$_identifier'])                                                AS zona,
+    LAX_STRING(f.json['region$_identifier'])                                              AS region,
+    LAX_STRING(f.json.latitud)                                                           AS latitud,
+    LAX_STRING(f.json.longitud)                                                          AS longitud,
+    SAFE_CAST(LAX_INT64(f.json.pAXProd) AS INT64)                                          AS capacidad_pax,
+    SAFE_CAST(LAX_INT64(f.json.ovjchHabTotales) AS INT64)                                 AS capacidad_camas,
+    SAFE_CAST(LAX_INT64(f.json.banos) AS INT64)                                           AS numero_banos,
+    SAFE_CAST(LAX_INT64(f.json.ovjchPlantasReales) AS INT64)                              AS numero_plantas,
+    SAFE_CAST(LAX_INT64(f.json.habitable) AS INT64)                                       AS m2_habitables,
+    SAFE_CAST(LAX_INT64(f.json.parcela) AS INT64)                                         AS m2_parcela,
+    LAX_STRING(f.json.aNOConstruccion)                                                   AS anio_construccion,
+    SAFE_CAST(LAX_BOOL(f.json.piscinaPrivada) AS BOOL)                                   AS tiene_piscina_privada,
+    SAFE_CAST(LAX_BOOL(f.json.piscinaComun) AS BOOL)                                      AS tiene_piscina_comun,
+    SAFE_CAST(LAX_BOOL(f.json.piscinaClimatizada) AS BOOL)                                AS piscina_climatizada,
+    SAFE_CAST(LAX_BOOL(f.json.jardin) AS BOOL)                                            AS tiene_jardin,
+    SAFE_CAST(LAX_BOOL(f.json.garaje) AS BOOL)                                            AS tiene_garaje,
+    SAFE_CAST(LAX_BOOL(f.json.animales) AS BOOL)                                          AS admite_animales,
+    SAFE_CAST(LAX_INT64(f.json.ratingExterior) AS INT64)                                  AS rating_exterior,
+    SAFE_CAST(LAX_INT64(f.json.ratingInterior) AS INT64)                                  AS rating_interior,
+    SAFE_CAST(LAX_INT64(f.json.ratingVistas) AS INT64)                                    AS rating_vistas,
+    SAFE_CAST(LAX_BOOL(r.json.active) AS BOOL)                                            AS es_activo,
+    COALESCE(
+      SAFE_CAST(LAX_BOOL(r.json.ovVisible) AS BOOL),
+      SAFE_CAST(LAX_BOOL(f.json.ovVisible) AS BOOL),
+      FALSE
+    )                                                                                    AS es_visible,
+    SAFE_CAST(LAX_BOOL(r.json.opxdesRecomendada) AS BOOL)                                 AS es_recomendada,
+    SAFE_CAST(LAX_BOOL(r.json.opxdesNovedad) AS BOOL)                                     AS es_novedad,
+    SAFE.PARSE_TIMESTAMP("%Y-%m-%dT%H:%M:%E*S%Ez", LAX_STRING(r.json.creationDate))       AS fecha_creacion,
+    SAFE.PARSE_TIMESTAMP("%Y-%m-%dT%H:%M:%E*S%Ez", LAX_STRING(r.json.updated))           AS fecha_actualizacion,
+    r.ingestion_dt                                                                       AS dataform_ingestion_dt,
+    r.run_id                                                                             AS dataform_run_id
+  FROM resource_raw r
+  LEFT JOIN ficha_raw f
+    ON LAX_STRING(f.json.obreResource) = LAX_STRING(r.json.id)
+  LEFT JOIN tipovilla_raw tv
+    ON LAX_STRING(tv.json.id) = LAX_STRING(f.json.tipovilla)
+  LEFT JOIN propietario_raw prop
+    ON LAX_STRING(prop.json.opxdesFicha) = LAX_STRING(f.json.id)
+)
+SELECT * EXCEPT(row_num)
+FROM (
+  SELECT
+    enriched.*,
+    ROW_NUMBER() OVER (
+      PARTITION BY villa_id
+      ORDER BY
+        es_visible DESC,
+        IF(pueblo_cercano IS NULL, 1, 0),
+        dataform_ingestion_dt DESC
+    ) AS row_num
+  FROM enriched
+)
+WHERE row_num = 1

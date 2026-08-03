@@ -1,0 +1,33 @@
+config {
+  type: "table",
+  name: "stg_etendo_Tarifa",
+  description: "Staging: Tarifas (PricingPriceList deduplicado)"
+}
+
+WITH raw_data AS (
+  SELECT ingestion_dt, run_id, payload AS json
+  FROM ${ref("etendo_PricingPriceList")}
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY LAX_STRING(payload.id)
+    ORDER BY ingestion_dt DESC, run_id DESC
+  ) = 1
+)
+SELECT
+  LAX_STRING(json.id)                                                                    AS tarifa_id,
+  LAX_STRING(json.name)                                                                  AS nombre,
+  LAX_STRING(json.description)                                                           AS descripcion,
+  LAX_STRING(json.ovProduct)                                                             AS villa_id,
+  LAX_STRING(json['ovProduct$_identifier'])                                              AS villa_nombre,
+  SAFE_CAST(LAX_BOOL(json.salesPriceList) AS BOOL)                                       AS es_tarifa_venta,
+  SAFE_CAST(LAX_BOOL(json.ovVillas) AS BOOL)                                             AS es_tarifa_villas,
+  SAFE_CAST(LAX_BOOL(json.ovExtras) AS BOOL)                                             AS es_tarifa_extras,
+  SAFE_CAST(LAX_BOOL(json.ovLargatemporada) AS BOOL)                                     AS es_larga_temporada,
+  SAFE_CAST(LAX_BOOL(json.ovTemplate) AS BOOL)                                           AS es_plantilla,
+  SAFE_CAST(LAX_BOOL(json.default) AS BOOL)                                              AS es_por_defecto,
+  SAFE_CAST(LAX_BOOL(json.priceIncludesTax) AS BOOL)                                     AS precio_incluye_impuestos,
+  SAFE_CAST(LAX_BOOL(json.active) AS BOOL)                                               AS es_activo,
+  SAFE.PARSE_TIMESTAMP("%Y-%m-%dT%H:%M:%E*S%Ez", LAX_STRING(json.creationDate))         AS fecha_creacion,
+  SAFE.PARSE_TIMESTAMP("%Y-%m-%dT%H:%M:%E*S%Ez", LAX_STRING(json.updated))               AS fecha_actualizacion,
+  ingestion_dt                                                                           AS dataform_ingestion_dt,
+  run_id                                                                                 AS dataform_run_id
+FROM raw_data

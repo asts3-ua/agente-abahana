@@ -1,0 +1,38 @@
+config {
+  type: "table",
+  name: "stg_etendo_Tercero",
+  description: "Staging: Terceros (BusinessPartner deduplicado)"
+}
+
+WITH raw_data AS (
+  SELECT ingestion_dt, run_id, payload AS json
+  FROM ${ref("etendo_BusinessPartner")}
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY LAX_STRING(payload.id)
+    ORDER BY ingestion_dt DESC, run_id DESC
+  ) = 1
+)
+SELECT
+  LAX_STRING(json.id)                                                                    AS id,
+  LAX_STRING(json.taxID)                                                                 AS nif,
+  LAX_STRING(json.ovMail)                                                                AS email,
+  LAX_STRING(json.language)                                                              AS idioma,
+  LAX_STRING(json.opxdesIdiomaContrato)                                                  AS idioma_contrato,
+  CASE
+    WHEN SAFE_CAST(LAX_BOOL(json.opxdesPropietario) AS BOOL) THEN "Propietario"
+    WHEN SAFE_CAST(LAX_BOOL(json.opxdesHuesped) AS BOOL) THEN "Huesped"
+    WHEN SAFE_CAST(LAX_BOOL(json.opxdesTtoo) AS BOOL) THEN "Agencia"
+    WHEN SAFE_CAST(LAX_BOOL(json.employee) AS BOOL) THEN "Empleado"
+    WHEN SAFE_CAST(LAX_BOOL(json.vendor) AS BOOL) THEN "Proveedor"
+    WHEN SAFE_CAST(LAX_BOOL(json.customer) AS BOOL) THEN "Cliente"
+    ELSE LAX_STRING(json['businessPartnerCategory$_identifier'])
+  END                                                                                    AS tipo,
+  SAFE_CAST(LAX_BOOL(json.customer) AS BOOL)                                            AS es_cliente,
+  SAFE_CAST(LAX_BOOL(json.vendor) AS BOOL)                                              AS es_proveedor,
+  SAFE_CAST(LAX_BOOL(json.employee) AS BOOL)                                             AS es_empleado,
+  SAFE_CAST(LAX_BOOL(json.opxdesTtoo) AS BOOL)                                          AS es_agencia,
+  SAFE_CAST(LAX_BOOL(json.opxdesPropietario) AS BOOL)                                   AS es_propietario,
+  SAFE_CAST(LAX_BOOL(json.opxdesHuesped) AS BOOL)                                       AS es_huesped,
+  ingestion_dt                                                                           AS dataform_ingestion_dt,
+  run_id                                                                                 AS dataform_run_id
+FROM raw_data

@@ -15,6 +15,7 @@ import logging
 import os
 from typing import Any
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 from bs4 import BeautifulSoup
 from google import genai
@@ -40,6 +41,21 @@ _DEDUP_VILLA = (
 
 _bq = bigquery.Client(project=PROJECT_ID, location="EU")
 _BILLING_CAP = 50 * 1024 * 1024  # 50 MB — tablas silver_clean materializadas
+_TIMEZONE = ZoneInfo("Europe/Madrid")
+_ESTADOS_RESERVA = {
+    "RE": "RESERVA",
+    "PE": "PERDIDA",
+    "CA": "CANCELACION",
+    "NS": "NOSHOW",
+    "PR": "PRERESERVA",
+    "BO": "BORRADOR",
+}
+_ESTADOS_DOCUMENTO = {
+    "CO": "COMPLETADA",
+    "CL": "CERRADA",
+    "DR": "BORRADOR",
+    "VO": "ANULADA",
+}
 
 
 def _row_to_dict(row) -> dict:
@@ -47,6 +63,20 @@ def _row_to_dict(row) -> dict:
         k: v.isoformat() if isinstance(v, (datetime.date, datetime.datetime)) else v
         for k, v in row.items()
     }
+
+
+def _ahora_local() -> datetime.datetime:
+    """Fecha y hora oficial usada por el agente (España peninsular)."""
+    return datetime.datetime.now(_TIMEZONE)
+
+
+def _parse_iso_date(value: str, field_name: str) -> datetime.date:
+    try:
+        return datetime.date.fromisoformat(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} debe tener formato YYYY-MM-DD.") from exc
+
+
 _VERTEX_LOCATION = os.environ.get("GOOGLE_CLOUD_LOCATION", "europe-west1")
 _genai_client: genai.Client | None = None
 
@@ -65,6 +95,22 @@ def _get_genai_client() -> genai.Client:
 # ---------------------------------------------------------------------------
 # Herramientas
 # ---------------------------------------------------------------------------
+
+def obtener_fecha_hora_actual() -> dict[str, Any]:
+    """Devuelve la fecha y hora actual en la zona del agente.
+
+    Usa esta herramienta para interpretar referencias relativas como "hoy",
+    "mañana", "este fin de semana", "este mes" o "dentro de una semana".
+    La zona horaria oficial es Europe/Madrid.
+    """
+    ahora = _ahora_local()
+    return {
+        "fecha": ahora.date().isoformat(),
+        "hora": ahora.strftime("%H:%M:%S"),
+        "fecha_hora": ahora.isoformat(),
+        "zona_horaria": "Europe/Madrid",
+    }
+
 
 def listar_propiedades() -> dict[str, Any]:
     """Devuelve todas las propiedades disponibles con sus características.
@@ -353,58 +399,40 @@ def obtener_detalle_propiedad(nombre: str) -> dict[str, Any]:
     Returns:
         Diccionario con 'matches' (lista de propiedades encontradas) y 'count'.
     """
-    params = [bigquery.ScalarQueryParameter("nombre", "STRING", f"%{nombre.strip()}%")]
+    nombre_limpio = nombre.strip()
+    if nombre_limpio.lower().startswith("villa "):
+        nombre_limpio = nombre_limpio[6:].strip()
+    params = [
+        bigquery.ScalarQueryParameter(
+            "nombre", "STRING", f"%{nombre_limpio}%"
+        ),
+        bigquery.ScalarQueryParameter(
+            "nombre_exacto", "STRING", nombre_limpio
+        ),
+    ]
     query = f"""
         WITH villa_dedup AS (
             SELECT *
             FROM {TABLA_VILLA}
             WHERE LOWER(nombre) LIKE LOWER(@nombre) AND es_activo = TRUE
             {_DEDUP_VILLA}
-        ),
-        banios_detalle AS (
-            SELECT
-                v.villa_id,
-                COUNT(b.banio_id) AS banios_con_detalle,
-                COUNTIF(b.tiene_baniera OR b.tiene_baniera_suelta) AS banios_con_banera,
-                COUNTIF(
-                    b.tiene_ducha OR b.tiene_ducha_plato OR b.tiene_ducha_obra
-                    OR b.tiene_ducha_hidromasaje
-                ) AS banios_con_ducha,
-                COUNTIF(b.tiene_jacuzzi OR b.tiene_baniera_jacuzzi) AS banios_con_jacuzzi,
-                COUNTIF(b.tiene_bide) AS banios_con_bide,
-                COUNTIF(b.es_ensuite) AS banios_ensuite
-            FROM villa_dedup v
-            JOIN {TABLA_PLANTA} p ON v.villa_id = p.villa_id
-            JOIN {TABLA_BANIO} b ON b.planta_id = p.planta_id AND b.es_activo = TRUE
-            GROUP BY v.villa_id
-        ),
-        ficha AS (
-            SELECT
-                propiedad_codigo,
-                ANY_VALUE(tiene_internet) AS tiene_internet,
-                ANY_VALUE(tiene_aire_salon) AS tiene_aire_acondicionado,
-                ANY_VALUE(tiene_lavadora) AS tiene_lavadora,
-                ANY_VALUE(tiene_lavavajillas) AS tiene_lavavajillas
-            FROM {TABLA_FICHA_TECNICA}
-            WHERE propiedad_codigo IS NOT NULL
-            GROUP BY propiedad_codigo
         )
         SELECT
+            v.villa_id,
+            v.codigo_busqueda,
             v.nombre, v.tipovilla_nombre_comercial, v.tipovilla_descripcion,
             v.anio_construccion, v.m2_parcela, v.m2_habitables,
             v.capacidad_pax, v.capacidad_camas, v.numero_banos, v.numero_plantas,
             v.tiene_piscina_privada, v.tiene_piscina_comun, v.piscina_climatizada,
             v.tiene_jardin, v.tiene_garaje, v.admite_animales,
-            f.tiene_internet, f.tiene_aire_acondicionado, f.tiene_lavadora, f.tiene_lavavajillas,
-            bd.banios_con_detalle, bd.banios_con_banera, bd.banios_con_ducha,
-            bd.banios_con_jacuzzi, bd.banios_con_bide, bd.banios_ensuite,
             v.pueblo_cercano, v.zona, v.region, v.direccion,
             v.latitud, v.longitud,
             v.rating_exterior, v.rating_interior, v.rating_vistas,
             v.propietario_nombre, v.es_recomendada, v.es_novedad
         FROM villa_dedup v
-        LEFT JOIN banios_detalle bd ON v.villa_id = bd.villa_id
-        LEFT JOIN ficha f ON SAFE_CAST(v.codigo_busqueda AS INT64) = f.propiedad_codigo
+        ORDER BY
+            CASE WHEN UPPER(v.nombre) = UPPER(@nombre_exacto) THEN 0 ELSE 1 END,
+            v.nombre
         LIMIT 5
     """
 
@@ -421,7 +449,112 @@ def obtener_detalle_propiedad(nombre: str) -> dict[str, Any]:
         return {"matches": [], "count": 0, "error": str(e)}
 
     matches = [_row_to_dict(r) for r in rows]
-    return {"matches": matches, "count": len(matches)}
+    if not matches:
+        return {"matches": [], "count": 0}
+
+    # Las amenidades viven en otra tabla y no deben impedir reconocer una villa.
+    codigos = [
+        int(match["codigo_busqueda"])
+        for match in matches
+        if str(match.get("codigo_busqueda") or "").isdigit()
+    ]
+    ficha_por_codigo: dict[int, dict[str, Any]] = {}
+    detalle_amenidades_disponible = True
+    if codigos:
+        query_ficha = f"""
+            SELECT
+                propiedad_codigo,
+                ANY_VALUE(tiene_internet) AS tiene_internet,
+                ANY_VALUE(tiene_aire_salon) AS tiene_aire_acondicionado,
+                ANY_VALUE(tiene_lavadora) AS tiene_lavadora,
+                ANY_VALUE(tiene_lavavajillas) AS tiene_lavavajillas
+            FROM {TABLA_FICHA_TECNICA}
+            WHERE propiedad_codigo IN UNNEST(@codigos)
+            GROUP BY propiedad_codigo
+        """
+        try:
+            rows_ficha = list(_bq.query(
+                query_ficha,
+                job_config=bigquery.QueryJobConfig(
+                    query_parameters=[
+                        bigquery.ArrayQueryParameter(
+                            "codigos", "INT64", codigos
+                        )
+                    ],
+                    maximum_bytes_billed=_BILLING_CAP,
+                ),
+            ).result())
+            ficha_por_codigo = {
+                int(row["propiedad_codigo"]): _row_to_dict(row)
+                for row in rows_ficha
+            }
+        except Exception:
+            detalle_amenidades_disponible = False
+            log.warning(
+                "obtener_detalle_propiedad: amenidades no disponibles",
+                exc_info=True,
+            )
+
+    # El desglose de baños es enriquecimiento opcional. Se consulta por separado
+    # para que un cambio o ausencia en Planta/Banio no inutilice la ficha entera.
+    villa_ids = [match["villa_id"] for match in matches]
+    query_banios = f"""
+        SELECT
+            p.villa_id,
+            COUNT(b.banio_id) AS banios_con_detalle,
+            COUNTIF(b.tiene_baniera OR b.tiene_baniera_suelta) AS banios_con_banera,
+            COUNTIF(
+                b.tiene_ducha OR b.tiene_ducha_plato OR b.tiene_ducha_obra
+                OR b.tiene_ducha_hidromasaje
+            ) AS banios_con_ducha,
+            COUNTIF(b.tiene_jacuzzi OR b.tiene_baniera_jacuzzi) AS banios_con_jacuzzi,
+            COUNTIF(b.tiene_bide) AS banios_con_bide,
+            COUNTIF(b.es_ensuite) AS banios_ensuite
+        FROM {TABLA_PLANTA} p
+        JOIN {TABLA_BANIO} b ON b.planta_id = p.planta_id AND b.es_activo = TRUE
+        WHERE p.villa_id IN UNNEST(@villa_ids)
+        GROUP BY p.villa_id
+    """
+    banios_por_villa: dict[str, dict[str, Any]] = {}
+    detalle_banios_disponible = True
+    try:
+        rows_banios = list(_bq.query(
+            query_banios,
+            job_config=bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ArrayQueryParameter("villa_ids", "STRING", villa_ids)
+                ],
+                maximum_bytes_billed=_BILLING_CAP,
+            ),
+        ).result())
+        banios_por_villa = {
+            row["villa_id"]: _row_to_dict(row)
+            for row in rows_banios
+        }
+    except Exception:
+        detalle_banios_disponible = False
+        log.warning(
+            "obtener_detalle_propiedad: desglose de baños no disponible",
+            exc_info=True,
+        )
+
+    for match in matches:
+        villa_id = match.pop("villa_id")
+        codigo_raw = match.pop("codigo_busqueda", None)
+        codigo = int(codigo_raw) if str(codigo_raw or "").isdigit() else None
+        detalle_ficha = ficha_por_codigo.get(codigo, {}) if codigo else {}
+        detalle_ficha.pop("propiedad_codigo", None)
+        match.update(detalle_ficha)
+        detalle_banios = banios_por_villa.get(villa_id, {})
+        detalle_banios.pop("villa_id", None)
+        match.update(detalle_banios)
+
+    return {
+        "matches": matches,
+        "count": len(matches),
+        "detalle_amenidades_disponible": detalle_amenidades_disponible,
+        "detalle_banios_disponible": detalle_banios_disponible,
+    }
 
 
 _DOMINIO_WEB = "abahanavillas.com"
@@ -567,6 +700,182 @@ def buscar_internet(consulta: str) -> dict[str, Any]:
     return {"respuesta": texto, "fuentes": fuentes}
 
 
+def consultar_disponibilidad(
+    fecha_desde: str,
+    fecha_hasta: str | None = None,
+    villa_nombre: str | None = None,
+    ubicacion: str | None = None,
+    zona: str | None = None,
+    capacidad_min: int | None = None,
+    piscina: bool | None = None,
+    limite: int = 20,
+) -> dict[str, Any]:
+    """Busca villas libres en un periodo futuro y devuelve el total exacto.
+
+    Esta es la única herramienta que debe usarse para afirmar que una villa
+    está disponible o para contar villas libres. Comprueba solapamientos con
+    reservas reales y rechaza fechas pasadas.
+
+    Args:
+        fecha_desde: Fecha de entrada solicitada (YYYY-MM-DD).
+        fecha_hasta: Fecha de salida solicitada (YYYY-MM-DD, exclusiva). Si se
+            omite, se comprueba una estancia de una noche desde fecha_desde.
+        villa_nombre: Nombre o parte del nombre de una villa concreta.
+        ubicacion: Pueblo cercano (Calpe, Altea, Moraira...).
+        zona: Zona geográfica.
+        capacidad_min: Número mínimo de huéspedes.
+        piscina: True para exigir piscina privada.
+        limite: Máximo de villas a mostrar (el total siempre es exacto).
+
+    Returns:
+        Diccionario con available, total_disponibles, matches y periodo. Si las
+        fechas no son válidas devuelve error y no consulta BigQuery.
+    """
+    hoy = _ahora_local().date()
+    try:
+        desde = _parse_iso_date(fecha_desde, "fecha_desde")
+        hasta = (
+            _parse_iso_date(fecha_hasta, "fecha_hasta")
+            if fecha_hasta
+            else desde + datetime.timedelta(days=1)
+        )
+    except ValueError as exc:
+        return {
+            "available": False,
+            "total_disponibles": 0,
+            "matches": [],
+            "error": str(exc),
+            "fecha_actual": hoy.isoformat(),
+        }
+
+    if desde < hoy:
+        return {
+            "available": False,
+            "total_disponibles": 0,
+            "matches": [],
+            "error": (
+                f"No se puede consultar disponibilidad para una fecha pasada. "
+                f"La fecha actual en Europe/Madrid es {hoy.isoformat()}."
+            ),
+            "fecha_actual": hoy.isoformat(),
+        }
+    if hasta <= desde:
+        return {
+            "available": False,
+            "total_disponibles": 0,
+            "matches": [],
+            "error": "fecha_hasta debe ser posterior a fecha_desde.",
+            "fecha_actual": hoy.isoformat(),
+        }
+
+    conditions = ["v.es_activo = TRUE", "v.es_visible = TRUE"]
+    params: list[bigquery.ScalarQueryParameter] = [
+        bigquery.ScalarQueryParameter("fecha_desde", "DATE", desde),
+        bigquery.ScalarQueryParameter("fecha_hasta", "DATE", hasta),
+    ]
+    if villa_nombre:
+        conditions.append("LOWER(v.nombre) LIKE LOWER(@villa_nombre)")
+        params.append(bigquery.ScalarQueryParameter(
+            "villa_nombre", "STRING", f"%{villa_nombre.strip()}%"
+        ))
+    if ubicacion:
+        conditions.append("LOWER(v.pueblo_cercano) LIKE LOWER(@ubicacion)")
+        params.append(bigquery.ScalarQueryParameter(
+            "ubicacion", "STRING", f"%{ubicacion.strip()}%"
+        ))
+    if zona:
+        conditions.append("LOWER(v.zona) LIKE LOWER(@zona)")
+        params.append(bigquery.ScalarQueryParameter(
+            "zona", "STRING", f"%{zona.strip()}%"
+        ))
+    if capacidad_min is not None:
+        conditions.append("v.capacidad_pax >= @capacidad_min")
+        params.append(bigquery.ScalarQueryParameter(
+            "capacidad_min", "INT64", capacidad_min
+        ))
+    if piscina is not None:
+        conditions.append(
+            f"v.tiene_piscina_privada = {'TRUE' if piscina else 'FALSE'}"
+        )
+
+    limite = min(max(1, limite), 50)
+    where = " AND ".join(conditions)
+    query = f"""
+        WITH villa_dedup AS (
+            SELECT *
+            FROM {TABLA_VILLA}
+            {_DEDUP_VILLA}
+        ),
+        disponibles AS (
+            SELECT
+                v.nombre,
+                v.pueblo_cercano,
+                v.zona,
+                v.region,
+                v.capacidad_pax,
+                v.capacidad_camas,
+                v.numero_banos,
+                v.tiene_piscina_privada,
+                v.admite_animales
+            FROM villa_dedup v
+            WHERE {where}
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM {TABLA_RESERVAS} r
+                  WHERE r.villa_id = v.villa_id
+                    AND COALESCE(r.es_activo, TRUE) = TRUE
+                    AND UPPER(COALESCE(r.estado_reserva, '')) NOT IN (
+                        'CA', 'CANCELACION', 'CANCELADA'
+                    )
+                    AND UPPER(COALESCE(r.estado_documento, '')) NOT IN (
+                        'VO', 'ANULADA', 'ANULADO'
+                    )
+                    AND r.fecha_entrada < @fecha_hasta
+                    AND r.fecha_salida > @fecha_desde
+              )
+        )
+        SELECT *, COUNT(*) OVER() AS total_disponibles
+        FROM disponibles
+        ORDER BY nombre
+        LIMIT {limite}
+    """
+    try:
+        rows = list(_bq.query(
+            query,
+            job_config=bigquery.QueryJobConfig(
+                query_parameters=params,
+                maximum_bytes_billed=_BILLING_CAP,
+            ),
+        ).result())
+    except Exception as exc:
+        log.exception("consultar_disponibilidad: error en BigQuery")
+        return {
+            "available": False,
+            "total_disponibles": 0,
+            "matches": [],
+            "periodo": {
+                "entrada": desde.isoformat(),
+                "salida": hasta.isoformat(),
+            },
+            "error": str(exc),
+        }
+
+    matches = [_row_to_dict(row) for row in rows]
+    total = int(matches[0].pop("total_disponibles")) if matches else 0
+    for match in matches[1:]:
+        match.pop("total_disponibles", None)
+    return {
+        "available": total > 0,
+        "total_disponibles": total,
+        "matches": matches,
+        "periodo": {
+            "entrada": desde.isoformat(),
+            "salida": hasta.isoformat(),
+            "zona_horaria": "Europe/Madrid",
+        },
+    }
+
+
 def consultar_reservas(
     villa_nombre: str | None = None,
     ubicacion: str | None = None,
@@ -582,8 +891,9 @@ def consultar_reservas(
     """Consulta reservas individuales con fechas, importes y datos del cliente.
 
     Usa para preguntas sobre reservas concretas: fechas de entrada/salida,
-    importe, cliente, estado, disponibilidad de una villa en un periodo.
-    Permite cruzar con ubicación y amenidades de la villa.
+    importe, cliente y estado. No uses la ausencia de resultados para afirmar
+    disponibilidad; para ello usa consultar_disponibilidad.
+    Permite cruzar con ubicación y datos de la villa.
 
     Args:
         villa_nombre: Nombre o parte del nombre de la villa (ej. "NASSAU").
@@ -592,7 +902,7 @@ def consultar_reservas(
         piscina: True para filtrar villas con piscina privada.
         fecha_desde: Fecha de entrada desde (YYYY-MM-DD).
         fecha_hasta: Fecha de entrada hasta (YYYY-MM-DD).
-        estado_reserva: 'RE'=realizada, 'PE'=pendiente, 'CA'=cancelada,
+        estado_reserva: 'RE'=reserva, 'PE'=perdida, 'CA'=cancelación,
                         'NS'=no show, 'PR'=prereserva, 'BO'=bloqueada.
         estado_documento: 'CO'=confirmado, 'DR'=borrador, 'CL'=cerrado, 'VO'=anulado.
         excluir_canceladas: Si True (defecto), excluye canceladas (CA) y anuladas (VO).
@@ -628,21 +938,57 @@ def consultar_reservas(
         params.append(bigquery.ScalarQueryParameter("fecha_hasta", "DATE", fecha_hasta))
 
     if estado_reserva:
-        conditions.append("UPPER(r.estado_reserva) = UPPER(@estado_reserva)")
-        params.append(bigquery.ScalarQueryParameter("estado_reserva", "STRING", estado_reserva))
+        estado_codigo = estado_reserva.strip().upper()
+        estado_nombre = _ESTADOS_RESERVA.get(estado_codigo, estado_codigo)
+        conditions.append(
+            "UPPER(r.estado_reserva) IN (@estado_reserva, @estado_reserva_nombre)"
+        )
+        params.extend([
+            bigquery.ScalarQueryParameter(
+                "estado_reserva", "STRING", estado_codigo
+            ),
+            bigquery.ScalarQueryParameter(
+                "estado_reserva_nombre", "STRING", estado_nombre
+            ),
+        ])
 
     if estado_documento:
-        conditions.append("UPPER(r.estado_documento) = UPPER(@estado_documento)")
-        params.append(bigquery.ScalarQueryParameter("estado_documento", "STRING", estado_documento))
+        documento_codigo = estado_documento.strip().upper()
+        documento_nombre = _ESTADOS_DOCUMENTO.get(
+            documento_codigo, documento_codigo
+        )
+        conditions.append(
+            "UPPER(r.estado_documento) IN "
+            "(@estado_documento, @estado_documento_nombre)"
+        )
+        params.extend([
+            bigquery.ScalarQueryParameter(
+                "estado_documento", "STRING", documento_codigo
+            ),
+            bigquery.ScalarQueryParameter(
+                "estado_documento_nombre", "STRING", documento_nombre
+            ),
+        ])
 
     if excluir_canceladas:
-        conditions.append("COALESCE(r.estado_reserva, '') != 'CA'")
-        conditions.append("COALESCE(r.estado_documento, '') != 'VO'")
+        conditions.append(
+            "UPPER(COALESCE(r.estado_reserva, '')) NOT IN "
+            "('CA', 'CANCELACION', 'CANCELADA')"
+        )
+        conditions.append(
+            "UPPER(COALESCE(r.estado_documento, '')) NOT IN "
+            "('VO', 'ANULADA', 'ANULADO')"
+        )
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     limite = min(max(1, limite), 50)
 
     query = f"""
+        WITH villa_dedup AS (
+            SELECT *
+            FROM {TABLA_VILLA}
+            {_DEDUP_VILLA}
+        )
         SELECT
             r.localizador,
             r.villa_nombre,
@@ -664,7 +1010,7 @@ def consultar_reservas(
             v.zona,
             v.tiene_piscina_privada
         FROM {TABLA_RESERVAS} r
-        LEFT JOIN {TABLA_VILLA} v ON r.villa_id = v.villa_id
+        LEFT JOIN villa_dedup v ON r.villa_id = v.villa_id
         {where}
         ORDER BY r.fecha_entrada DESC
         LIMIT {limite}
@@ -742,13 +1088,24 @@ def resumen_reservas(
         params.append(bigquery.ScalarQueryParameter("fecha_hasta", "DATE", fecha_hasta))
 
     if excluir_canceladas:
-        conditions.append("COALESCE(r.estado_reserva, '') != 'CA'")
-        conditions.append("COALESCE(r.estado_documento, '') != 'VO'")
+        conditions.append(
+            "UPPER(COALESCE(r.estado_reserva, '')) NOT IN "
+            "('CA', 'CANCELACION', 'CANCELADA')"
+        )
+        conditions.append(
+            "UPPER(COALESCE(r.estado_documento, '')) NOT IN "
+            "('VO', 'ANULADA', 'ANULADO')"
+        )
 
     where = f"WHERE {' AND '.join(conditions)}"
     limite = min(max(1, limite), 50)
 
     query = f"""
+        WITH villa_dedup AS (
+            SELECT *
+            FROM {TABLA_VILLA}
+            {_DEDUP_VILLA}
+        )
         SELECT
             {select_expr} AS dimension,
             COUNT(*) AS total_reservas,
@@ -758,7 +1115,7 @@ def resumen_reservas(
             MIN(r.fecha_entrada) AS primera_entrada,
             MAX(r.fecha_entrada) AS ultima_entrada
         FROM {TABLA_RESERVAS} r
-        LEFT JOIN {TABLA_VILLA} v ON r.villa_id = v.villa_id
+        LEFT JOIN villa_dedup v ON r.villa_id = v.villa_id
         {where}
         GROUP BY {group_expr}
         ORDER BY total_reservas DESC
@@ -914,6 +1271,21 @@ en la Costa Blanca (España). Ayudas con villas Y con información turística lo
 - NUNCA digas que solo puedes ayudar con villas si la pregunta es sobre turismo,
   fiestas, eventos o clima: usa `buscar_internet` primero.
 
+## Fecha, hora y disponibilidad
+- La zona horaria del negocio y del agente es `Europe/Madrid`.
+- Para cualquier referencia relativa ("hoy", "mañana", "este fin de semana",
+  "este mes", etc.), llama primero a `obtener_fecha_hora_actual()`. No inventes
+  la fecha ni pidas al usuario un rango si su expresión relativa es suficiente.
+- Para saber si una villa está libre o contar villas libres, llama SIEMPRE a
+  `consultar_disponibilidad(...)`. La ausencia de filas en `consultar_reservas`
+  no demuestra disponibilidad.
+- Nunca afirmes disponibilidad si la herramienta devuelve `error`.
+- No se puede reservar ni consultar disponibilidad para fechas pasadas. Explica
+  el rechazo indicando la fecha actual devuelta por la herramienta.
+- En un rango, `fecha_desde` es la entrada y `fecha_hasta` es la salida
+  (la fecha de salida no se ocupa). Para consultar solo un día, omite
+  `fecha_hasta`; la herramienta comprobará una noche.
+
 ## Web corporativa
 - URL base: https://www.abahanavillas.com/es/
 - Usa `consultar_web(url)` cuando el usuario pregunte por información de la empresa:
@@ -944,12 +1316,16 @@ en la Costa Blanca (España). Ayudas con villas Y con información turística lo
 INSTRUCTION_CLIENTE = f"""{_INSTRUCCION_BASE}
 
 ## Herramientas disponibles
+- `obtener_fecha_hora_actual()`: fecha y hora actual en Europe/Madrid; obligatoria
+  para expresiones relativas como hoy o mañana.
 - `listar_propiedades()`: catálogo completo sin filtros.
 - `buscar_propiedades(...)`: búsqueda con filtros: ubicación, zona, capacidad, camas,
   baños, metros habitables, piscina privada, mascotas, internet, aire acondicionado,
   lavadora, lavavajillas.
 - `buscar_por_valoracion(...)`: cuando el usuario pida villas bien valoradas o con
   un rating mínimo (rating_exterior, rating_interior, rating_vistas en escala 1-6).
+- `consultar_disponibilidad(...)`: disponibilidad real y total exacto de villas
+  libres en un periodo; rechaza fechas pasadas.
 - `consultar_web(url)`: información corporativa de la web (política de privacidad,
   aviso legal, condiciones, contacto, destinos…).
 - `buscar_internet(consulta)`: búsqueda en internet (fiestas, eventos, clima,
@@ -960,12 +1336,16 @@ INSTRUCTION_CLIENTE = f"""{_INSTRUCCION_BASE}
 INSTRUCTION_INTERNO = f"""{_INSTRUCCION_BASE}
 
 ## Herramientas disponibles
+- `obtener_fecha_hora_actual()`: fecha y hora actual en Europe/Madrid; obligatoria
+  para expresiones relativas como hoy o mañana.
 - `listar_propiedades()`: catálogo completo sin filtros.
 - `buscar_propiedades(...)`: búsqueda con filtros: ubicación, zona, capacidad, camas,
   baños, metros habitables, piscina privada, mascotas, internet, aire acondicionado,
   lavadora, lavavajillas.
 - `buscar_por_valoracion(...)`: cuando el usuario pida villas bien valoradas o con
   un rating mínimo.
+- `consultar_disponibilidad(...)`: única fuente para afirmar disponibilidad o
+  contar villas libres; comprueba solapamientos y rechaza fechas pasadas.
 - `obtener_detalle_propiedad(nombre)`: ficha completa con dirección, coordenadas,
   desglose de camas, metros habitables, ratings por categoría, amenidades
   (internet, aire acondicionado, lavadora, lavavajillas) y desglose real de los
@@ -973,10 +1353,10 @@ INSTRUCTION_INTERNO = f"""{_INSTRUCCION_BASE}
   cuando el usuario pregunte por una villa concreta o pida más detalles.
 - `consultar_reservas(...)`: reservas individuales con fechas de entrada/salida,
   importe, cliente y estado. Filtra por villa, ubicación, zona, piscina, rango de
-  fechas, estado_reserva ('RE'=realizada, 'PE'=pendiente, 'CA'=cancelada,
+  fechas, estado_reserva ('RE'=reserva, 'PE'=perdida, 'CA'=cancelación,
   'NS'=no show, 'PR'=prereserva, 'BO'=bloqueada) y estado_documento
-  ('CO'=confirmado, 'DR'=borrador, 'CL'=cerrado, 'VO'=anulado). Crucialamente
-  permite cruzar datos de reservas con ubicación y amenidades de las villas.
+  ('CO'=confirmado, 'DR'=borrador, 'CL'=cerrado, 'VO'=anulado). No deduzcas
+  disponibilidad de esta herramienta; usa `consultar_disponibilidad`.
 - `resumen_reservas(...)`: estadísticas agregadas de reservas (count, importe total/
   medio, noches medias). Agrupa por 'villa', 'zona', 'mes' o 'ano'. Usa para
   preguntas analíticas: qué villa tiene más reservas, qué zona factura más, etc.
@@ -999,21 +1379,25 @@ completa, coordenadas, datos de reservas e importes.
 INSTRUCTION_ADMIN = f"""{_INSTRUCCION_BASE}
 
 ## Herramientas disponibles
+- `obtener_fecha_hora_actual()`: fecha y hora actual en Europe/Madrid; obligatoria
+  para expresiones relativas como hoy o mañana.
 - `listar_propiedades()`: catálogo completo sin filtros.
 - `buscar_propiedades(...)`: búsqueda con filtros: ubicación, zona, capacidad, camas,
   baños, metros habitables, piscina privada, mascotas, internet, aire acondicionado,
   lavadora, lavavajillas.
 - `buscar_por_valoracion(...)`: cuando el usuario pida villas bien valoradas o con
   un rating mínimo (rating_exterior, rating_interior, rating_vistas en escala 1-6).
+- `consultar_disponibilidad(...)`: única fuente para afirmar disponibilidad o
+  contar villas libres; comprueba solapamientos y rechaza fechas pasadas.
 - `obtener_detalle_propiedad(nombre)`: ficha completa con dirección, coordenadas,
   metros, ratings, propietario, amenidades (internet, aire acondicionado,
   lavadora, lavavajillas) y desglose real de los baños (bañera, ducha, jacuzzi,
   bidé, en-suite).
 - `consultar_reservas(...)`: reservas individuales con fechas de entrada/salida,
   importe y estado. Filtra por villa, ubicación, zona, piscina, rango de fechas,
-  estado_reserva ('RE'=realizada, 'PE'=pendiente, 'CA'=cancelada, 'NS'=no show,
+  estado_reserva ('RE'=reserva, 'PE'=perdida, 'CA'=cancelación, 'NS'=no show,
   'PR'=prereserva, 'BO'=bloqueada) y estado_documento ('CO'=confirmado, 'DR'=borrador,
-  'CL'=cerrado, 'VO'=anulado).
+  'CL'=cerrado, 'VO'=anulado). No la uses para afirmar disponibilidad.
 - `resumen_reservas(...)`: estadísticas agregadas (count, importe total/medio, noches
   medias). Agrupa por 'villa', 'zona', 'mes' o 'ano'. Para preguntas analíticas:
   qué villa tiene más reservas, qué zona factura más, evolución mensual, etc.
@@ -1046,9 +1430,11 @@ agent_cliente = Agent(
     ),
     instruction=INSTRUCTION_CLIENTE,
     tools=[
+        obtener_fecha_hora_actual,
         listar_propiedades,
         buscar_propiedades,
         buscar_por_valoracion,
+        consultar_disponibilidad,
         consultar_web,
         buscar_internet,
         consultar_feedback_negativo,
@@ -1064,10 +1450,12 @@ agent_interno = Agent(
     ),
     instruction=INSTRUCTION_INTERNO,
     tools=[
+        obtener_fecha_hora_actual,
         listar_propiedades,
         buscar_propiedades,
         buscar_por_valoracion,
         obtener_detalle_propiedad,
+        consultar_disponibilidad,
         consultar_reservas,
         resumen_reservas,
         consultar_web,
@@ -1088,10 +1476,12 @@ agent_admin = Agent(
     ),
     instruction=INSTRUCTION_ADMIN,
     tools=[
+        obtener_fecha_hora_actual,
         listar_propiedades,
         buscar_propiedades,
         buscar_por_valoracion,
         obtener_detalle_propiedad,
+        consultar_disponibilidad,
         consultar_reservas,
         resumen_reservas,
         consultar_web,

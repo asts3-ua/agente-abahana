@@ -1,0 +1,67 @@
+config {
+  type: "table",
+  name: "stg_etendo_Reserva",
+  description: "Staging: Reservas (Order deduplicado por id)"
+}
+
+WITH raw_data AS (
+  SELECT ingestion_dt, run_id, payload AS json
+  FROM ${ref("etendo_Order")}
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY LAX_STRING(payload.id)
+    ORDER BY ingestion_dt DESC, run_id DESC
+  ) = 1
+)
+SELECT
+  LAX_STRING(json.id)                                                                    AS reserva_id,
+  LAX_STRING(json.documentNo)                                                            AS localizador,
+  LAX_STRING(json.ovTipoestancia)                                                        AS tipo_estancia_codigo,
+  LAX_STRING(json.opxdesTipo)                                                            AS subtipo_reserva,
+  CASE LAX_STRING(json.documentStatus)
+    WHEN "CO" THEN "Completada"
+    WHEN "CL" THEN "Cerrada"
+    WHEN "DR" THEN "Borrador"
+    WHEN "VO" THEN "Anulada"
+    ELSE LAX_STRING(json.documentStatus)
+  END                                                                                    AS estado_documento,
+  SAFE.PARSE_DATE("%Y-%m-%d", LAX_STRING(json.orderDate))                               AS fecha_pedido,
+  SAFE.PARSE_DATE("%Y-%m-%d", LAX_STRING(json.abhtemDatein))                             AS fecha_entrada,
+  SAFE.PARSE_DATE("%Y-%m-%d", LAX_STRING(json.abhtemDateout))                            AS fecha_salida,
+  SAFE.PARSE_DATE("%Y-%m-%d", LAX_STRING(json.opxdesFechaAnulacion))                     AS fecha_anulacion,
+  LAX_STRING(json.opxdesResource)                                                        AS villa_id,
+  LAX_STRING(json['opxdesResource$_identifier'])                                         AS villa_nombre,
+  LAX_STRING(json.businessPartner)                                                       AS cliente_id,
+  LAX_STRING(json['businessPartner$_identifier'])                                        AS cliente_nombre,
+  LAX_STRING(json.opxdesHuesped)                                                         AS huesped_id,
+  LAX_STRING(json.ovAgencia)                                                             AS agencia_id,
+  LAX_STRING(json.ovPropietario)                                                         AS propietario_id,
+  SAFE_CAST(LAX_INT64(json.ovAdultpax) AS INT64)                                         AS adultos,
+  SAFE_CAST(LAX_INT64(json.ovChildpax) AS INT64)                                         AS ninos,
+  SAFE_CAST(LAX_INT64(json.ovNumpets) AS INT64)                                           AS num_mascotas,
+  CASE LAX_STRING(json.ovjchEstadoreserva)
+    WHEN "RE" THEN "Reserva"
+    WHEN "PE" THEN "Perdida"
+    WHEN "CA" THEN "Cancelacion"
+    WHEN "NS" THEN "NoShow"
+    WHEN "PR" THEN "PreReserva"
+    WHEN "BO" THEN "Borrador"
+    ELSE LAX_STRING(json.ovjchEstadoreserva)
+  END                                                                                    AS estado_reserva,
+  SAFE_CAST(LAX_BOOL(json.ovjchPrereserva) AS BOOL)                                      AS es_prereserva,
+  SAFE_CAST(LAX_BOOL(json.ovjchAltoriesgo) AS BOOL)                                      AS es_alto_riesgo,
+  SAFE_CAST(LAX_BOOL(json.ovjchClientenuevo) AS BOOL)                                     AS es_cliente_nuevo,
+  LAX_STRING(json.ovjchEstadolimpieza)                                                   AS estado_limpieza,
+  SAFE_CAST(LAX_FLOAT64(json.grandTotalAmount) AS FLOAT64)                               AS importe_total,
+  SAFE_CAST(LAX_FLOAT64(json.summedLineAmount) AS FLOAT64)                               AS importe_lineas,
+  LAX_STRING(json.currency)                                                              AS moneda_id,
+  LAX_STRING(json.paymentTerms)                                                          AS condicion_pago_id,
+  LAX_STRING(json.priceList)                                                             AS tarifa_id,
+  LAX_STRING(json.opxdesNotaEntrada)                                                     AS nota_entrada,
+  LAX_STRING(json.opxdesNotaSalida)                                                        AS nota_salida,
+  LAX_STRING(json.opxdesNotaCliente)                                                     AS nota_cliente,
+  SAFE_CAST(LAX_BOOL(json.active) AS BOOL)                                               AS es_activo,
+  SAFE.PARSE_TIMESTAMP("%Y-%m-%dT%H:%M:%E*S%Ez", LAX_STRING(json.creationDate))          AS fecha_creacion,
+  SAFE.PARSE_TIMESTAMP("%Y-%m-%dT%H:%M:%E*S%Ez", LAX_STRING(json.updated))               AS fecha_actualizacion,
+  ingestion_dt                                                                           AS dataform_ingestion_dt,
+  run_id                                                                                 AS dataform_run_id
+FROM raw_data

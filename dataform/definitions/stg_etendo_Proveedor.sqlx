@@ -1,0 +1,25 @@
+config {
+  type: "table",
+  name: "stg_etendo_Proveedor",
+  description: "Staging: Proveedores (BusinessPartner con vendor = true)"
+}
+
+WITH raw_data AS (
+  SELECT ingestion_dt, run_id, payload AS json
+  FROM ${ref("etendo_BusinessPartner")}
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY LAX_STRING(payload.id)
+    ORDER BY ingestion_dt DESC, run_id DESC
+  ) = 1
+)
+SELECT
+  LAX_STRING(json.id)                                                                    AS id,
+  LAX_STRING(json.taxID)                                                                 AS nif,
+  LAX_STRING(json.ovMail)                                                                AS email,
+  LAX_STRING(json.language)                                                              AS idioma,
+  LAX_STRING(json.opxdesIdiomaContrato)                                                  AS idioma_contrato,
+  SAFE_CAST(LAX_BOOL(json.vendor) AS BOOL)                                              AS es_proveedor,
+  ingestion_dt                                                                           AS dataform_ingestion_dt,
+  run_id                                                                                 AS dataform_run_id
+FROM raw_data
+WHERE SAFE_CAST(LAX_BOOL(json.vendor) AS BOOL) = TRUE
