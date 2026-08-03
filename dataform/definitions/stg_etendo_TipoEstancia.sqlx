@@ -1,0 +1,11 @@
+config {
+  type: "table",
+  name: "stg_etendo_TipoEstancia",
+  description: "Catálogo de tipos de estancia usados en reservas"
+}
+
+SELECT * FROM UNNEST([
+  STRUCT("HOS" AS tipo_estancia_codigo, "Hospedaje" AS tipo_estancia_descripcion, "Alquiler Vacacional" AS grupo_estancia),
+  STRUCT("VUT", "VUT", "Alquiler Vacacional"),
+  STRUCT("LE", "Larga Estancia", "Larga Temporada")
+])

@@ -1,0 +1,20 @@
+config {
+  type: "table",
+  name: "stg_etendo_TipoProducto",
+  description: "Staging: Categorías de producto"
+}
+
+WITH raw_data AS (
+  SELECT ingestion_dt, run_id, payload AS json
+  FROM ${ref("etendo_ProductCategory")}
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY LAX_STRING(payload.id)
+    ORDER BY ingestion_dt DESC, run_id DESC
+  ) = 1
+)
+SELECT
+  LAX_STRING(json.id)                                                                    AS id,
+  LAX_STRING(json.name)                                                                  AS nombre,
+  ingestion_dt                                                                           AS dataform_ingestion_dt,
+  run_id                                                                                 AS dataform_run_id
+FROM raw_data

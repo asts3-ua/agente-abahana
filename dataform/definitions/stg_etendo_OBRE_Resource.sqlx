@@ -1,0 +1,71 @@
+config {
+  type: "table",
+  name: "stg_etendo_OBRE_Resource",
+  description: "Staging: Recursos OBRE (villas en Etendo, deduplicado por id)"
+}
+
+WITH raw_data AS (
+  SELECT ingestion_dt, run_id, payload AS json
+  FROM ${ref("etendo_OBRE_Resource")}
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY LAX_STRING(payload.id)
+    ORDER BY ingestion_dt DESC, run_id DESC
+  ) = 1
+)
+SELECT
+  LAX_STRING(json.id)                                                                    AS _id,
+  LAX_STRING(json.id)                                                                    AS etendo_raw_id,
+  LAX_STRING(json['_entityName'])                                                        AS entidad_nombre,
+  LAX_STRING(json.searchKey)                                                             AS codigo_busqueda,
+  LAX_STRING(json.name)                                                                  AS recurso_nombre,
+  LAX_STRING(json['_identifier'])                                                        AS recurso_identificador,
+  LAX_STRING(json.businessPartner)                                                       AS cliente_id,
+  LAX_STRING(json['businessPartner$_identifier'])                                        AS cliente_nombre,
+  LAX_STRING(json.organization)                                                          AS organizacion_id,
+  LAX_STRING(json['organization$_identifier'])                                           AS organizacion_nombre,
+  LAX_STRING(json.product)                                                               AS producto_id,
+  LAX_STRING(json['product$_identifier'])                                                AS producto_nombre,
+  LAX_STRING(json.productCategory)                                                       AS producto_categoria_id,
+  LAX_STRING(json['productCategory$_identifier'])                                        AS producto_categoria_nombre,
+  LAX_STRING(json.resourceCategory)                                                      AS recurso_categoria_id,
+  LAX_STRING(json['resourceCategory$_identifier'])                                       AS recurso_categoria_nombre,
+  LAX_STRING(json.opxdesCalendario)                                                      AS calendario_reservas_id,
+  LAX_STRING(json['opxdesCalendario$_identifier'])                                       AS calendario_reservas_nombre,
+  SAFE_CAST(LAX_BOOL(json.active) AS BOOL)                                               AS esta_activo,
+  SAFE_CAST(LAX_BOOL(json.bookingRule) AS BOOL)                                          AS reservable_online,
+  CAST(NULL AS BOOL)                                                                     AS reservable_por_todos,
+  CAST(NULL AS BOOL)                                                                     AS permite_reservas_retroactivas,
+  CAST(NULL AS BOOL)                                                                     AS permite_cambios_reserva,
+  CAST(NULL AS BOOL)                                                                     AS tiene_capacidad,
+  LAX_STRING(json.resourceType)                                                          AS tipo_recurso,
+  CAST(NULL AS INT64)                                                                    AS opx_total_camas,
+  CAST(NULL AS INT64)                                                                    AS opx_total_fotos,
+  CAST(NULL AS INT64)                                                                    AS opx_capacidad_pax,
+  CAST(NULL AS INT64)                                                                    AS opx_score_rating,
+  CAST(NULL AS STRING)                                                                   AS opx_poblacion,
+  CAST(NULL AS STRING)                                                                   AS opx_propietario,
+  SAFE_CAST(LAX_BOOL(json.opxdesNovedad) AS BOOL)                                        AS opx_es_novedad,
+  SAFE_CAST(LAX_BOOL(json.opxdesRecomendada) AS BOOL)                                    AS opx_es_recomendada,
+  CAST(NULL AS BOOL)                                                                     AS opx_es_seleccion,
+  (LAX_STRING(json.opxdesCalendario) IS NOT NULL)                                        AS opx_tiene_calendario,
+  CAST(NULL AS BOOL)                                                                     AS opx_alquiler_inventario,
+  SAFE_CAST(LAX_BOOL(json.ovVisible) AS BOOL)                                            AS canal_ov_visible,
+  LAX_STRING(json.ovjchStatelimpieza)                                                    AS canal_estado_limpieza,
+  SAFE_CAST(LAX_BOOL(json.ovjchSincAvantio) AS BOOL)                                     AS canal_sincroniza_avantio,
+  CAST(NULL AS BOOL)                                                                     AS canal_ver_tarifas,
+  CAST(NULL AS BOOL)                                                                     AS canal_ver_calendario,
+  SAFE_CAST(LAX_BOOL(json.ovjchNohuecos) AS BOOL)                                        AS canal_evitar_huecos,
+  CAST(NULL AS STRING)                                                                   AS unidad_medida_id,
+  CAST(NULL AS STRING)                                                                   AS unidad_medida_nombre,
+  CAST(NULL AS STRING)                                                                   AS columnas_calculadas_id,
+  SAFE_CAST(LAX_INT64(json.recordTime) AS INT64)                                         AS record_time,
+  CAST(NULL AS INT64)                                                                    AS tiempo_anticipacion_cambios,
+  CAST(NULL AS STRING)                                                                   AS creado_por_id,
+  CAST(NULL AS STRING)                                                                   AS creado_por_nombre,
+  CAST(NULL AS STRING)                                                                   AS actualizado_por_id,
+  CAST(NULL AS STRING)                                                                   AS actualizado_por_nombre,
+  SAFE.PARSE_TIMESTAMP("%Y-%m-%dT%H:%M:%E*S%Ez", LAX_STRING(json.creationDate))          AS fecha_creacion_sistema,
+  SAFE.PARSE_TIMESTAMP("%Y-%m-%dT%H:%M:%E*S%Ez", LAX_STRING(json.updated))               AS fecha_actualizacion_sistema,
+  ingestion_dt                                                                           AS dataform_ingestion_dt,
+  run_id                                                                                 AS dataform_run_id
+FROM raw_data

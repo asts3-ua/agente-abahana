@@ -1,0 +1,25 @@
+config {
+  type: "table",
+  name: "stg_etendo_TipoTarifa",
+  description: "Staging: Tipos de tarifa derivados de PricingPriceList"
+}
+
+WITH raw_data AS (
+  SELECT ingestion_dt, run_id, payload AS json
+  FROM ${ref("etendo_PricingPriceList")}
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY LAX_STRING(payload.id)
+    ORDER BY ingestion_dt DESC, run_id DESC
+  ) = 1
+)
+SELECT
+  LAX_STRING(json.id)                                                                    AS id,
+  LAX_STRING(json.name)                                                                  AS nombre,
+  CASE
+    WHEN SAFE_CAST(LAX_BOOL(json.salesPriceList) AS BOOL) THEN "venta"
+    ELSE "compra"
+  END                                                                                    AS tipo,
+  CAST(NULL AS FLOAT64)                                                                  AS descuento,
+  ingestion_dt                                                                           AS dataform_ingestion_dt,
+  run_id                                                                                 AS dataform_run_id
+FROM raw_data
