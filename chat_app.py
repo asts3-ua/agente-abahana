@@ -17,6 +17,7 @@ import time
 import urllib.parse
 import uuid
 from pathlib import Path
+from typing import Any
 
 import requests
 import streamlit as st
@@ -24,8 +25,9 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
-from agent import AGENTS
+from agent import AGENTS, _get_genai_client
 from conversation_store import get_conversation_store
+import groundedness
 
 APP_NAME = "abahana_chat"
 ALLOWED_DOMAINS = {"abahana.com", "inferia.io"}
@@ -88,6 +90,15 @@ FEEDBACK_LABEL_DISPLAY = {
     "util": "Útil",
     "parcial": "Parcial",
     "no_resolvio": "No resolvió",
+}
+
+GROUNDEDNESS_LABEL_DISPLAY = {
+    "soportada": "Soportada por datos",
+    "parcial": "Parcialmente soportada",
+    "no_soportada": "No soportada por los datos",
+    "sin_evidencia": "Sin evidencia de herramientas",
+    "conversacional": "Conversacional",
+    "error": "Verificación no disponible",
 }
 
 @st.cache_resource
@@ -235,12 +246,14 @@ def _handle_oauth_callback() -> None:
 # ADK Runner
 # ---------------------------------------------------------------------------
 
-def _run_agent(role: str, user_id: str, session_id: str, message: str) -> str:
+def _run_agent(
+    role: str, user_id: str, session_id: str, message: str
+) -> tuple[str, list[dict]]:
     agent = AGENTS[role]
     runner = Runner(agent=agent, app_name=APP_NAME, session_service=_session_service)
     content = types.Content(role="user", parts=[types.Part(text=message)])
 
-    async def _run() -> str:
+    async def _run() -> tuple[str, list[dict]]:
         existing = await _session_service.get_session(
             app_name=APP_NAME, user_id=user_id, session_id=session_id
         )
@@ -249,16 +262,18 @@ def _run_agent(role: str, user_id: str, session_id: str, message: str) -> str:
                 app_name=APP_NAME, user_id=user_id, session_id=session_id
             )
         parts: list[str] = []
+        tool_events: list[groundedness.ToolEvent] = []
         async for event in runner.run_async(
             user_id=user_id,
             session_id=session_id,
             new_message=content,
         ):
+            tool_events.extend(groundedness.extract_tool_events(event))
             if event.is_final_response() and event.content:
                 for part in event.content.parts:
                     if getattr(part, "text", None):
                         parts.append(part.text)
-        return "".join(parts)
+        return "".join(parts), groundedness.tool_events_to_trace(tool_events)
 
     return asyncio.run(_run())
 
@@ -337,6 +352,51 @@ def _save_message_feedback(
     msg["rating"] = {"util": 1, "parcial": 0, "no_resolvio": -1}[label]
 
 
+def _staff_can_see_groundedness(role: str) -> bool:
+    return role in {"interno", "admin"}
+
+
+def _render_groundedness_chip(info: dict[str, Any] | None) -> None:
+    """Señal discreta para el equipo. Nunca forma parte del texto del bot."""
+    if not info or not st.session_state.get("show_groundedness"):
+        return
+    verdict = info.get("verdict") or "error"
+    label = GROUNDEDNESS_LABEL_DISPLAY.get(verdict, verdict)
+    score = info.get("score")
+    score_txt = f" · {score:.0%}" if isinstance(score, (int, float)) else ""
+    tools = info.get("tools_used") or []
+    tools_txt = f" · tools: {', '.join(tools)}" if tools else ""
+    css_mod = "ok" if verdict in {"soportada", "conversacional"} else (
+        "warn" if verdict == "parcial" else "bad"
+    )
+    st.markdown(
+        f'<div class="groundedness-chip {css_mod}">{label}{score_txt}{tools_txt}</div>',
+        unsafe_allow_html=True,
+    )
+    claims = info.get("ungrounded_claims") or []
+    summary = (info.get("summary") or "").strip()
+    if verdict in groundedness.PROBLEM_VERDICTS or claims:
+        with st.expander("Detalle de verificación", expanded=False):
+            if summary:
+                st.caption(summary)
+            for claim in claims:
+                st.markdown(f"- {claim}")
+
+
+def _evaluate_groundedness(
+    *,
+    question: str,
+    answer: str,
+    tool_trace: list[dict],
+) -> groundedness.GroundednessResult:
+    return groundedness.judge_groundedness(
+        question=question,
+        answer=answer,
+        tool_trace=tool_trace,
+        genai_client=_get_genai_client(),
+    )
+
+
 def _render_assistant_feedback(msg: dict, index: int) -> None:
     turn_id = msg.get("turn_id")
     if not turn_id:
@@ -412,6 +472,7 @@ def _render_chat_history(messages: list[dict]) -> None:
         if msg["role"] == "assistant":
             with st.chat_message("assistant", avatar=avatar):
                 st.markdown(msg["content"])
+                _render_groundedness_chip(msg.get("groundedness"))
                 _render_assistant_feedback(msg, i)
         else:
             with st.chat_message(msg["role"]):
@@ -446,7 +507,7 @@ def _process_user_prompt(prompt: str, *, role: str, email: str) -> None:
     with st.chat_message("assistant", avatar=avatar):
         with st.spinner("Consultando..."):
             try:
-                response = _run_agent(
+                response, tool_trace = _run_agent(
                     role=role,
                     user_id=email,
                     session_id=st.session_state.session_id,
@@ -457,7 +518,22 @@ def _process_user_prompt(prompt: str, *, role: str, email: str) -> None:
             except Exception as exc:
                 error_msg = str(exc)
                 response = f"Error: {exc}"
+                tool_trace = []
         st.markdown(response)
+
+        grounded = None
+        if error_msg is None:
+            try:
+                grounded = _evaluate_groundedness(
+                    question=prompt,
+                    answer=response,
+                    tool_trace=tool_trace,
+                )
+            except Exception:
+                grounded = None
+        _render_groundedness_chip(
+            grounded.to_ui_dict() if grounded else None
+        )
 
     response_ms = int((time.perf_counter() - started) * 1000)
     turn_id = get_conversation_store().save_turn(
@@ -469,12 +545,14 @@ def _process_user_prompt(prompt: str, *, role: str, email: str) -> None:
         app_name=APP_NAME,
         response_ms=response_ms,
         error=error_msg,
+        groundedness=grounded.to_store_fields() if grounded else None,
     )
 
     st.session_state.messages.append({
         "role": "assistant",
         "content": response,
         "turn_id": turn_id,
+        "groundedness": grounded.to_ui_dict() if grounded else None,
     })
     st.rerun()
 
@@ -590,6 +668,28 @@ def _inject_brand_css() -> None:
             font-weight: 600;
         }}
 
+        .groundedness-chip {{
+            margin-top: 0.35rem;
+            display: inline-block;
+            padding: 0.15rem 0.55rem;
+            border-radius: 999px;
+            font-size: 0.72rem;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+        }}
+        .groundedness-chip.ok {{
+            background: #E7F0E4;
+            color: #3D5A34;
+        }}
+        .groundedness-chip.warn {{
+            background: #F4EBD3;
+            color: #6B5420;
+        }}
+        .groundedness-chip.bad {{
+            background: #F6E4E1;
+            color: #7A3228;
+        }}
+
         [data-testid="stChatMessage"] [data-testid="stImage"] img {{
             border-radius: 0.5rem;
         }}
@@ -665,6 +765,10 @@ def main() -> None:
         )
 
     role = _get_role(email)
+    if _staff_can_see_groundedness(role):
+        st.session_state.setdefault("show_groundedness", role == "admin")
+    else:
+        st.session_state.show_groundedness = False
 
     # Cabecera
     _render_brand_header()
@@ -691,6 +795,13 @@ def main() -> None:
 
     # Cerrar sesión
     with st.sidebar:
+        if _staff_can_see_groundedness(role):
+            st.toggle(
+                "Mostrar verificación interna",
+                key="show_groundedness",
+                help="Comprueba si la respuesta está soportada por las herramientas. "
+                "No se enseña a clientes ni se mete en el texto del bot.",
+            )
         if role == "admin":
             stored = get_conversation_store().count_turns()
             if stored is not None:
@@ -701,6 +812,15 @@ def main() -> None:
                     f"Útil {ratings['util']:,}  ·  "
                     f"Parcial {ratings['parcial']:,}  ·  "
                     f"No resolvió {ratings['no_resolvio']:,}"
+                )
+            gcounts = get_conversation_store().count_groundedness()
+            if gcounts:
+                st.caption(
+                    "Fidelidad: "
+                    f"ok {gcounts['soportada']:,}  ·  "
+                    f"parcial {gcounts['parcial']:,}  ·  "
+                    f"no {gcounts['no_soportada']:,}  ·  "
+                    f"sin evidencia {gcounts['sin_evidencia']:,}"
                 )
         if st.button("Cerrar sesión"):
             st.session_state.clear()

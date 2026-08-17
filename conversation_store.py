@@ -39,6 +39,19 @@ _FEEDBACK_COLUMNS: list[tuple[str, str]] = [
     ("feedback_at", "TEXT"),
 ]
 
+# Fidelidad automática (juez LLM vs evidencia de tools). Se inserta en el
+# mismo INSERT que el turno para no chocar con el buffer de streaming de BQ.
+_GROUNDEDNESS_COLUMNS: list[tuple[str, str]] = [
+    ("groundedness_verdict", "TEXT"),
+    ("groundedness_score", "REAL"),
+    ("groundedness_summary", "TEXT"),
+    ("ungrounded_claims", "TEXT"),
+    ("tools_used", "TEXT"),
+    ("tool_trace", "TEXT"),
+]
+
+_EXTRA_COLUMNS = _FEEDBACK_COLUMNS + _GROUNDEDNESS_COLUMNS
+
 
 class ConversationStore:
     """Persiste turnos de chat (pregunta + respuesta) de forma durable."""
@@ -59,8 +72,10 @@ class ConversationStore:
         app_name: str = "abahana_chat",
         response_ms: int | None = None,
         error: str | None = None,
+        groundedness: dict[str, Any] | None = None,
     ) -> str | None:
         """Guarda un turno completo. Devuelve turn_id o None si falla."""
+        g = groundedness or {}
         row = {
             "turn_id": str(uuid.uuid4()),
             "session_id": session_id,
@@ -79,6 +94,12 @@ class ConversationStore:
             "feedback_tags": None,
             "feedback_comment": None,
             "feedback_at": None,
+            "groundedness_verdict": g.get("groundedness_verdict"),
+            "groundedness_score": g.get("groundedness_score"),
+            "groundedness_summary": g.get("groundedness_summary"),
+            "ungrounded_claims": g.get("ungrounded_claims"),
+            "tools_used": g.get("tools_used"),
+            "tool_trace": g.get("tool_trace"),
         }
         try:
             backend = self._resolve_backend()
@@ -207,6 +228,11 @@ class ConversationStore:
         self._bq_table_id = f"{PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}"
 
     @staticmethod
+    def _sqlite_type_to_bq(sqlite_type: str) -> str:
+        mapping = {"INTEGER": "INTEGER", "TEXT": "STRING", "REAL": "FLOAT"}
+        return mapping.get(sqlite_type.upper(), "STRING")
+
+    @staticmethod
     def _bq_schema_fields(bigquery) -> list:
         fields = [
             bigquery.SchemaField("turn_id", "STRING", mode="REQUIRED"),
@@ -222,8 +248,10 @@ class ConversationStore:
             bigquery.SchemaField("rating", "INTEGER"),
             bigquery.SchemaField("rated_at", "TIMESTAMP"),
         ]
-        for name, bq_type in _FEEDBACK_COLUMNS:
-            fields.append(bigquery.SchemaField(name, bq_type))
+        for name, sqlite_type in _EXTRA_COLUMNS:
+            fields.append(
+                bigquery.SchemaField(name, _sqlite_type_to_bq(sqlite_type))
+            )
         return fields
 
     def _ensure_bq_columns(self, client, table_ref) -> None:
@@ -236,13 +264,15 @@ class ConversationStore:
             new_fields.append(bigquery.SchemaField("rating", "INTEGER"))
         if "rated_at" not in names:
             new_fields.append(bigquery.SchemaField("rated_at", "TIMESTAMP"))
-        for name, bq_type in _FEEDBACK_COLUMNS:
+        for name, sqlite_type in _EXTRA_COLUMNS:
             if name not in names:
-                new_fields.append(bigquery.SchemaField(name, bq_type))
+                new_fields.append(
+                    bigquery.SchemaField(name, _sqlite_type_to_bq(sqlite_type))
+                )
         if new_fields:
             table.schema = list(table.schema) + new_fields
             client.update_table(table, ["schema"])
-            log.info("Columnas de feedback añadidas a %s.%s", BQ_DATASET, BQ_TABLE)
+            log.info("Columnas extra añadidas a %s.%s", BQ_DATASET, BQ_TABLE)
 
     def _save_bigquery(self, row: dict) -> None:
         self._init_bigquery()
@@ -256,7 +286,9 @@ class ConversationStore:
             raise RuntimeError(f"BigQuery insert errors: {errors}")
 
     def _sqlite_create_table_sql(self) -> str:
-        feedback_cols = ", ".join(f"{name} {col_type}" for name, col_type in _FEEDBACK_COLUMNS)
+        extra_cols = ", ".join(
+            f"{name} {col_type}" for name, col_type in _EXTRA_COLUMNS
+        )
         return f"""
             CREATE TABLE IF NOT EXISTS chat_turns (
                 turn_id TEXT PRIMARY KEY,
@@ -271,7 +303,7 @@ class ConversationStore:
                 app_name TEXT,
                 rating INTEGER,
                 rated_at TEXT,
-                {feedback_cols}
+                {extra_cols}
             )
         """
 
@@ -281,7 +313,7 @@ class ConversationStore:
             conn.execute("ALTER TABLE chat_turns ADD COLUMN rating INTEGER")
         if "rated_at" not in cols:
             conn.execute("ALTER TABLE chat_turns ADD COLUMN rated_at TEXT")
-        for name, col_type in _FEEDBACK_COLUMNS:
+        for name, col_type in _EXTRA_COLUMNS:
             if name not in cols:
                 conn.execute(f"ALTER TABLE chat_turns ADD COLUMN {name} {col_type}")
 
@@ -297,8 +329,11 @@ class ConversationStore:
                     user_message, assistant_message, created_at,
                     response_ms, error, app_name, rating, rated_at,
                     feedback_score, feedback_label, feedback_tags,
-                    feedback_comment, feedback_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    feedback_comment, feedback_at,
+                    groundedness_verdict, groundedness_score,
+                    groundedness_summary, ungrounded_claims,
+                    tools_used, tool_trace
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     row["turn_id"],
@@ -318,6 +353,12 @@ class ConversationStore:
                     row.get("feedback_tags"),
                     row.get("feedback_comment"),
                     row.get("feedback_at"),
+                    row.get("groundedness_verdict"),
+                    row.get("groundedness_score"),
+                    row.get("groundedness_summary"),
+                    row.get("ungrounded_claims"),
+                    row.get("tools_used"),
+                    row.get("tool_trace"),
                 ),
             )
             conn.commit()
@@ -543,6 +584,56 @@ class ConversationStore:
                 }
         except Exception:
             log.exception("No se pudo contar valoraciones")
+            return None
+
+    def count_groundedness(self) -> dict[str, int] | None:
+        """Cuenta veredictos de fidelidad automática."""
+        keys = (
+            "soportada",
+            "parcial",
+            "no_soportada",
+            "sin_evidencia",
+            "conversacional",
+            "error",
+        )
+        empty = {k: 0 for k in keys}
+        try:
+            backend = self._resolve_backend()
+            if backend == "bigquery":
+                self._init_bigquery()
+                assert self._bq_client is not None and self._bq_table_id is not None
+                result = self._bq_client.query(
+                    f"""
+                    SELECT groundedness_verdict AS v, COUNT(*) AS n
+                    FROM `{self._bq_table_id}`
+                    WHERE groundedness_verdict IS NOT NULL
+                    GROUP BY groundedness_verdict
+                    """
+                ).result()
+                counts = dict(empty)
+                for row in result:
+                    if row.v in counts:
+                        counts[row.v] = row.n
+                return counts
+            if not SQLITE_PATH.exists():
+                return empty
+            with sqlite3.connect(SQLITE_PATH) as conn:
+                self._ensure_sqlite_columns(conn)
+                rows = conn.execute(
+                    """
+                    SELECT groundedness_verdict, COUNT(*)
+                    FROM chat_turns
+                    WHERE groundedness_verdict IS NOT NULL
+                    GROUP BY groundedness_verdict
+                    """
+                ).fetchall()
+            counts = dict(empty)
+            for verdict, n in rows:
+                if verdict in counts:
+                    counts[verdict] = n
+            return counts
+        except Exception:
+            log.exception("No se pudo contar veredictos de fidelidad")
             return None
 
 

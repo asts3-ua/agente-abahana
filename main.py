@@ -24,7 +24,8 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
-from agent import AGENTS
+from agent import AGENTS, _get_genai_client
+import groundedness
 
 APP_NAME = "abahana_villas"
 USER_ID = "cliente_01"
@@ -80,14 +81,31 @@ async def run(rol: str) -> None:
         )
 
         print("\nAgente: ", end="", flush=True)
+        parts: list[str] = []
+        tool_events: list[groundedness.ToolEvent] = []
         async for event in runner.run_async(
             user_id=USER_ID,
             session_id=session.id,
             new_message=message,
         ):
+            tool_events.extend(groundedness.extract_tool_events(event))
             if event.is_final_response():
                 if event.content and event.content.parts:
-                    print(event.content.parts[0].text)
+                    text = event.content.parts[0].text
+                    if text:
+                        parts.append(text)
+                        print(text)
+        answer = "".join(parts)
+        try:
+            result = groundedness.judge_groundedness(
+                question=user_input,
+                answer=answer,
+                tool_trace=groundedness.tool_events_to_trace(tool_events),
+                genai_client=_get_genai_client(),
+            )
+            print(f"  [fidelidad: {result.verdict}]", flush=True)
+        except Exception:
+            pass
         print()
 
 
