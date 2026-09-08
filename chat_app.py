@@ -28,7 +28,7 @@ from agent import AGENTS
 from conversation_store import get_conversation_store
 
 APP_NAME = "abahana_chat"
-ALLOWED_DOMAINS = {"abahana.com", "inferia.io"}
+ALLOWED_DOMAINS = {"abahanavillas.com", "inferia.io"}
 
 LOGO_PATH = Path(__file__).parent / "assets" / "logo.png"
 AGENT_AVATAR_PATH = Path(__file__).parent / "assets" / "agent-concierge.svg"
@@ -40,7 +40,7 @@ COLOR_ACCENT = "#7089C4"
 COLOR_ACCENT_LIGHT = "#A0B4E0"
 
 DOMAIN_ROLES = {
-    "abahana.com": "interno",
+    "abahanavillas.com": "interno",
     "inferia.io": "admin",
 }
 
@@ -479,6 +479,45 @@ def _process_user_prompt(prompt: str, *, role: str, email: str) -> None:
     st.rerun()
 
 
+def _new_agent_session(email: str) -> str:
+    """Crea una sesión ADK nueva y devuelve su id."""
+    session_id = str(uuid.uuid4())
+    asyncio.run(
+        _session_service.create_session(
+            app_name=APP_NAME,
+            user_id=email,
+            session_id=session_id,
+        )
+    )
+    return session_id
+
+
+def _start_new_conversation(email: str) -> None:
+    """Descarta la conversación actual (historial y sesión ADK) y empieza otra."""
+    previous_id = st.session_state.get("session_id")
+    if previous_id:
+        try:
+            asyncio.run(
+                _session_service.delete_session(
+                    app_name=APP_NAME,
+                    user_id=email,
+                    session_id=previous_id,
+                )
+            )
+        except Exception:
+            pass
+
+    # Limpiar estado de widgets ligado a la conversación anterior
+    st.session_state.pop("pending_prompt", None)
+    for key in list(st.session_state.keys()):
+        if key.startswith(("feedback_", "suggestion_")):
+            del st.session_state[key]
+
+    st.session_state.messages = []
+    st.session_state.session_id = _new_agent_session(email)
+    st.rerun()
+
+
 # ---------------------------------------------------------------------------
 # UI principal
 # ---------------------------------------------------------------------------
@@ -646,7 +685,7 @@ def main() -> None:
     domain = email.split("@")[-1].lower()
     if domain not in ALLOWED_DOMAINS:
         _render_brand_header()
-        st.error(f"La cuenta **{email}** no tiene acceso. Solo cuentas @abahana.com e @inferia.io.")
+        st.error(f"La cuenta **{email}** no tiene acceso. Solo cuentas @abahanavillas.com e @inferia.io.")
         if st.button("Iniciar sesión con otra cuenta"):
             st.session_state.pop("_auth_email", None)
             st.rerun()
@@ -654,21 +693,23 @@ def main() -> None:
 
     # Inicializar sesión ADK
     if "session_id" not in st.session_state:
-        st.session_state.session_id = str(uuid.uuid4())
         st.session_state.messages = []
-        asyncio.run(
-            _session_service.create_session(
-                app_name=APP_NAME,
-                user_id=email,
-                session_id=st.session_state.session_id,
-            )
-        )
+        st.session_state.session_id = _new_agent_session(email)
 
     role = _get_role(email)
 
     # Cabecera
     _render_brand_header()
-    st.caption(f"👤 {email}")
+    col_user, col_new = st.columns([3, 2], vertical_alignment="center")
+    with col_user:
+        st.caption(f"👤 {email}")
+    with col_new:
+        if st.button(
+            "＋ Nueva conversación",
+            key="new_conversation",
+            use_container_width=True,
+        ):
+            _start_new_conversation(email)
 
     st.divider()
 

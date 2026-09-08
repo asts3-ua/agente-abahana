@@ -14,3 +14,4 @@ main.py
 create_table.py
 DOCUMENTACION.md
 deploy.ps1
+deploy.sh

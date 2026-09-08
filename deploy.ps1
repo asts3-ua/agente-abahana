@@ -66,4 +66,4 @@ gcloud run deploy $SERVICE `
 
 Write-Host ""
 Write-Host "Deploy completado. La URL del servicio aparece arriba."
-Write-Host "Acceso controlado por Streamlit (Google OAuth). Dominios: @abahana.com + @inferia.io"
+Write-Host "Acceso controlado por Streamlit (Google OAuth). Dominios: @abahanavillas.com + @inferia.io"
