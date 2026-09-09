@@ -6,5 +6,8 @@ base = "light"
 backgroundColor = "#F5F2E9"
 secondaryBackgroundColor = "#FFFFFF"
 textColor = "#1E2B3C"
-primaryColor = "#7089C4"
+# Azul de marca oscurecido: es el color que Streamlit usa por dentro para
+# chips, anillos de foco y controles que viven en shadow DOM y que el CSS
+# de la app no puede alcanzar. En #7089C4 el texto blanco quedaba en 3.5:1.
+primaryColor = "#3E5A9A"
 font = "sans serif"
