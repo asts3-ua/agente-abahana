@@ -417,49 +417,9 @@ def _render_assistant_feedback(msg: dict, index: int) -> None:
         st.caption(f"Gracias por tu feedback · {label}")
         return
 
-    draft_label = st.session_state.get(draft_key)
-    if draft_label in ("parcial", "no_resolvio"):
-        st.markdown(
-            '<div class="feedback-card"><span class="feedback-title">'
-            "Cuéntanos un poco más</span></div>",
-            unsafe_allow_html=True,
-        )
-        selected_tags = st.multiselect(
-            "Motivos (opcional)",
-            options=list(FEEDBACK_TAG_OPTIONS.keys()),
-            format_func=lambda k: FEEDBACK_TAG_OPTIONS[k],
-            key=f"{feedback_key}_tags",
-        )
-        comment = st.text_area(
-            "Comentario (opcional)",
-            placeholder="¿Qué faltó o qué mejorarías?",
-            key=f"{feedback_key}_comment",
-            height=80,
-        )
-        col_send, col_cancel, _ = st.columns([1.2, 1, 1.8])
-        with col_send:
-            if st.button(
-                "Enviar feedback",
-                key=f"{feedback_key}_send",
-                type="primary",
-                use_container_width=True,
-            ):
-                _save_message_feedback(
-                    msg,
-                    label=draft_label,
-                    tags=selected_tags,
-                    comment=comment,
-                )
-                st.session_state.pop(draft_key, None)
-                st.rerun()
-        with col_cancel:
-            if st.button(
-                "Cancelar",
-                key=f"{feedback_key}_cancel",
-                use_container_width=True,
-            ):
-                st.session_state.pop(draft_key, None)
-                st.rerun()
+    # Pulgar abajo: se pregunta por qué antes de guardar.
+    if st.session_state.get(draft_key) in ("parcial", "no_resolvio"):
+        _render_formulario_feedback(msg, feedback_key, draft_key)
         return
 
     st.markdown(
@@ -467,18 +427,62 @@ def _render_assistant_feedback(msg: dict, index: int) -> None:
         "¿Te ha ayudado esta respuesta?</span></div>",
         unsafe_allow_html=True,
     )
-    col_util, col_parcial, col_no, _ = st.columns([1, 1, 1.25, 1.1])
-    with col_util:
-        if st.button("Útil", key=f"{feedback_key}_util", use_container_width=True):
-            _save_message_feedback(msg, label="util")
+    # st.feedback devuelve 1 para el pulgar arriba y 0 para el de abajo.
+    valoracion = st.feedback("thumbs", key=feedback_key)
+    if valoracion == 1:
+        _save_message_feedback(msg, label="util")
+        st.rerun()
+    elif valoracion == 0:
+        st.session_state[draft_key] = "no_resolvio"
+        st.rerun()
+
+
+def _render_formulario_feedback(msg: dict, feedback_key: str, draft_key: str) -> None:
+    """Motivos y comentario tras un pulgar abajo. Ambos opcionales: exigir
+    texto para poder valorar reduce el feedback que se recibe."""
+    st.markdown(
+        '<div class="feedback-card"><span class="feedback-title">'
+        "¿Qué ha fallado?</span></div>",
+        unsafe_allow_html=True,
+    )
+    motivos = st.multiselect(
+        "Motivos (opcional)",
+        options=list(FEEDBACK_TAG_OPTIONS.keys()),
+        format_func=lambda k: FEEDBACK_TAG_OPTIONS[k],
+        key=f"{feedback_key}_tags",
+    )
+    comentario = st.text_area(
+        "Comentario (opcional)",
+        placeholder="¿Qué faltó o qué mejorarías?",
+        key=f"{feedback_key}_comment",
+        height=80,
+    )
+    col_enviar, col_cancelar, _ = st.columns([1.2, 1, 1.8])
+    with col_enviar:
+        if st.button(
+            "Enviar",
+            key=f"{feedback_key}_send",
+            type="primary",
+            use_container_width=True,
+        ):
+            _save_message_feedback(
+                msg,
+                label=st.session_state[draft_key],
+                tags=motivos,
+                comment=comentario,
+            )
+            st.session_state.pop(draft_key, None)
             st.rerun()
-    with col_parcial:
-        if st.button("Parcial", key=f"{feedback_key}_parcial", use_container_width=True):
-            st.session_state[draft_key] = "parcial"
-            st.rerun()
-    with col_no:
-        if st.button("No resolvió", key=f"{feedback_key}_no", use_container_width=True):
-            st.session_state[draft_key] = "no_resolvio"
+    with col_cancelar:
+        if st.button(
+            "Cancelar",
+            key=f"{feedback_key}_cancel",
+            use_container_width=True,
+        ):
+            st.session_state.pop(draft_key, None)
+            # Sin esto el widget conservaría el pulgar abajo ya pulsado y el
+            # formulario volvería a abrirse en cuanto se repinta.
+            st.session_state.pop(feedback_key, None)
             st.rerun()
 
 
@@ -810,6 +814,12 @@ a, a:visited {
 
 a:hover {
     color: var(--abv-ink) !important;
+}
+
+/* El botón de login se centra bajo el logotipo, que también va centrado. */
+.login-actions {
+    text-align: center;
+    margin-top: 1.25rem;
 }
 
 /* El enlace de login es un botón: necesita ganar a la regla de enlaces de
@@ -1184,6 +1194,41 @@ a:focus-visible,
     background-color: var(--abv-surface-alt) !important;
 }
 
+/* El widget nativo de pulgares trae botones de 24x24: justo el mínimo
+   accesible y escasos para el dedo en móvil. Se agrandan y se les da el
+   mismo hover discreto que al resto de la interfaz. */
+[data-testid="stFeedbackButton"] {
+    /* El color del icono lo pone el tema. Si este resuelve en oscuro llega
+       casi blanco sobre la tarjeta blanca de la respuesta (1,03:1) y los
+       pulgares desaparecen. Hay que forzarlo, como el resto del texto. */
+    color: var(--abv-ink-soft) !important;
+    /* El botón viene con flex-basis fit-content, que gana al ancho. */
+    flex: none !important;
+    width: 2.4rem !important;
+    height: 2.4rem !important;
+    border-radius: 0.5rem !important;
+    display: inline-flex !important;
+    align-items: center;
+    justify-content: center;
+}
+
+[data-testid="stFeedbackButton"] svg,
+[data-testid="stFeedbackButton"] span {
+    color: inherit !important;
+    fill: currentColor !important;
+}
+
+[data-testid="stFeedbackButton"]:hover {
+    background-color: var(--abv-surface-alt) !important;
+    color: var(--abv-accent-deep) !important;
+}
+
+/* El pulgar elegido queda marcado hasta que se envía. */
+[data-testid="stFeedbackButton"][aria-checked="true"] {
+    color: var(--abv-accent-deep) !important;
+    background-color: var(--abv-accent-wash) !important;
+}
+
 /* La pregunta de feedback acompaña a la respuesta, no compite con ella. */
 .feedback-card {
     margin-top: 0.85rem;
@@ -1311,8 +1356,9 @@ def main() -> None:
         st.info("Accede con tu cuenta corporativa de Google.")
         auth_url = _auth_url()
         st.markdown(
+            f'<div class="login-actions">'
             f'<a class="login-button" href="{auth_url}" target="_self">'
-            "Iniciar sesión con Google</a>",
+            "Iniciar sesión con Google</a></div>",
             unsafe_allow_html=True,
         )
         st.stop()
