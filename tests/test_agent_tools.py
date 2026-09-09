@@ -445,6 +445,138 @@ class ColumnaHabitacionesTest(unittest.TestCase):
             )
 
 
+def _tarifa(fecha, nombre, tipo, es_venta, precio, **extra):
+    base = dict(fecha=fecha, estado="0", nombre=nombre, tipo=tipo,
+                es_venta=es_venta, precio_final=precio, descuento_pct=0.0,
+                estancia_minima_noches=0)
+    base.update(extra)
+    return _Fila(**base)
+
+
+class ConsultarPreciosTest(unittest.TestCase):
+    """Los precios están en TarifaDia, que no tiene fecha propia: enlaza con
+    Ocupacion por ocupacion_id."""
+
+    def setUp(self):
+        self.bq = Mock()
+        filas = [
+            _tarifa("2027-07-01", "PrecioVilla", "std", True, 439.0),
+            _tarifa("2027-07-01", "PrecioVilla", "std", False, 307.0),
+            _tarifa("2027-07-01", "PrecioVilla", "lt", True, 351.2,
+                    descuento_pct=20.0, estancia_minima_noches=27),
+            _tarifa("2027-07-01", "Aire Acondicionado", "std", True, 60.0),
+            _tarifa("2027-07-01", "Aire Acondicionado", "std", False, 36.0),
+            _tarifa("2027-07-02", "PrecioVilla", "std", True, 461.0),
+            _tarifa("2027-07-02", "PrecioVilla", "std", False, 322.0),
+        ]
+        self.bq.query.return_value.result.return_value = filas
+        patcher = patch.object(agent, "_bq", self.bq)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_devuelve_venta_compra_y_margen_por_noche(self):
+        r = agent.consultar_precios("ADORA", "2027-07-01", "2027-07-03")
+        primera = r["noches"][0]
+        self.assertEqual("2027-07-01", primera["fecha"])
+        self.assertEqual(439.0, primera["precio_venta"])
+        self.assertEqual(307.0, primera["precio_compra"])
+        self.assertEqual(132.0, primera["margen"])
+        self.assertEqual(30.07, primera["margen_pct"])   # 132/439
+
+    def test_resume_el_periodo(self):
+        r = agent.consultar_precios("ADORA", "2027-07-01", "2027-07-03")
+        res = r["resumen"]
+        self.assertEqual(2, res["noches_con_precio"])
+        self.assertEqual(900.0, res["total_venta"])
+        self.assertEqual(629.0, res["total_compra"])
+        self.assertEqual(271.0, res["margen_total"])
+
+    def test_separa_la_tarifa_de_larga_estancia(self):
+        r = agent.consultar_precios("ADORA", "2027-07-01", "2027-07-03")
+        lt = r["larga_estancia"]
+        self.assertEqual(20.0, lt["descuento_pct"])
+        self.assertEqual(27, lt["minimo_noches"])
+        self.assertEqual(351.2, lt["precio_venta_medio"])
+
+    def test_lista_los_extras_con_su_margen(self):
+        r = agent.consultar_precios("ADORA", "2027-07-01", "2027-07-03")
+        extras = {e["concepto"]: e for e in r["extras"]}
+        self.assertIn("Aire Acondicionado", extras)
+        self.assertEqual(60.0, extras["Aire Acondicionado"]["precio_venta_medio"])
+        self.assertEqual(36.0, extras["Aire Acondicionado"]["precio_compra_medio"])
+        self.assertNotIn("PrecioVilla", extras)
+
+    def test_excluye_las_filas_sin_es_venta_para_no_contar_doble(self):
+        agent.consultar_precios("ADORA", "2027-07-01", "2027-07-03")
+        sql = _consulta_ejecutada(self.bq)
+        self.assertIn("t.es_venta IS NOT NULL", sql)
+
+    def test_rechaza_rangos_desmedidos_sin_ir_a_bigquery(self):
+        self.bq.reset_mock()
+        r = agent.consultar_precios("ADORA", "2027-01-01", "2027-12-31")
+        self.bq.query.assert_not_called()
+        self.assertIn("error", r)
+
+    def test_valida_las_fechas(self):
+        r = agent.consultar_precios("ADORA", "no-es-fecha")
+        self.assertIn("error", r)
+
+
+class CalendarioVillaTest(unittest.TestCase):
+    """El calendario se lee por tramos, no día a día, y distingue el canal."""
+
+    def setUp(self):
+        def dia(fecha, tipo, reserva=None):
+            return _Fila(fecha=fecha, tipo_ocupacion=tipo, reserva_id=reserva,
+                         estancia_minima_noches=4)
+        self.bq = Mock()
+        self.bq.query.return_value.result.return_value = [
+            dia("2026-09-08", "Libre"),
+            dia("2026-09-09", "Libre"),
+            dia("2026-09-10", "Reserva Agencia", "r1"),
+            dia("2026-09-11", "Reserva Agencia", "r1"),
+            dia("2026-09-12", "Reserva Agencia", "r1"),
+            dia("2026-09-13", "No Disponible"),
+        ]
+        patcher = patch.object(agent, "_bq", self.bq)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_agrupa_los_dias_consecutivos_en_tramos(self):
+        r = agent.calendario_villa("ADORA", "2026-09-08", "2026-09-13")
+        tramos = [(t["desde"], t["hasta"], t["tipo_ocupacion"], t["noches"])
+                  for t in r["tramos"]]
+        self.assertEqual(
+            [("2026-09-08", "2026-09-09", "Libre", 2),
+             ("2026-09-10", "2026-09-12", "Reserva Agencia", 3),
+             ("2026-09-13", "2026-09-13", "No Disponible", 1)],
+            tramos,
+        )
+
+    def test_resume_noches_por_estado_y_ocupacion(self):
+        r = agent.calendario_villa("ADORA", "2026-09-08", "2026-09-13")
+        res = r["resumen"]
+        self.assertEqual(3, res["noches_ocupadas"])
+        self.assertEqual(2, res["noches_libres"])
+        self.assertEqual(1, res["noches_bloqueadas"])
+        # 3 ocupadas sobre 5 comercializables (se excluyen las bloqueadas)
+        self.assertEqual(60.0, res["ocupacion_pct"])
+
+    def test_desglosa_el_canal(self):
+        r = agent.calendario_villa("ADORA", "2026-09-08", "2026-09-13")
+        self.assertEqual({"Reserva Agencia": 3}, r["resumen"]["por_canal"])
+
+    def test_no_presenta_checkin_como_evento(self):
+        agent.calendario_villa("ADORA", "2026-09-08", "2026-09-13")
+        sql = _consulta_ejecutada(self.bq)
+        self.assertNotIn("es_checkin", sql)
+        self.assertNotIn("es_checkout", sql)
+
+    def test_valida_el_rango(self):
+        r = agent.calendario_villa("ADORA", "2026-01-01", "2026-12-31")
+        self.assertIn("error", r)
+
+
 class EtiquetasYRolesTest(unittest.TestCase):
     def test_cada_codigo_acepta_sus_grafias(self):
         self.assertIn("BLOQUEADA", agent._ESTADOS_RESERVA["BO"])

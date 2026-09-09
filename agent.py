@@ -39,6 +39,20 @@ TABLA_BANIO = f"`{PROJECT_ID}.{DATASET}.stg_etendo_OV_Banios`"
 # única fuente con el desglose real de camas; se enlaza por planta_id, igual
 # que los baños: Villa -> Planta -> Estancia.
 TABLA_ESTANCIA = f"`{PROJECT_ID}.{DATASET}.stg_etendo_Estancia`"
+# Ocupacion es el calendario diario por villa. TarifaDia cuelga de ella por
+# ocupacion_id: no tiene fecha propia, la fecha la pone Ocupacion.
+TABLA_OCUPACION = f"`{PROJECT_ID}.{DATASET}.stg_etendo_Ocupacion`"
+TABLA_TARIFA_DIA = f"`{PROJECT_ID}.{DATASET}.stg_etendo_TarifaDia`"
+
+_CONCEPTO_VILLA = "PrecioVilla"      # el resto de conceptos son extras
+_MAX_DIAS_CONSULTA = 92
+# Ocupacion (1 M de filas) y TarifaDia (1,4 M) son las tablas de grano diario.
+# Ninguna está particionada por fecha ni agrupada por villa, así que cualquier
+# consulta las escanea enteras: ~60 MB y ~190 MB respectivamente, por encima
+# del tope general. Se les da un tope propio en vez de subirlo para todas las
+# herramientas. Particionar Ocupacion por fecha y agrupar TarifaDia por
+# ocupacion_id en Dataform dejaría esto en una fracción.
+_BILLING_CAP_DIARIO = 500 * 1024 * 1024
 TABLA_FICHA_TECNICA = f"`{PROJECT_ID}.{DATASET}.stg_etendo_opxdes_ficha_tecnica`"
 
 # stg_etendo_Villa trae filas duplicadas por villa_id (misma villa varias veces).
@@ -1224,6 +1238,295 @@ def consultar_disponibilidad(
     }
 
 
+def _rango_valido(desde: str, hasta: str | None, campo: str = "fecha_hasta"):
+    """Valida el rango y lo acota: sin tope, una consulta de un año entero
+    devuelve decenas de miles de filas de tarifa."""
+    inicio = _parse_iso_date(desde, "fecha_desde")
+    fin = _parse_iso_date(hasta, campo) if hasta else inicio
+    if fin < inicio:
+        raise ValueError(f"{campo} no puede ser anterior a fecha_desde.")
+    if (fin - inicio).days + 1 > _MAX_DIAS_CONSULTA:
+        raise ValueError(
+            f"El rango no puede superar {_MAX_DIAS_CONSULTA} días; "
+            "consulta por tramos más cortos."
+        )
+    return inicio, fin
+
+
+def _redondear(valor):
+    return round(valor, 2) if valor is not None else None
+
+
+def consultar_precios(
+    villa_nombre: str,
+    fecha_desde: str,
+    fecha_hasta: str | None = None,
+) -> dict[str, Any]:
+    """Precio de venta, precio de compra y margen de una villa, noche a noche.
+
+    Usa esta herramienta para preguntas de gestión sobre tarifas, coste,
+    margen o rentabilidad: "cuánto cuesta la noche", "cuánto ganamos",
+    "qué margen deja esta villa en agosto", "cuál es el precio de larga
+    estancia". Devuelve también los extras con precio propio (energía, aire
+    acondicionado) y sus márgenes.
+
+    Args:
+        villa_nombre: Nombre o parte del nombre de la villa.
+        fecha_desde: Primera noche (YYYY-MM-DD).
+        fecha_hasta: Última noche (YYYY-MM-DD). Si se omite, solo esa noche.
+            El rango no puede superar 92 días.
+
+    Returns:
+        Diccionario con 'noches' (venta, compra y margen por fecha),
+        'resumen' del periodo, 'larga_estancia' y 'extras'.
+    """
+    try:
+        desde, hasta = _rango_valido(fecha_desde, fecha_hasta)
+    except ValueError as exc:
+        return {"noches": [], "resumen": {}, "error": str(exc)}
+
+    query = f"""
+        WITH{_CTE_VILLAS_VIGENTES},
+        ocupacion AS (
+            SELECT o.id, o.fecha, o.estado
+            FROM {TABLA_OCUPACION} o
+            JOIN villa_dedup v ON v.villa_id = o.villa_id
+            WHERE o.es_activo = TRUE
+              AND o.fecha BETWEEN @desde AND @hasta
+              AND LOWER(v.nombre) LIKE LOWER(@villa_nombre)
+        )
+        SELECT
+            oc.fecha, oc.estado, t.nombre, t.tipo, t.es_venta,
+            t.precio_final, t.descuento_pct, t.estancia_minima_noches
+        FROM {TABLA_TARIFA_DIA} t
+        JOIN ocupacion oc ON oc.id = t.ocupacion_id
+        WHERE t.es_activo = TRUE
+          AND t.precio_final IS NOT NULL
+          -- Las filas sin es_venta duplican la tarifa de villa: contarlas
+          -- inflaría los totales.
+          AND t.es_venta IS NOT NULL
+        ORDER BY oc.fecha
+    """
+    params = [
+        bigquery.ScalarQueryParameter("desde", "DATE", desde),
+        bigquery.ScalarQueryParameter("hasta", "DATE", hasta),
+        bigquery.ScalarQueryParameter(
+            "villa_nombre", "STRING", f"%{villa_nombre.strip()}%"
+        ),
+    ]
+    try:
+        rows = [_row_to_dict(r) for r in _bq.query(
+            query,
+            job_config=bigquery.QueryJobConfig(
+                query_parameters=params,
+                maximum_bytes_billed=_BILLING_CAP_DIARIO,
+            ),
+        ).result()]
+    except Exception as e:
+        log.exception("consultar_precios: error en BigQuery")
+        return {"noches": [], "resumen": {}, "error": str(e)}
+
+    return _componer_precios(rows, desde, hasta)
+
+
+def _componer_precios(rows: list[dict], desde, hasta) -> dict[str, Any]:
+    por_noche: dict[str, dict[str, Any]] = {}
+    larga: dict[str, list] = {"venta": [], "descuento": [], "minimo": []}
+    extras: dict[str, dict[str, list]] = {}
+
+    for fila in rows:
+        fecha = str(fila.get("fecha"))
+        nombre = fila.get("nombre")
+        es_venta = fila.get("es_venta")
+        precio = fila.get("precio_final")
+        if precio is None:
+            continue
+
+        if nombre == _CONCEPTO_VILLA:
+            if fila.get("tipo") == "lt":
+                if es_venta:
+                    larga["venta"].append(precio)
+                    larga["descuento"].append(fila.get("descuento_pct"))
+                    larga["minimo"].append(fila.get("estancia_minima_noches"))
+                continue
+            noche = por_noche.setdefault(
+                fecha, {"fecha": fecha, "estado": fila.get("estado")}
+            )
+            noche["precio_venta" if es_venta else "precio_compra"] = precio
+        elif fila.get("tipo") != "lt":
+            acumulado = extras.setdefault(nombre, {"venta": [], "compra": []})
+            acumulado["venta" if es_venta else "compra"].append(precio)
+
+    noches = []
+    for fecha in sorted(por_noche):
+        noche = por_noche[fecha]
+        venta, compra = noche.get("precio_venta"), noche.get("precio_compra")
+        if venta is not None and compra is not None:
+            noche["margen"] = _redondear(venta - compra)
+            noche["margen_pct"] = _redondear(
+                (venta - compra) / venta * 100
+            ) if venta else None
+        noches.append(noche)
+
+    con_ambos = [n for n in noches if n.get("margen") is not None]
+    total_venta = sum(n["precio_venta"] for n in con_ambos)
+    total_compra = sum(n["precio_compra"] for n in con_ambos)
+
+    def _media(valores):
+        limpios = [v for v in valores if v is not None]
+        return _redondear(sum(limpios) / len(limpios)) if limpios else None
+
+    return {
+        "periodo": {"desde": desde.isoformat(), "hasta": hasta.isoformat()},
+        "noches": noches,
+        "resumen": {
+            "noches_con_precio": len(con_ambos),
+            "total_venta": _redondear(total_venta),
+            "total_compra": _redondear(total_compra),
+            "margen_total": _redondear(total_venta - total_compra),
+            "margen_medio_pct": _media([n["margen_pct"] for n in con_ambos]),
+            "precio_venta_medio": _media([n["precio_venta"] for n in con_ambos]),
+        },
+        "larga_estancia": {
+            "precio_venta_medio": _media(larga["venta"]),
+            "descuento_pct": _media(larga["descuento"]),
+            "minimo_noches": max(larga["minimo"]) if larga["minimo"] else None,
+        } if larga["venta"] else {},
+        "extras": [
+            {
+                "concepto": nombre,
+                "precio_venta_medio": _media(v["venta"]),
+                "precio_compra_medio": _media(v["compra"]),
+            }
+            for nombre, v in sorted(extras.items())
+        ],
+    }
+
+
+_ESTADOS_NO_OCUPADOS = {"Libre", "No Disponible"}
+
+
+def calendario_villa(
+    villa_nombre: str,
+    fecha_desde: str,
+    fecha_hasta: str | None = None,
+) -> dict[str, Any]:
+    """Calendario de ocupación de una villa, tramo a tramo.
+
+    Usa esta herramienta para gestión interna: ver cómo está el calendario de
+    una villa, qué días está libre, ocupada o bloqueada, y por qué canal entró
+    cada reserva (directa, agencia, turoperador o uso del propietario).
+    Agrupa los días consecutivos del mismo estado en tramos, que es como se
+    lee un calendario.
+
+    Para saber si una villa se puede vender en unas fechas concretas usa
+    `consultar_disponibilidad`; esta herramienta es para ver el panorama.
+
+    Args:
+        villa_nombre: Nombre o parte del nombre de la villa.
+        fecha_desde: Primer día (YYYY-MM-DD).
+        fecha_hasta: Último día (YYYY-MM-DD). Máximo 92 días de rango.
+
+    Returns:
+        Diccionario con 'tramos' y 'resumen' (noches por estado, porcentaje de
+        ocupación sobre los días comercializables y desglose por canal).
+    """
+    try:
+        desde, hasta = _rango_valido(fecha_desde, fecha_hasta)
+    except ValueError as exc:
+        return {"tramos": [], "resumen": {}, "error": str(exc)}
+
+    # No se leen es_checkin / es_checkout: vienen a TRUE en el ~95% de las
+    # filas, libres u ocupadas, porque son reglas de llegada y salida
+    # permitidas, no eventos de entrada o salida de huéspedes.
+    query = f"""
+        WITH{_CTE_VILLAS_VIGENTES}
+        SELECT o.fecha, o.tipo_ocupacion, o.reserva_id, o.estancia_minima_noches
+        FROM {TABLA_OCUPACION} o
+        JOIN villa_dedup v ON v.villa_id = o.villa_id
+        WHERE o.es_activo = TRUE
+          AND o.fecha BETWEEN @desde AND @hasta
+          AND LOWER(v.nombre) LIKE LOWER(@villa_nombre)
+        ORDER BY o.fecha
+    """
+    params = [
+        bigquery.ScalarQueryParameter("desde", "DATE", desde),
+        bigquery.ScalarQueryParameter("hasta", "DATE", hasta),
+        bigquery.ScalarQueryParameter(
+            "villa_nombre", "STRING", f"%{villa_nombre.strip()}%"
+        ),
+    ]
+    try:
+        rows = [_row_to_dict(r) for r in _bq.query(
+            query,
+            job_config=bigquery.QueryJobConfig(
+                query_parameters=params,
+                maximum_bytes_billed=_BILLING_CAP_DIARIO,
+            ),
+        ).result()]
+    except Exception as e:
+        log.exception("calendario_villa: error en BigQuery")
+        return {"tramos": [], "resumen": {}, "error": str(e)}
+
+    return _componer_calendario(rows, desde, hasta)
+
+
+def _componer_calendario(rows: list[dict], desde, hasta) -> dict[str, Any]:
+    tramos: list[dict[str, Any]] = []
+    por_estado: dict[str, int] = {}
+
+    for fila in sorted(rows, key=lambda f: str(f.get("fecha"))):
+        fecha = str(fila.get("fecha"))
+        tipo = fila.get("tipo_ocupacion") or "Desconocido"
+        reserva = fila.get("reserva_id")
+        por_estado[tipo] = por_estado.get(tipo, 0) + 1
+
+        ultimo = tramos[-1] if tramos else None
+        if (
+            ultimo
+            and ultimo["tipo_ocupacion"] == tipo
+            and ultimo.get("reserva_id") == reserva
+        ):
+            ultimo["hasta"] = fecha
+            ultimo["noches"] += 1
+        else:
+            tramo = {
+                "desde": fecha,
+                "hasta": fecha,
+                "tipo_ocupacion": tipo,
+                "noches": 1,
+            }
+            if reserva:
+                tramo["reserva_id"] = reserva
+            if fila.get("estancia_minima_noches"):
+                tramo["estancia_minima_noches"] = fila["estancia_minima_noches"]
+            tramos.append(tramo)
+
+    ocupadas = sum(
+        n for estado, n in por_estado.items() if estado not in _ESTADOS_NO_OCUPADOS
+    )
+    libres = por_estado.get("Libre", 0)
+    bloqueadas = por_estado.get("No Disponible", 0)
+    comercializables = ocupadas + libres
+
+    return {
+        "periodo": {"desde": desde.isoformat(), "hasta": hasta.isoformat()},
+        "tramos": tramos,
+        "resumen": {
+            "noches_ocupadas": ocupadas,
+            "noches_libres": libres,
+            "noches_bloqueadas": bloqueadas,
+            # Sobre los días que se podían vender: las bloqueadas no cuentan.
+            "ocupacion_pct": _redondear(ocupadas / comercializables * 100)
+            if comercializables else None,
+            "por_canal": {
+                estado: n for estado, n in sorted(por_estado.items())
+                if estado not in _ESTADOS_NO_OCUPADOS
+            },
+        },
+    }
+
+
 def consultar_reservas(
     villa_nombre: str | None = None,
     ubicacion: str | None = None,
@@ -1869,6 +2172,10 @@ agent_interno = Agent(
         consultar_disponibilidad,
         consultar_reservas,
         resumen_reservas,
+        # Solo interno y admin: consultar_precios expone precio de compra y
+        # margen, y el calendario, el uso que hace el propietario de su villa.
+        consultar_precios,
+        calendario_villa,
         consultar_web,
         buscar_pagina_web,
         buscar_internet,
@@ -1896,6 +2203,10 @@ agent_admin = Agent(
         consultar_disponibilidad,
         consultar_reservas,
         resumen_reservas,
+        # Solo interno y admin: consultar_precios expone precio de compra y
+        # margen, y el calendario, el uso que hace el propietario de su villa.
+        consultar_precios,
+        calendario_villa,
         consultar_web,
         buscar_pagina_web,
         buscar_internet,
