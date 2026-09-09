@@ -11,8 +11,11 @@ Roles disponibles:
 import asyncio
 import concurrent.futures
 import datetime
+import functools
 import logging
 import os
+import re
+import time
 from typing import Any
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
@@ -31,6 +34,10 @@ TABLA_VILLA = f"`{PROJECT_ID}.{DATASET}.stg_etendo_Villa`"
 TABLA_RESERVAS = f"`{PROJECT_ID}.{DATASET}.stg_etendo_Reserva`"
 TABLA_PLANTA = f"`{PROJECT_ID}.{DATASET}.stg_etendo_Planta`"
 TABLA_BANIO = f"`{PROJECT_ID}.{DATASET}.stg_etendo_OV_Banios`"
+# Estancia = cada habitación de la villa (dormitorio, salón, cocina...). Es la
+# única fuente con el desglose real de camas; se enlaza por planta_id, igual
+# que los baños: Villa -> Planta -> Estancia.
+TABLA_ESTANCIA = f"`{PROJECT_ID}.{DATASET}.stg_etendo_Estancia`"
 TABLA_FICHA_TECNICA = f"`{PROJECT_ID}.{DATASET}.stg_etendo_opxdes_ficha_tecnica`"
 
 # stg_etendo_Villa trae filas duplicadas por villa_id (misma villa varias veces).
@@ -39,23 +46,149 @@ _DEDUP_VILLA = (
     "QUALIFY ROW_NUMBER() OVER (PARTITION BY villa_id ORDER BY fecha_actualizacion DESC) = 1"
 )
 
+# El filtro activo/visible va SIEMPRE dentro del CTE, antes del QUALIFY: al
+# revés, una villa cuya fila más reciente esté inactiva desaparece entera en
+# lugar de resolverse por su última fila vigente. Definirlo una sola vez evita
+# que el catálogo y la búsqueda apliquen criterios distintos.
+_CTE_VILLAS_VIGENTES = f"""
+        villa_dedup AS (
+            SELECT *
+            FROM {TABLA_VILLA}
+            WHERE es_activo = TRUE AND es_visible = TRUE
+            {_DEDUP_VILLA}
+        )"""
+
+# Las únicas camas de verdad del lake: Villa.capacidad_camas y
+# ficha_tecnica.total_camas son en realidad recuentos de habitaciones (191/204
+# y 197/204 coinciden con el número de dormitorios, no con el de camas).
+_CTE_CAMAS = f"""
+        camas AS (
+            SELECT
+                p.villa_id,
+                SUM(COALESCE(e.num_camas_dobles, 0)
+                    + COALESCE(e.num_camas_king_size, 0)
+                    + COALESCE(e.num_camas_simples, 0)
+                    + COALESCE(e.num_literas, 0)
+                    + COALESCE(e.num_camas_nido, 0)
+                    + COALESCE(e.num_camas_partidas, 0)) AS camas_totales,
+                COUNTIF(e.tipo_estancia = 'dormitorio') AS dormitorios
+            FROM {TABLA_PLANTA} p
+            JOIN {TABLA_ESTANCIA} e
+                ON e.planta_id = p.planta_id AND e.es_activo = TRUE
+            GROUP BY p.villa_id
+        )"""
+
+_CTE_FICHA = f"""
+        ficha AS (
+            SELECT
+                propiedad_codigo,
+                ANY_VALUE(tiene_internet) AS tiene_internet,
+                ANY_VALUE(tiene_aire_salon) AS tiene_aire_acondicionado,
+                ANY_VALUE(tiene_lavadora) AS tiene_lavadora,
+                ANY_VALUE(tiene_lavavajillas) AS tiene_lavavajillas
+            FROM {TABLA_FICHA_TECNICA}
+            WHERE propiedad_codigo IS NOT NULL
+            GROUP BY propiedad_codigo
+        )"""
+
+# Proyección corta a propósito: todo lo que devuelve una herramienta entra en
+# el contexto del modelo. Con 891 propiedades, arrastrar descripciones largas
+# multiplica el coste de cada consulta. La ficha completa de una villa concreta
+# se pide con obtener_detalle_propiedad.
+_COLUMNAS_RESUMEN = """
+            v.nombre, v.tipovilla_nombre_comercial,
+            v.capacidad_pax, v.numero_banos, v.m2_habitables,
+            COALESCE(c.camas_totales, 0) AS camas_totales,
+            v.tiene_piscina_privada, v.admite_animales,
+            f.tiene_internet, f.tiene_aire_acondicionado,
+            f.tiene_lavadora, f.tiene_lavavajillas,
+            v.pueblo_cercano, v.zona,
+            ROUND((COALESCE(v.rating_exterior, 0) + COALESCE(v.rating_interior, 0) +
+                   COALESCE(v.rating_vistas, 0)) /
+                  NULLIF((CASE WHEN v.rating_exterior IS NOT NULL THEN 1 ELSE 0 END +
+                          CASE WHEN v.rating_interior IS NOT NULL THEN 1 ELSE 0 END +
+                          CASE WHEN v.rating_vistas IS NOT NULL THEN 1 ELSE 0 END), 0),
+                  2) AS rating_medio,
+            COUNT(*) OVER () AS total_resultados"""
+
+
+def _separar_total(rows) -> tuple[list[dict], int]:
+    """Extrae el total exacto y lo saca de cada fila.
+
+    Se cuenta con COUNT(*) OVER () para no cortar los resultados y aun así
+    poder decir cuántos hay: un LIMIT fijo ocultaba coincidencias en silencio.
+    """
+    matches = [_row_to_dict(r) for r in rows]
+    total = matches[0].pop("total_resultados", len(matches)) if matches else 0
+    for m in matches[1:]:
+        m.pop("total_resultados", None)
+    return matches, total
+
 _bq = bigquery.Client(project=PROJECT_ID, location="EU")
 _BILLING_CAP = 50 * 1024 * 1024  # 50 MB — tablas silver_clean materializadas
 _TIMEZONE = ZoneInfo("Europe/Madrid")
+# OJO: estos valores NO son etiquetas para el usuario. Se comparan contra el
+# contenido real de r.estado_reserva / r.estado_documento en BigQuery, donde el
+# mismo estado aparece unas veces como código y otras escrito. Por eso cada
+# código acepta varias grafías, igual que ya se hacía con las cancelaciones.
 _ESTADOS_RESERVA = {
-    "RE": "RESERVA",
-    "PE": "PERDIDA",
-    "CA": "CANCELACION",
-    "NS": "NOSHOW",
-    "PR": "PRERESERVA",
-    "BO": "BORRADOR",
+    "RE": ("RESERVA",),
+    "PE": ("PERDIDA",),
+    "CA": ("CANCELACION", "CANCELADA"),
+    "NS": ("NOSHOW", "NO SHOW"),
+    "PR": ("PRERESERVA",),
+    "BO": ("BLOQUEADA", "BORRADOR"),
 }
 _ESTADOS_DOCUMENTO = {
-    "CO": "COMPLETADA",
-    "CL": "CERRADA",
-    "DR": "BORRADOR",
-    "VO": "ANULADA",
+    "CO": ("CONFIRMADA", "COMPLETADA"),
+    "CL": ("CERRADA",),
+    "DR": ("BORRADOR",),
+    "VO": ("ANULADA", "ANULADO"),
 }
+
+
+def _filtro_estado(columna: str, prefijo: str, codigo: str,
+                   equivalencias: dict[str, tuple[str, ...]],
+                   params: list) -> str:
+    """Condición que acepta el código y cualquiera de sus grafías."""
+    codigo = codigo.strip().upper()
+    valores = list(dict.fromkeys((codigo, *equivalencias.get(codigo, ()))))
+    marcadores = []
+    for i, valor in enumerate(valores):
+        nombre = f"{prefijo}_{i}"
+        marcadores.append(f"@{nombre}")
+        params.append(bigquery.ScalarQueryParameter(nombre, "STRING", valor))
+    return f"UPPER({columna}) IN ({', '.join(marcadores)})"
+
+
+@functools.lru_cache(maxsize=1)
+def _columna_habitaciones() -> str:
+    """Columna real de habitaciones en stg_etendo_Villa.
+
+    Dataform la renombra de `capacidad_camas` a `numero_habitaciones` (el
+    origen es ovjchHabTotales: habitaciones, no camas). Hasta que el pipeline
+    se ejecute, la tabla conserva el nombre viejo, así que se resuelve una vez
+    en caliente en lugar de fijarlo y arriesgar una caída durante la
+    transición. Cuando el renombrado esté desplegado, esto puede fijarse.
+    """
+    try:
+        rows = list(_bq.query(
+            f"""
+            SELECT column_name
+            FROM `{PROJECT_ID}.{DATASET}.INFORMATION_SCHEMA.COLUMNS`
+            WHERE table_name = 'stg_etendo_Villa'
+              AND column_name IN ('numero_habitaciones', 'capacidad_camas')
+            """,
+            job_config=bigquery.QueryJobConfig(maximum_bytes_billed=_BILLING_CAP),
+        ).result())
+        nombres = {r["column_name"] for r in rows}
+    except Exception:
+        log.warning("No se pudo resolver la columna de habitaciones", exc_info=True)
+        return "numero_habitaciones"
+    return (
+        "numero_habitaciones" if "numero_habitaciones" in nombres
+        else "capacidad_camas"
+    )
 
 
 def _row_to_dict(row) -> dict:
@@ -113,59 +246,19 @@ def obtener_fecha_hora_actual() -> dict[str, Any]:
 
 
 def listar_propiedades() -> dict[str, Any]:
-    """Devuelve todas las propiedades disponibles con sus características.
+    """Devuelve el catálogo completo de propiedades activas y visibles.
 
-    Usa cuando el usuario pida ver el catálogo completo o todas las villas
-    sin especificar filtros.
+    Usa cuando el usuario pida ver el catálogo o todas las villas sin filtros.
+    Devuelve el total exacto en 'total'; no recorta resultados.
     """
-    query = f"""
-        WITH villa_dedup AS (
-            SELECT *
-            FROM {TABLA_VILLA}
-            WHERE es_activo = TRUE AND es_visible = TRUE
-            {_DEDUP_VILLA}
-        ),
-        ficha AS (
-            SELECT
-                propiedad_codigo,
-                ANY_VALUE(tiene_internet) AS tiene_internet,
-                ANY_VALUE(tiene_aire_salon) AS tiene_aire_acondicionado,
-                ANY_VALUE(tiene_lavadora) AS tiene_lavadora,
-                ANY_VALUE(tiene_lavavajillas) AS tiene_lavavajillas
-            FROM {TABLA_FICHA_TECNICA}
-            WHERE propiedad_codigo IS NOT NULL
-            GROUP BY propiedad_codigo
-        )
-        SELECT
-            v.nombre, v.tipovilla_nombre_comercial, v.tipovilla_descripcion,
-            v.capacidad_pax, v.capacidad_camas, v.numero_banos, v.numero_plantas,
-            v.m2_habitables, v.m2_parcela,
-            v.tiene_piscina_privada, v.tiene_piscina_comun, v.piscina_climatizada,
-            v.tiene_jardin, v.tiene_garaje, v.admite_animales,
-            f.tiene_internet, f.tiene_aire_acondicionado, f.tiene_lavadora, f.tiene_lavavajillas,
-            v.pueblo_cercano, v.zona, v.region,
-            v.rating_exterior, v.rating_interior, v.rating_vistas,
-            v.es_activo, v.es_visible, v.es_recomendada
-        FROM villa_dedup v
-        LEFT JOIN ficha f ON SAFE_CAST(v.codigo_busqueda AS INT64) = f.propiedad_codigo
-        ORDER BY v.nombre
-    """
-    try:
-        rows = list(_bq.query(
-            query,
-            job_config=bigquery.QueryJobConfig(maximum_bytes_billed=_BILLING_CAP),
-        ).result())
-    except Exception as e:
-        log.exception("listar_propiedades: error en BigQuery")
-        return {"matches": [], "count": 0, "error": str(e)}
-    matches = [_row_to_dict(r) for r in rows]
-    return {"matches": matches, "count": len(matches)}
+    return buscar_propiedades()
 
 
 def buscar_propiedades(
     ubicacion: str | None = None,
     zona: str | None = None,
     capacidad_min: int | None = None,
+    habitaciones_min: int | None = None,
     camas_min: int | None = None,
     banos_min: int | None = None,
     metros_habitables_min: int | None = None,
@@ -186,7 +279,10 @@ def buscar_propiedades(
         ubicacion: Pueblo cercano (Altea, Calpe, Moraira, Benidorm, Dénia…).
         zona: Zona geográfica (Costa Blanca Norte, Sur…).
         capacidad_min: Número mínimo de personas.
-        camas_min: Número mínimo de camas.
+        habitaciones_min: Número mínimo de habitaciones (dormitorios).
+        camas_min: Número mínimo de camas reales, sumando las de cada
+            dormitorio. No confundir con habitaciones_min: una habitación
+            puede tener más de una cama.
         banos_min: Número mínimo de baños.
         metros_habitables_min: Metros habitables mínimos.
         piscina: True para exigir piscina privada.
@@ -199,9 +295,10 @@ def buscar_propiedades(
         texto: Busca en nombre y tipo de villa.
 
     Returns:
-        Diccionario con 'matches' (lista de propiedades, máx. 20) y 'count'.
+        Diccionario con 'matches' (todas las coincidencias), 'count' y 'total'.
     """
-    conditions: list[str] = ["v.es_activo = TRUE", "v.es_visible = TRUE"]
+    # activo/visible se aplican dentro del CTE, antes de deduplicar.
+    conditions: list[str] = []
     params: list[bigquery.ScalarQueryParameter] = []
 
     if ubicacion:
@@ -216,8 +313,16 @@ def buscar_propiedades(
         conditions.append("v.capacidad_pax >= @capacidad_min")
         params.append(bigquery.ScalarQueryParameter("capacidad_min", "INT64", capacidad_min))
 
+    if habitaciones_min is not None:
+        conditions.append(
+            f"v.{_columna_habitaciones()} >= @habitaciones_min"
+        )
+        params.append(bigquery.ScalarQueryParameter(
+            "habitaciones_min", "INT64", habitaciones_min
+        ))
+
     if camas_min is not None:
-        conditions.append("v.capacidad_camas >= @camas_min")
+        conditions.append("c.camas_totales >= @camas_min")
         params.append(bigquery.ScalarQueryParameter("camas_min", "INT64", camas_min))
 
     if banos_min is not None:
@@ -235,16 +340,32 @@ def buscar_propiedades(
         conditions.append(f"v.admite_animales = {'TRUE' if admite_animales else 'FALSE'}")
 
     if internet is not None:
-        conditions.append(f"f.tiene_internet = {'TRUE' if internet else 'FALSE'}")
+        conditions.append(
+            f"f.tiene_internet = TRUE"
+            if internet
+            else f"COALESCE(f.tiene_internet, FALSE) = FALSE"
+        )
 
     if aire_acondicionado is not None:
-        conditions.append(f"f.tiene_aire_acondicionado = {'TRUE' if aire_acondicionado else 'FALSE'}")
+        conditions.append(
+            f"f.tiene_aire_acondicionado = TRUE"
+            if aire_acondicionado
+            else f"COALESCE(f.tiene_aire_acondicionado, FALSE) = FALSE"
+        )
 
     if lavadora is not None:
-        conditions.append(f"f.tiene_lavadora = {'TRUE' if lavadora else 'FALSE'}")
+        conditions.append(
+            f"f.tiene_lavadora = TRUE"
+            if lavadora
+            else f"COALESCE(f.tiene_lavadora, FALSE) = FALSE"
+        )
 
     if lavavajillas is not None:
-        conditions.append(f"f.tiene_lavavajillas = {'TRUE' if lavavajillas else 'FALSE'}")
+        conditions.append(
+            f"f.tiene_lavavajillas = TRUE"
+            if lavavajillas
+            else f"COALESCE(f.tiene_lavavajillas, FALSE) = FALSE"
+        )
 
     if texto:
         conditions.append(
@@ -252,37 +373,16 @@ def buscar_propiedades(
         )
         params.append(bigquery.ScalarQueryParameter("texto", "STRING", f"%{texto.strip()}%"))
 
-    where = f"WHERE {' AND '.join(conditions)}"
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     query = f"""
-        WITH villa_dedup AS (
-            SELECT *
-            FROM {TABLA_VILLA}
-            {_DEDUP_VILLA}
-        ),
-        ficha AS (
-            SELECT
-                propiedad_codigo,
-                ANY_VALUE(tiene_internet) AS tiene_internet,
-                ANY_VALUE(tiene_aire_salon) AS tiene_aire_acondicionado,
-                ANY_VALUE(tiene_lavadora) AS tiene_lavadora,
-                ANY_VALUE(tiene_lavavajillas) AS tiene_lavavajillas
-            FROM {TABLA_FICHA_TECNICA}
-            WHERE propiedad_codigo IS NOT NULL
-            GROUP BY propiedad_codigo
-        )
+        WITH{_CTE_VILLAS_VIGENTES},{_CTE_FICHA},{_CTE_CAMAS}
         SELECT
-            v.nombre, v.tipovilla_nombre_comercial, v.tipovilla_descripcion,
-            v.capacidad_pax, v.capacidad_camas, v.numero_banos,
-            v.m2_habitables,
-            v.tiene_piscina_privada, v.tiene_jardin, v.tiene_garaje, v.admite_animales,
-            f.tiene_internet, f.tiene_aire_acondicionado, f.tiene_lavadora, f.tiene_lavavajillas,
-            v.pueblo_cercano, v.zona, v.region,
-            v.rating_exterior, v.rating_interior, v.rating_vistas
+            v.{_columna_habitaciones()} AS numero_habitaciones,{_COLUMNAS_RESUMEN}
         FROM villa_dedup v
         LEFT JOIN ficha f ON SAFE_CAST(v.codigo_busqueda AS INT64) = f.propiedad_codigo
+        LEFT JOIN camas c ON c.villa_id = v.villa_id
         {where}
         ORDER BY v.nombre
-        LIMIT 20
     """
 
     try:
@@ -295,10 +395,10 @@ def buscar_propiedades(
         ).result())
     except Exception as e:
         log.exception("buscar_propiedades: error en BigQuery")
-        return {"matches": [], "count": 0, "error": str(e)}
+        return {"matches": [], "count": 0, "total": 0, "error": str(e)}
 
-    matches = [_row_to_dict(r) for r in rows]
-    return {"matches": matches, "count": len(matches)}
+    matches, total = _separar_total(rows)
+    return {"matches": matches, "count": len(matches), "total": total}
 
 
 def buscar_por_valoracion(
@@ -311,7 +411,8 @@ def buscar_por_valoracion(
 
     Usa cuando el usuario pida villas bien valoradas, con buena puntuación,
     las mejor valoradas, o mencione valoraciones/ratings.
-    La valoración media se calcula sobre baños, cocina, interior y exterior.
+    La valoración media se calcula sobre las tres valoraciones que existen
+    en el catálogo: exterior, interior y vistas.
 
     Args:
         rating_min: Puntuación media mínima (escala 1-6). Si no se especifica, ordena por rating desc.
@@ -320,7 +421,7 @@ def buscar_por_valoracion(
         piscina: True para exigir piscina privada.
 
     Returns:
-        Diccionario con 'matches' (lista de propiedades, máx. 20) y 'count'.
+        Diccionario con 'matches' (todas las coincidencias), 'count' y 'total'.
     """
     conditions: list[str] = []
     params: list[bigquery.ScalarQueryParameter] = []
@@ -345,7 +446,8 @@ def buscar_por_valoracion(
         WITH base AS (
             SELECT
                 nombre, pueblo_cercano, zona, region,
-                capacidad_pax, capacidad_camas, numero_banos,
+                capacidad_pax, {_columna_habitaciones()} AS numero_habitaciones,
+                numero_banos,
                 tiene_piscina_privada, admite_animales,
                 rating_exterior, rating_interior, rating_vistas,
                 ROUND(
@@ -361,10 +463,10 @@ def buscar_por_valoracion(
             WHERE es_activo = TRUE AND es_visible = TRUE
             {_DEDUP_VILLA}
         )
-        SELECT * FROM base
+        SELECT *, COUNT(*) OVER () AS total_resultados
+        FROM base
         {where}
         ORDER BY rating_medio DESC
-        LIMIT 20
     """
 
     try:
@@ -377,10 +479,40 @@ def buscar_por_valoracion(
         ).result())
     except Exception as e:
         log.exception("buscar_por_valoracion: error en BigQuery")
-        return {"matches": [], "count": 0, "error": str(e)}
+        return {"matches": [], "count": 0, "total": 0, "error": str(e)}
 
-    matches = [_row_to_dict(r) for r in rows]
-    return {"matches": matches, "count": len(matches)}
+    matches, total = _separar_total(rows)
+    return {"matches": matches, "count": len(matches), "total": total}
+
+
+# Campos que se suman de las plantas para dar el total de la villa. El nombre
+# del total coincide con el de la planta salvo en los baños, donde se conserva
+# `banios_con_detalle` para no romper a quien ya lo consumía.
+_TOTALES_PLANTA = {
+    "banios_con_detalle": "banios",
+    "banios_con_banera": "banios_con_banera",
+    "banios_con_ducha": "banios_con_ducha",
+    "banios_con_jacuzzi": "banios_con_jacuzzi",
+    "banios_con_bide": "banios_con_bide",
+    "banios_ensuite": "banios_ensuite",
+    "dormitorios": "dormitorios",
+    "camas_totales": "camas_totales",
+    "camas_dobles": "camas_dobles",
+    "camas_king_size": "camas_king_size",
+    "camas_simples": "camas_simples",
+    "literas": "literas",
+    "camas_nido": "camas_nido",
+    "camas_partidas": "camas_partidas",
+    "dormitorios_en_suite": "dormitorios_en_suite",
+    "estancias_con_sofacama": "estancias_con_sofacama",
+}
+
+
+def _totales_de_plantas(plantas: list[dict[str, Any]]) -> dict[str, int]:
+    return {
+        total: sum(p.get(campo) or 0 for p in plantas)
+        for total, campo in _TOTALES_PLANTA.items()
+    }
 
 
 def obtener_detalle_propiedad(nombre: str) -> dict[str, Any]:
@@ -389,9 +521,17 @@ def obtener_detalle_propiedad(nombre: str) -> dict[str, Any]:
     Usa cuando el usuario pregunte por una villa concreta por su nombre,
     quiera más información sobre una propiedad, o pida ver todos los detalles.
     Incluye dirección completa, coordenadas, métricas de habitaciones, ratings,
-    amenidades (internet, aire acondicionado, lavadora, lavavajillas) y el
+    amenidades (internet, aire acondicionado, lavadora, lavavajillas), el
     desglose real de los baños (cuántos tienen bañera, ducha, jacuzzi, bidé
-    o son en-suite).
+    o son en-suite) y el desglose real de los dormitorios: cuántos hay,
+    cuántas camas en total y de qué tipo (dobles, king size, simples, literas,
+    nido, partidas), cuántos dormitorios son en-suite y cuántas estancias
+    tienen sofá cama.
+
+    Devuelve además `plantas`: la misma información **planta a planta**, con el
+    nombre y número de cada una, sus baños y sus dormitorios. Úsalo para
+    preguntas del tipo "cuántos baños hay en cada planta" o "qué hay en el
+    sótano". Los totales de la villa son la suma de sus plantas.
 
     Args:
         nombre: Nombre o parte del nombre de la propiedad.
@@ -422,7 +562,8 @@ def obtener_detalle_propiedad(nombre: str) -> dict[str, Any]:
             v.codigo_busqueda,
             v.nombre, v.tipovilla_nombre_comercial, v.tipovilla_descripcion,
             v.anio_construccion, v.m2_parcela, v.m2_habitables,
-            v.capacidad_pax, v.capacidad_camas, v.numero_banos, v.numero_plantas,
+            v.capacidad_pax, v.{_columna_habitaciones()} AS numero_habitaciones,
+            v.numero_banos, v.numero_plantas,
             v.tiene_piscina_privada, v.tiene_piscina_comun, v.piscina_climatizada,
             v.tiene_jardin, v.tiene_garaje, v.admite_animales,
             v.pueblo_cercano, v.zona, v.region, v.direccion,
@@ -495,31 +636,85 @@ def obtener_detalle_propiedad(nombre: str) -> dict[str, Any]:
                 exc_info=True,
             )
 
-    # El desglose de baños es enriquecimiento opcional. Se consulta por separado
-    # para que un cambio o ausencia en Planta/Banio no inutilice la ficha entera.
+    # El desglose es enriquecimiento opcional: se consulta aparte para que una
+    # ausencia o un cambio en Planta/Banios/Estancia no inutilice la ficha.
     villa_ids = [match["villa_id"] for match in matches]
-    query_banios = f"""
+
+    # Baños y estancias cuelgan de una planta, no de la villa. Se consulta con
+    # ese grano y los totales de villa se derivan sumando, para que el desglose
+    # por planta y el total no puedan descuadrar entre sí.
+    query_plantas = f"""
+        WITH banios AS (
+            SELECT
+                planta_id,
+                COUNT(*) AS banios,
+                COUNTIF(tiene_baniera OR tiene_baniera_suelta) AS banios_con_banera,
+                COUNTIF(
+                    tiene_ducha OR tiene_ducha_plato OR tiene_ducha_obra
+                    OR tiene_ducha_hidromasaje
+                ) AS banios_con_ducha,
+                COUNTIF(tiene_jacuzzi OR tiene_jacuzzi_baniera) AS banios_con_jacuzzi,
+                COUNTIF(tiene_bide) AS banios_con_bide,
+                COUNTIF(es_en_suite) AS banios_ensuite
+            FROM {TABLA_BANIO}
+            WHERE es_activo = TRUE
+            GROUP BY planta_id
+        ),
+        estancias AS (
+            SELECT
+                planta_id,
+                COUNTIF(tipo_estancia = 'dormitorio') AS dormitorios,
+                SUM(COALESCE(num_camas_dobles, 0)
+                    + COALESCE(num_camas_king_size, 0)
+                    + COALESCE(num_camas_simples, 0)
+                    + COALESCE(num_literas, 0)
+                    + COALESCE(num_camas_nido, 0)
+                    + COALESCE(num_camas_partidas, 0)) AS camas_totales,
+                SUM(COALESCE(num_camas_dobles, 0)) AS camas_dobles,
+                SUM(COALESCE(num_camas_king_size, 0)) AS camas_king_size,
+                SUM(COALESCE(num_camas_simples, 0)) AS camas_simples,
+                SUM(COALESCE(num_literas, 0)) AS literas,
+                SUM(COALESCE(num_camas_nido, 0)) AS camas_nido,
+                SUM(COALESCE(num_camas_partidas, 0)) AS camas_partidas,
+                COUNTIF(es_en_suite) AS dormitorios_en_suite,
+                COUNTIF(tiene_sofacama) AS estancias_con_sofacama
+            FROM {TABLA_ESTANCIA}
+            WHERE es_activo = TRUE
+            GROUP BY planta_id
+        )
         SELECT
             p.villa_id,
-            COUNT(b.banio_id) AS banios_con_detalle,
-            COUNTIF(b.tiene_baniera OR b.tiene_baniera_suelta) AS banios_con_banera,
-            COUNTIF(
-                b.tiene_ducha OR b.tiene_ducha_plato OR b.tiene_ducha_obra
-                OR b.tiene_ducha_hidromasaje
-            ) AS banios_con_ducha,
-            COUNTIF(b.tiene_jacuzzi OR b.tiene_jacuzzi_baniera) AS banios_con_jacuzzi,
-            COUNTIF(b.tiene_bide) AS banios_con_bide,
-            COUNTIF(b.es_en_suite) AS banios_ensuite
+            p.numero_planta,
+            p.nombre AS planta,
+            p.tiene_jacuzzi AS planta_tiene_jacuzzi,
+            p.tiene_sauna AS planta_tiene_sauna,
+            COALESCE(b.banios, 0) AS banios,
+            COALESCE(b.banios_con_banera, 0) AS banios_con_banera,
+            COALESCE(b.banios_con_ducha, 0) AS banios_con_ducha,
+            COALESCE(b.banios_con_jacuzzi, 0) AS banios_con_jacuzzi,
+            COALESCE(b.banios_con_bide, 0) AS banios_con_bide,
+            COALESCE(b.banios_ensuite, 0) AS banios_ensuite,
+            COALESCE(e.dormitorios, 0) AS dormitorios,
+            COALESCE(e.camas_totales, 0) AS camas_totales,
+            COALESCE(e.camas_dobles, 0) AS camas_dobles,
+            COALESCE(e.camas_king_size, 0) AS camas_king_size,
+            COALESCE(e.camas_simples, 0) AS camas_simples,
+            COALESCE(e.literas, 0) AS literas,
+            COALESCE(e.camas_nido, 0) AS camas_nido,
+            COALESCE(e.camas_partidas, 0) AS camas_partidas,
+            COALESCE(e.dormitorios_en_suite, 0) AS dormitorios_en_suite,
+            COALESCE(e.estancias_con_sofacama, 0) AS estancias_con_sofacama
         FROM {TABLA_PLANTA} p
-        JOIN {TABLA_BANIO} b ON b.planta_id = p.planta_id AND b.es_activo = TRUE
-        WHERE p.villa_id IN UNNEST(@villa_ids)
-        GROUP BY p.villa_id
+        LEFT JOIN banios b ON b.planta_id = p.planta_id
+        LEFT JOIN estancias e ON e.planta_id = p.planta_id
+        WHERE p.villa_id IN UNNEST(@villa_ids) AND p.es_activo = TRUE
+        ORDER BY p.villa_id, p.numero_planta
     """
-    banios_por_villa: dict[str, dict[str, Any]] = {}
-    detalle_banios_disponible = True
+    plantas_por_villa: dict[str, list[dict[str, Any]]] = {}
+    detalle_plantas_disponible = True
     try:
-        rows_banios = list(_bq.query(
-            query_banios,
+        rows_plantas = list(_bq.query(
+            query_plantas,
             job_config=bigquery.QueryJobConfig(
                 query_parameters=[
                     bigquery.ArrayQueryParameter("villa_ids", "STRING", villa_ids)
@@ -527,14 +722,13 @@ def obtener_detalle_propiedad(nombre: str) -> dict[str, Any]:
                 maximum_bytes_billed=_BILLING_CAP,
             ),
         ).result())
-        banios_por_villa = {
-            row["villa_id"]: _row_to_dict(row)
-            for row in rows_banios
-        }
+        for row in rows_plantas:
+            fila = _row_to_dict(row)
+            plantas_por_villa.setdefault(fila.pop("villa_id"), []).append(fila)
     except Exception:
-        detalle_banios_disponible = False
+        detalle_plantas_disponible = False
         log.warning(
-            "obtener_detalle_propiedad: desglose de baños no disponible",
+            "obtener_detalle_propiedad: desglose por planta no disponible",
             exc_info=True,
         )
 
@@ -545,32 +739,70 @@ def obtener_detalle_propiedad(nombre: str) -> dict[str, Any]:
         detalle_ficha = ficha_por_codigo.get(codigo, {}) if codigo else {}
         detalle_ficha.pop("propiedad_codigo", None)
         match.update(detalle_ficha)
-        detalle_banios = banios_por_villa.get(villa_id, {})
-        detalle_banios.pop("villa_id", None)
-        match.update(detalle_banios)
+        plantas = plantas_por_villa.get(villa_id)
+        if plantas:
+            match["plantas"] = plantas
+            match.update(_totales_de_plantas(plantas))
 
     return {
         "matches": matches,
         "count": len(matches),
         "detalle_amenidades_disponible": detalle_amenidades_disponible,
-        "detalle_banios_disponible": detalle_banios_disponible,
+        "detalle_banios_disponible": detalle_plantas_disponible,
+        "detalle_dormitorios_disponible": detalle_plantas_disponible,
     }
 
 
 _DOMINIO_WEB = "abahanavillas.com"
 
+# Nada de esto hace falta para extraer texto, y cada uno es una descarga más
+# dentro de un contenedor de 2 GiB que además arranca un Chromium por visita.
+_RECURSOS_IGNORADOS = {"image", "media", "font", "stylesheet"}
+
+_CACHE_WEB: dict[str, tuple[float, dict[str, Any]]] = {}
+_CACHE_WEB_TTL = 3600.0
+_CACHE_WEB_MAX = 32
+
+
+def _url_permitida(url: str) -> bool:
+    """Comprueba que la URL es realmente del sitio de Abahana.
+
+    Un `in` sobre netloc no vale: `abahanavillas.com.atacante.io` lo pasaría,
+    y detrás hay un navegador de verdad haciendo la petición desde Cloud Run.
+    """
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    if parsed.scheme != "https":
+        return False
+    host = (parsed.hostname or "").lower()
+    return host == _DOMINIO_WEB or host.endswith(f".{_DOMINIO_WEB}")
+
 
 async def _fetch_con_playwright(url: str) -> str:
     from playwright.async_api import async_playwright
+
+    async def _filtrar(ruta):
+        if ruta.request.resource_type in _RECURSOS_IGNORADOS:
+            await ruta.abort()
+        else:
+            await ruta.continue_()
+
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        page = await browser.new_page(locale="es-ES")
-        await page.goto(url, wait_until="load", timeout=30000)
-        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        await page.wait_for_timeout(3000)
-        html = await page.content()
-        await browser.close()
-    return html
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--disable-dev-shm-usage", "--disable-gpu"],
+        )
+        try:
+            page = await browser.new_page(locale="es-ES")
+            await page.route("**/*", _filtrar)
+            await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await page.wait_for_timeout(800)
+            return await page.content()
+        finally:
+            await browser.close()
 
 
 def _playwright_en_hilo(url: str) -> str:
@@ -597,9 +829,13 @@ def consultar_web(url: str) -> dict[str, Any]:
     Returns:
         Diccionario con 'titulo', 'contenido' (texto limpio) y 'url'.
     """
-    parsed = urlparse(url)
-    if _DOMINIO_WEB not in parsed.netloc:
-        return {"error": f"Solo se permiten URLs de {_DOMINIO_WEB}"}
+    if not _url_permitida(url):
+        return {"error": f"Solo se permiten URLs https de {_DOMINIO_WEB}", "url": url}
+
+    ahora = time.monotonic()
+    cacheado = _CACHE_WEB.get(url)
+    if cacheado and ahora - cacheado[0] < _CACHE_WEB_TTL:
+        return cacheado[1]
 
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
@@ -644,12 +880,19 @@ def consultar_web(url: str) -> dict[str, Any]:
     enlaces_unicos = list(dict.fromkeys(enlaces))
     seccion_enlaces = "\n".join(enlaces_unicos[:50])
 
-    return {
+    resultado = {
         "titulo": titulo,
         "contenido": contenido[:9000],
         "enlaces": seccion_enlaces,
         "url": url,
     }
+
+    # Las páginas corporativas cambian poco: cachearlas evita arrancar un
+    # navegador entero cada vez que alguien pregunta por el aviso legal.
+    _CACHE_WEB[url] = (ahora, resultado)
+    if len(_CACHE_WEB) > _CACHE_WEB_MAX:
+        del _CACHE_WEB[min(_CACHE_WEB, key=lambda k: _CACHE_WEB[k][0])]
+    return resultado
 
 
 def buscar_internet(consulta: str) -> dict[str, Any]:
@@ -707,6 +950,8 @@ def consultar_disponibilidad(
     ubicacion: str | None = None,
     zona: str | None = None,
     capacidad_min: int | None = None,
+    habitaciones_min: int | None = None,
+    camas_min: int | None = None,
     piscina: bool | None = None,
     limite: int = 20,
 ) -> dict[str, Any]:
@@ -724,6 +969,9 @@ def consultar_disponibilidad(
         ubicacion: Pueblo cercano (Calpe, Altea, Moraira...).
         zona: Zona geográfica.
         capacidad_min: Número mínimo de huéspedes.
+        habitaciones_min: Número mínimo de habitaciones (dormitorios).
+        camas_min: Número mínimo de camas reales. No es lo mismo que
+            habitaciones_min: una habitación puede tener varias camas.
         piscina: True para exigir piscina privada.
         limite: Máximo de villas a mostrar (el total siempre es exacto).
 
@@ -768,7 +1016,8 @@ def consultar_disponibilidad(
             "fecha_actual": hoy.isoformat(),
         }
 
-    conditions = ["v.es_activo = TRUE", "v.es_visible = TRUE"]
+    # activo/visible los aplica el CTE de villas vigentes, antes de deduplicar.
+    conditions: list[str] = []
     params: list[bigquery.ScalarQueryParameter] = [
         bigquery.ScalarQueryParameter("fecha_desde", "DATE", desde),
         bigquery.ScalarQueryParameter("fecha_hasta", "DATE", hasta),
@@ -793,19 +1042,25 @@ def consultar_disponibilidad(
         params.append(bigquery.ScalarQueryParameter(
             "capacidad_min", "INT64", capacidad_min
         ))
+    if habitaciones_min is not None:
+        conditions.append(f"v.{_columna_habitaciones()} >= @habitaciones_min")
+        params.append(bigquery.ScalarQueryParameter(
+            "habitaciones_min", "INT64", habitaciones_min
+        ))
+    if camas_min is not None:
+        conditions.append("c.camas_totales >= @camas_min")
+        params.append(bigquery.ScalarQueryParameter(
+            "camas_min", "INT64", camas_min
+        ))
     if piscina is not None:
         conditions.append(
             f"v.tiene_piscina_privada = {'TRUE' if piscina else 'FALSE'}"
         )
 
     limite = min(max(1, limite), 50)
-    where = " AND ".join(conditions)
+    where = " AND ".join(conditions) if conditions else "TRUE"
     query = f"""
-        WITH villa_dedup AS (
-            SELECT *
-            FROM {TABLA_VILLA}
-            {_DEDUP_VILLA}
-        ),
+        WITH{_CTE_VILLAS_VIGENTES},{_CTE_CAMAS},
         disponibles AS (
             SELECT
                 v.nombre,
@@ -813,11 +1068,12 @@ def consultar_disponibilidad(
                 v.zona,
                 v.region,
                 v.capacidad_pax,
-                v.capacidad_camas,
+                v.{_columna_habitaciones()} AS numero_habitaciones,
                 v.numero_banos,
                 v.tiene_piscina_privada,
                 v.admite_animales
             FROM villa_dedup v
+            LEFT JOIN camas c ON c.villa_id = v.villa_id
             WHERE {where}
               AND NOT EXISTS (
                   SELECT 1
@@ -938,37 +1194,16 @@ def consultar_reservas(
         params.append(bigquery.ScalarQueryParameter("fecha_hasta", "DATE", fecha_hasta))
 
     if estado_reserva:
-        estado_codigo = estado_reserva.strip().upper()
-        estado_nombre = _ESTADOS_RESERVA.get(estado_codigo, estado_codigo)
         conditions.append(
-            "UPPER(r.estado_reserva) IN (@estado_reserva, @estado_reserva_nombre)"
+            _filtro_estado("r.estado_reserva", "estado_reserva",
+                           estado_reserva, _ESTADOS_RESERVA, params)
         )
-        params.extend([
-            bigquery.ScalarQueryParameter(
-                "estado_reserva", "STRING", estado_codigo
-            ),
-            bigquery.ScalarQueryParameter(
-                "estado_reserva_nombre", "STRING", estado_nombre
-            ),
-        ])
 
     if estado_documento:
-        documento_codigo = estado_documento.strip().upper()
-        documento_nombre = _ESTADOS_DOCUMENTO.get(
-            documento_codigo, documento_codigo
-        )
         conditions.append(
-            "UPPER(r.estado_documento) IN "
-            "(@estado_documento, @estado_documento_nombre)"
+            _filtro_estado("r.estado_documento", "estado_documento",
+                           estado_documento, _ESTADOS_DOCUMENTO, params)
         )
-        params.extend([
-            bigquery.ScalarQueryParameter(
-                "estado_documento", "STRING", documento_codigo
-            ),
-            bigquery.ScalarQueryParameter(
-                "estado_documento_nombre", "STRING", documento_nombre
-            ),
-        ])
 
     if excluir_canceladas:
         conditions.append(
@@ -1212,6 +1447,58 @@ def describir_tabla(nombre_tabla: str) -> dict[str, Any]:
     return {"columns": [_row_to_dict(r) for r in rows]}
 
 
+# Referencias de tabla: sirve tanto `proj.dataset.tabla` entre acentos graves
+# como dataset.tabla sin ellos. Un identificador suelto es un CTE o un alias.
+_REF_TABLA = re.compile(
+    r"\b(?:FROM|JOIN)\s+(`[^`]+`|[A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*)+)",
+    re.IGNORECASE,
+)
+
+
+def _proyecto_y_dataset(referencia: str) -> tuple[str | None, str]:
+    partes = [t.strip("` ") for t in referencia.strip("`").split(".")]
+    if len(partes) == 2:                                   # dataset.tabla
+        return None, partes[0]
+    if len(partes) == 3 and partes[1].upper() == "INFORMATION_SCHEMA":
+        return None, partes[0]                             # dataset.INFO_SCHEMA.x
+    return partes[0], partes[1]                            # proyecto.dataset[...]
+
+
+def _motivo_rechazo_sql(query: str) -> str | None:
+    """Devuelve por qué se rechaza la consulta, o None si es aceptable.
+
+    El service account tiene bigquery.dataViewer a nivel de PROYECTO, así que
+    sin esta comprobación `ejecutar_sql` podría leer cualquier dataset —
+    incluido el de conversaciones almacenadas de todos los usuarios.
+    """
+    limpia = query.strip()
+    if not limpia:
+        return "La consulta está vacía."
+
+    if ";" in limpia.rstrip().rstrip(";"):
+        return (
+            "Solo se admite una sentencia por consulta (no uses ';' para "
+            "encadenar varias)."
+        )
+
+    if not limpia.upper().startswith(("SELECT", "WITH")):
+        return "Solo se permiten consultas SELECT o WITH."
+
+    for referencia in _REF_TABLA.findall(limpia):
+        proyecto, dataset = _proyecto_y_dataset(referencia)
+        if dataset.lower() != DATASET.lower():
+            return (
+                f"Solo se puede consultar el dataset {DATASET}; "
+                f"'{referencia}' apunta a otro sitio."
+            )
+        if proyecto is not None and proyecto.lower() != PROJECT_ID.lower():
+            return (
+                f"Solo se puede consultar el proyecto {PROJECT_ID}; "
+                f"'{referencia}' apunta a otro."
+            )
+    return None
+
+
 def ejecutar_sql(query: str) -> dict[str, Any]:
     """Ejecuta una consulta SQL de solo lectura (SELECT/WITH) sobre silver_clean.
 
@@ -1226,7 +1513,9 @@ def ejecutar_sql(query: str) -> dict[str, Any]:
       fecha_actualizacion DESC) = 1` para quedarte con una fila por villa.
     - Para relacionar `stg_etendo_Planta`/`stg_etendo_Banio` con una villa usa
       `villa_id` (no `identificador`/`villa_nombre`, que no casan).
-    - Solo se permiten SELECT/WITH (nada de INSERT/UPDATE/DELETE/DDL).
+    - Solo se permiten SELECT/WITH (nada de INSERT/UPDATE/DELETE/DDL) y una
+      sola sentencia por llamada.
+    - Solo se puede leer el dataset silver_clean; cualquier otro se rechaza.
     - El resultado se limita a 50 filas.
 
     Args:
@@ -1235,9 +1524,9 @@ def ejecutar_sql(query: str) -> dict[str, Any]:
     Returns:
         Diccionario con 'rows' (máx. 50), 'count' y, si aplica, 'error'.
     """
-    normalized = query.strip().upper()
-    if not (normalized.startswith("SELECT") or normalized.startswith("WITH")):
-        return {"rows": [], "count": 0, "error": "Solo se permiten consultas SELECT o WITH."}
+    motivo = _motivo_rechazo_sql(query)
+    if motivo:
+        return {"rows": [], "count": 0, "error": motivo}
 
     try:
         rows = list(_bq.query(
@@ -1263,6 +1552,8 @@ en la Costa Blanca (España). Ayudas con villas Y con información turística lo
 ## Reglas generales
 - Responde SIEMPRE en español.
 - Para ubicación usa pueblo_cercano (Altea, Calpe, Moraira…) o zona.
+- Habitaciones y camas NO son lo mismo. "4 habitaciones" es `habitaciones_min=4`;
+  "duerme a 8 en camas" es `camas_min=8`. Una habitación puede tener varias camas.
 - Muestra el rating_medio cuando uses buscar_por_valoracion.
 - Puedes combinar varios filtros en una sola llamada.
 - Nunca inventes datos. Si no hay resultados en BigQuery, sugiere alternativas.
@@ -1319,7 +1610,8 @@ INSTRUCTION_CLIENTE = f"""{_INSTRUCCION_BASE}
 - `obtener_fecha_hora_actual()`: fecha y hora actual en Europe/Madrid; obligatoria
   para expresiones relativas como hoy o mañana.
 - `listar_propiedades()`: catálogo completo sin filtros.
-- `buscar_propiedades(...)`: búsqueda con filtros: ubicación, zona, capacidad, camas,
+- `buscar_propiedades(...)`: búsqueda con filtros: ubicación, zona, capacidad,
+  habitaciones (`habitaciones_min`), camas reales (`camas_min`),
   baños, metros habitables, piscina privada, mascotas, internet, aire acondicionado,
   lavadora, lavavajillas.
 - `buscar_por_valoracion(...)`: cuando el usuario pida villas bien valoradas o con
@@ -1339,7 +1631,8 @@ INSTRUCTION_INTERNO = f"""{_INSTRUCCION_BASE}
 - `obtener_fecha_hora_actual()`: fecha y hora actual en Europe/Madrid; obligatoria
   para expresiones relativas como hoy o mañana.
 - `listar_propiedades()`: catálogo completo sin filtros.
-- `buscar_propiedades(...)`: búsqueda con filtros: ubicación, zona, capacidad, camas,
+- `buscar_propiedades(...)`: búsqueda con filtros: ubicación, zona, capacidad,
+  habitaciones (`habitaciones_min`), camas reales (`camas_min`),
   baños, metros habitables, piscina privada, mascotas, internet, aire acondicionado,
   lavadora, lavavajillas.
 - `buscar_por_valoracion(...)`: cuando el usuario pida villas bien valoradas o con
@@ -1382,7 +1675,8 @@ INSTRUCTION_ADMIN = f"""{_INSTRUCCION_BASE}
 - `obtener_fecha_hora_actual()`: fecha y hora actual en Europe/Madrid; obligatoria
   para expresiones relativas como hoy o mañana.
 - `listar_propiedades()`: catálogo completo sin filtros.
-- `buscar_propiedades(...)`: búsqueda con filtros: ubicación, zona, capacidad, camas,
+- `buscar_propiedades(...)`: búsqueda con filtros: ubicación, zona, capacidad,
+  habitaciones (`habitaciones_min`), camas reales (`camas_min`),
   baños, metros habitables, piscina privada, mascotas, internet, aire acondicionado,
   lavadora, lavavajillas.
 - `buscar_por_valoracion(...)`: cuando el usuario pida villas bien valoradas o con
@@ -1429,6 +1723,8 @@ agent_cliente = Agent(
         "e información turística local (fiestas, eventos, clima)."
     ),
     instruction=INSTRUCTION_CLIENTE,
+    # Sin consultar_feedback_negativo: devuelve preguntas y respuestas de otros
+    # usuarios, que no deben llegar a un cliente.
     tools=[
         obtener_fecha_hora_actual,
         listar_propiedades,
@@ -1437,7 +1733,6 @@ agent_cliente = Agent(
         consultar_disponibilidad,
         consultar_web,
         buscar_internet,
-        consultar_feedback_negativo,
     ],
 )
 

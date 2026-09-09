@@ -87,6 +87,7 @@ class AgentToolsTest(unittest.TestCase):
             "tiene_internet": True,
         }
         bq = Mock()
+        # villa -> plantas (sin codigo_busqueda no hay consulta de ficha)
         bq.query.side_effect = [
             _QueryResult([villa]),
             RuntimeError("tabla de baños no disponible"),
@@ -112,6 +113,7 @@ class AgentToolsTest(unittest.TestCase):
             "tiene_piscina_privada": True,
         }
         bq = Mock()
+        # villa -> ficha -> plantas
         bq.query.side_effect = [
             _QueryResult([villa]),
             RuntimeError("tabla de ficha técnica no disponible"),
@@ -152,10 +154,14 @@ class AgentToolsTest(unittest.TestCase):
             parameter.name: parameter.value
             for parameter in config.query_parameters
         }
-        self.assertIn("@estado_reserva_nombre", query)
-        self.assertIn("@estado_documento_nombre", query)
-        self.assertEqual(values["estado_reserva_nombre"], "RESERVA")
-        self.assertEqual(values["estado_documento_nombre"], "COMPLETADA")
+        # Cada código viaja con todas sus grafías conocidas: en silver el mismo
+        # estado aparece unas veces como código y otras escrito.
+        self.assertIn("UPPER(r.estado_reserva) IN", query)
+        self.assertIn("UPPER(r.estado_documento) IN", query)
+        reserva = {v for k, v in values.items() if k.startswith("estado_reserva")}
+        documento = {v for k, v in values.items() if k.startswith("estado_documento")}
+        self.assertEqual({"RE", "RESERVA"}, reserva)
+        self.assertEqual({"CO", "CONFIRMADA", "COMPLETADA"}, documento)
 
     def test_all_roles_can_check_current_time_and_availability(self):
         for role_agent in agent.AGENTS.values():
