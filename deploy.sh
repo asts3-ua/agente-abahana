@@ -13,6 +13,8 @@ REGION="europe-west1"
 SERVICE="abahana-agent"
 SA_NAME="abahana-agent-sa"
 SA_EMAIL="${SA_NAME}@${PROJECT}.iam.gserviceaccount.com"
+CONV_DATASET="agent_analytics"   # conversaciones del asistente (chat_turns)
+CONV_LOCATION="EU"               # misma ubicación que bronze_raw/silver_clean/gold_bi
 
 SKIP_IAM=0
 for arg in "$@"; do
@@ -75,6 +77,41 @@ if [ "$SKIP_IAM" -eq 0 ]; then
     done
 fi
 
+# ── 2b. Dataset de conversaciones + permiso de escritura ─────────────────────
+# Sin esto el historial NO persiste: el agente cae al backend SQLite, que vive
+# dentro del contenedor y se pierde en cada despliegue. El permiso se concede
+# SOLO sobre este dataset, no sobre todo el proyecto: el service account debe
+# seguir siendo de solo lectura para silver_clean.
+if bq --project_id="$PROJECT" show --dataset "${PROJECT}:${CONV_DATASET}" >/dev/null 2>&1; then
+    echo "Dataset ${CONV_DATASET} ya existe."
+else
+    echo "Creando dataset ${CONV_DATASET} en ${CONV_LOCATION}..."
+    bq --project_id="$PROJECT" mk --location="$CONV_LOCATION" --dataset \
+        --description="Conversaciones del asistente (chat_turns)." \
+        "${PROJECT}:${CONV_DATASET}"
+fi
+
+echo "Asegurando permiso de escritura sobre ${CONV_DATASET}..."
+ACL_TMP=$(mktemp)
+bq --project_id="$PROJECT" show --format=prettyjson "${PROJECT}:${CONV_DATASET}" > "$ACL_TMP"
+if python3 - "$ACL_TMP" "$SA_EMAIL" <<'PYEOF'; then
+import json, sys
+ruta, sa = sys.argv[1], sys.argv[2]
+datos = json.load(open(ruta))
+acceso = datos.get("access", [])
+if any(e.get("userByEmail") == sa and e.get("role") == "WRITER" for e in acceso):
+    sys.exit(1)          # ya estaba: nada que actualizar
+acceso.append({"role": "WRITER", "userByEmail": sa})
+datos["access"] = acceso
+json.dump(datos, open(ruta, "w"))
+PYEOF
+    bq --project_id="$PROJECT" update --source "$ACL_TMP" "${PROJECT}:${CONV_DATASET}"
+    echo "  · WRITER concedido a $SA_EMAIL"
+else
+    echo "  · ya tenía WRITER"
+fi
+rm -f "$ACL_TMP"
+
 # ── 3. Build + deploy en Cloud Run ───────────────────────────────────────────
 echo "Desplegando en Cloud Run (puede tardar)..."
 gcloud run deploy "$SERVICE" \
@@ -82,7 +119,7 @@ gcloud run deploy "$SERVICE" \
     --project="$PROJECT" \
     --region="$REGION" \
     --service-account="$SA_EMAIL" \
-    --set-env-vars="GOOGLE_CLOUD_PROJECT=$PROJECT,GOOGLE_CLOUD_LOCATION=$REGION,GOOGLE_GENAI_USE_VERTEXAI=true" \
+    --set-env-vars="GOOGLE_CLOUD_PROJECT=$PROJECT,GOOGLE_CLOUD_LOCATION=$REGION,GOOGLE_GENAI_USE_VERTEXAI=true,CONVERSATIONS_BACKEND=bigquery" \
     --allow-unauthenticated \
     --memory=2Gi \
     --cpu=2 \
