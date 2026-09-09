@@ -20,6 +20,7 @@ from typing import Any
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
+import requests
 from bs4 import BeautifulSoup
 from google import genai
 from google.adk.agents import Agent
@@ -780,7 +781,7 @@ def _url_permitida(url: str) -> bool:
     return host == _DOMINIO_WEB or host.endswith(f".{_DOMINIO_WEB}")
 
 
-async def _fetch_con_playwright(url: str) -> str:
+async def _fetch_con_playwright(url: str) -> tuple[int, str]:
     from playwright.async_api import async_playwright
 
     async def _filtrar(ruta):
@@ -797,15 +798,18 @@ async def _fetch_con_playwright(url: str) -> str:
         try:
             page = await browser.new_page(locale="es-ES")
             await page.route("**/*", _filtrar)
-            await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+            respuesta = await page.goto(
+                url, wait_until="domcontentloaded", timeout=20000
+            )
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             await page.wait_for_timeout(800)
-            return await page.content()
+            estado = respuesta.status if respuesta else 0
+            return estado, await page.content()
         finally:
             await browser.close()
 
 
-def _playwright_en_hilo(url: str) -> str:
+def _playwright_en_hilo(url: str) -> tuple[int, str]:
     loop = asyncio.new_event_loop()
     try:
         return loop.run_until_complete(_fetch_con_playwright(url))
@@ -839,10 +843,23 @@ def consultar_web(url: str) -> dict[str, Any]:
 
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            html = pool.submit(_playwright_en_hilo, url).result(timeout=45)
+            estado, html = pool.submit(_playwright_en_hilo, url).result(timeout=45)
     except Exception as e:
         log.exception("consultar_web: error al obtener %s", url)
         return {"error": str(e), "url": url}
+
+    # El sitio responde a las rutas inexistentes con una página de error que
+    # se parece a la portada. Sin mirar el código, el agente daba por buena
+    # esa respuesta y se quedaba con contenido que no había pedido.
+    if estado >= 400:
+        return {
+            "error": (
+                f"La página no existe (HTTP {estado}). Usa "
+                f"buscar_pagina_web(...) para localizar la URL correcta."
+            ),
+            "url": url,
+            "estado": estado,
+        }
 
     soup = BeautifulSoup(html, "html.parser")
 
@@ -893,6 +910,81 @@ def consultar_web(url: str) -> dict[str, Any]:
     if len(_CACHE_WEB) > _CACHE_WEB_MAX:
         del _CACHE_WEB[min(_CACHE_WEB, key=lambda k: _CACHE_WEB[k][0])]
     return resultado
+
+
+_SITEMAP = f"https://www.{_DOMINIO_WEB}/sitemap.xml"
+_PALABRAS_IGNORADAS = {
+    "de", "del", "la", "el", "los", "las", "y", "en", "para", "por", "con",
+    "que", "cual", "cuales", "es", "son", "un", "una", "sobre", "web",
+    "pagina", "paginas",
+}
+
+
+def _normalizar(texto: str) -> str:
+    from unicodedata import normalize
+    sin_tildes = normalize("NFKD", texto).encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9]+", " ", sin_tildes.lower()).strip()
+
+
+@functools.lru_cache(maxsize=1)
+def _sitemap_urls() -> tuple[str, ...]:
+    """URLs en español publicadas en el sitemap del sitio.
+
+    Se cachea: son más de mil y el sitemap cambia poco.
+    """
+    respuesta = requests.get(_SITEMAP, timeout=20)
+    respuesta.raise_for_status()
+    urls = re.findall(r"<loc>\s*([^<\s]+)\s*</loc>", respuesta.text)
+    return tuple(u for u in urls if f"/{'es'}/" in u)
+
+
+def buscar_pagina_web(consulta: str) -> dict[str, Any]:
+    """Localiza páginas de la web de Abahana Villas por su tema.
+
+    Úsala cuando no sepas la URL exacta, o cuando `consultar_web` responda que
+    la página no existe. Devuelve URLs reales tomadas del sitemap del sitio,
+    para no tener que adivinarlas. Después pásale la URL a `consultar_web`.
+
+    Args:
+        consulta: Tema a localizar ("preguntas frecuentes", "condiciones de
+            alquiler", "aviso legal"...).
+
+    Returns:
+        Diccionario con 'paginas' (lista de {url, titulo}, máx. 8).
+    """
+    try:
+        urls = _sitemap_urls()
+    except Exception as e:
+        log.exception("buscar_pagina_web: no se pudo leer el sitemap")
+        return {"paginas": [], "error": str(e)}
+
+    terminos = [
+        t for t in _normalizar(consulta).split()
+        if t and t not in _PALABRAS_IGNORADAS
+    ]
+    if not terminos:
+        return {"paginas": []}
+
+    puntuadas: list[tuple[int, str]] = []
+    for url in urls:
+        ruta = _normalizar(urlparse(url).path)
+        aciertos = sum(1 for t in terminos if t in ruta)
+        if aciertos:
+            # A igualdad de aciertos, la ruta más corta suele ser la página
+            # principal del tema y no una hoja del árbol.
+            puntuadas.append((aciertos * 1000 - len(ruta), url))
+
+    puntuadas.sort(reverse=True)
+    return {
+        "paginas": [
+            {
+                "url": url,
+                "titulo": urlparse(url).path.rstrip("/").split("/")[-1]
+                .replace("-", " "),
+            }
+            for _, url in puntuadas[:8]
+        ]
+    }
 
 
 def buscar_internet(consulta: str) -> dict[str, Any]:
@@ -1579,11 +1671,34 @@ en la Costa Blanca (España). Ayudas con villas Y con información turística lo
 
 ## Web corporativa
 - URL base: https://www.abahanavillas.com/es/
-- Usa `consultar_web(url)` cuando el usuario pregunte por información de la empresa:
-  política de privacidad, aviso legal, condiciones, contacto, destinos, etc.
-- Infiere la URL según el contexto (ej. política de privacidad →
-  https://www.abahanavillas.com/es/politica-de-privacidad/).
-- Si la primera URL falla o no tiene contenido relevante, prueba variaciones.
+- Usa `consultar_web(url)` cuando el usuario pregunte por información de la
+  empresa: condiciones, recargos, política de privacidad, aviso legal,
+  contacto, destinos, etc.
+- Páginas clave (usa estas directamente, no las adivines):
+  - Preguntas frecuentes del usuario — condiciones de reserva, pagos, fianzas,
+    mascotas y demás cargos accesorios:
+    https://www.abahanavillas.com/es/ayuda-y-preguntas-frecuentes/preguntas-frecuentes-del-usuario
+  - Preguntas frecuentes del propietario:
+    https://www.abahanavillas.com/es/ayuda-y-preguntas-frecuentes/preguntas-frecuentes-del-propietario
+  - Condiciones generales de uso y alquiler:
+    https://www.abahanavillas.com/es/condiciones-generales-uso-y-alquiler
+  - Condiciones del bono descuento:
+    https://www.abahanavillas.com/es/condiciones-bono-descuento
+  - Aviso legal: https://www.abahanavillas.com/es/aviso-legal
+  - Política de privacidad: https://www.abahanavillas.com/es/politica-de-privacidad
+  - Política de cookies: https://www.abahanavillas.com/es/politica-de-cookies
+  - Contacto: https://www.abahanavillas.com/es/contacto
+- QUÉ villas admiten algo (mascotas, piscina...) es una búsqueda en el
+  catálogo: `buscar_propiedades(admite_animales=True)`. La web no lista villas.
+- CUÁNTO cuesta un extra o bajo qué condiciones (mascotas, fianza, limpieza,
+  cambios de reserva) sí está en la web, y en las preguntas frecuentes del
+  usuario antes que en ningún otro sitio: ahí suele estar la cifra concreta,
+  mientras que las condiciones generales solo remiten a la ficha de la villa.
+- Si te preguntan si se admite algo y hay un importe asociado, responde a las
+  dos cosas: cuántas villas lo admiten y cuánto cuesta.
+- NO inventes URLs. Si `consultar_web` responde que la página no existe, o si
+  el tema no está en la lista de arriba, llama a `buscar_pagina_web(consulta)`
+  para localizar la URL real en el sitemap y consulta después esa.
 
 ## Búsqueda en internet — OBLIGATORIO para turismo local
 - Si preguntan por fiestas, eventos, clima, atracciones, horarios o datos de pueblos,
@@ -1732,6 +1847,7 @@ agent_cliente = Agent(
         buscar_por_valoracion,
         consultar_disponibilidad,
         consultar_web,
+        buscar_pagina_web,
         buscar_internet,
     ],
 )
@@ -1754,6 +1870,7 @@ agent_interno = Agent(
         consultar_reservas,
         resumen_reservas,
         consultar_web,
+        buscar_pagina_web,
         buscar_internet,
         consultar_feedback_negativo,
         listar_tablas_disponibles,
@@ -1780,6 +1897,7 @@ agent_admin = Agent(
         consultar_reservas,
         resumen_reservas,
         consultar_web,
+        buscar_pagina_web,
         buscar_internet,
         consultar_feedback_negativo,
         listar_tablas_disponibles,

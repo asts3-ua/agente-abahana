@@ -52,6 +52,78 @@ class UrlPermitidaTest(unittest.TestCase):
         self.assertIn("error", resultado)
 
 
+class PaginaNoEncontradaTest(unittest.TestCase):
+    """Adivinar una URL que no existe devolvía el HTML de la página de error
+    con el título de la portada, así que el agente lo daba por bueno."""
+
+    def test_un_404_se_reporta_como_error(self):
+        with patch.object(agent, "_playwright_en_hilo", return_value=(404, "<html/>")):
+            resultado = agent.consultar_web(
+                "https://www.abahanavillas.com/es/no-existe"
+            )
+        self.assertIn("error", resultado)
+        self.assertIn("404", resultado["error"])
+        self.assertNotIn("contenido", resultado)
+
+    def test_una_pagina_valida_se_devuelve(self):
+        html = "<html><head><title>Condiciones</title></head><body>" + (
+            "<p>Cargo adicional unico de 70 euros por reserva.</p>" * 2
+        ) + "</body></html>"
+        agent._CACHE_WEB.clear()
+        with patch.object(agent, "_playwright_en_hilo", return_value=(200, html)):
+            resultado = agent.consultar_web(
+                "https://www.abahanavillas.com/es/condiciones-generales-uso-y-alquiler"
+            )
+        self.assertNotIn("error", resultado)
+        self.assertIn("70 euros", resultado["contenido"])
+
+
+class BuscarPaginaWebTest(unittest.TestCase):
+    """Cuando una URL clave falla, hay que poder localizar la página en el
+    sitemap en vez de seguir adivinando."""
+
+    SITEMAP = """<?xml version="1.0" encoding="UTF-8"?>
+    <urlset>
+      <url><loc>https://www.abahanavillas.com/es/contacto</loc></url>
+      <url><loc>https://www.abahanavillas.com/es/aviso-legal</loc></url>
+      <url><loc>https://www.abahanavillas.com/es/ayuda-y-preguntas-frecuentes/preguntas-frecuentes-del-usuario</loc></url>
+      <url><loc>https://www.abahanavillas.com/en/holiday-rentals</loc></url>
+    </urlset>"""
+
+    def setUp(self):
+        agent._sitemap_urls.cache_clear()
+        self.addCleanup(agent._sitemap_urls.cache_clear)
+        respuesta = Mock(text=self.SITEMAP)
+        respuesta.raise_for_status.return_value = None
+        self.get = patch.object(agent.requests, "get", return_value=respuesta)
+        self.get.start()
+        self.addCleanup(self.get.stop)
+
+    def test_encuentra_las_faqs(self):
+        r = agent.buscar_pagina_web("preguntas frecuentes usuario")
+        urls = [p["url"] for p in r["paginas"]]
+        self.assertIn(
+            "https://www.abahanavillas.com/es/ayuda-y-preguntas-frecuentes/"
+            "preguntas-frecuentes-del-usuario",
+            urls,
+        )
+
+    def test_solo_devuelve_paginas_en_espanol(self):
+        r = agent.buscar_pagina_web("holiday rentals")
+        self.assertTrue(all("/es/" in p["url"] for p in r["paginas"]), r["paginas"])
+
+    def test_sin_coincidencias_no_inventa(self):
+        r = agent.buscar_pagina_web("zzzz inexistente qqqq")
+        self.assertEqual([], r["paginas"])
+
+    def test_si_el_sitemap_falla_devuelve_error_y_no_rompe(self):
+        agent._sitemap_urls.cache_clear()
+        with patch.object(agent.requests, "get", side_effect=RuntimeError("caído")):
+            r = agent.buscar_pagina_web("contacto")
+        self.assertEqual([], r["paginas"])
+        self.assertIn("error", r)
+
+
 class ConsultaSilverCleanTest(unittest.TestCase):
     """ejecutar_sql solo puede leer silver_clean, no todo el proyecto."""
 
