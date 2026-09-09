@@ -38,7 +38,6 @@ SELECT
   CAST(NULL AS BOOL)                                                                     AS permite_cambios_reserva,
   CAST(NULL AS BOOL)                                                                     AS tiene_capacidad,
   LAX_STRING(json.resourceType)                                                          AS tipo_recurso,
-  CAST(NULL AS INT64)                                                                    AS opx_total_camas,
   CAST(NULL AS INT64)                                                                    AS opx_total_fotos,
   CAST(NULL AS INT64)                                                                    AS opx_capacidad_pax,
   CAST(NULL AS INT64)                                                                    AS opx_score_rating,

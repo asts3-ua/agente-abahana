@@ -56,7 +56,7 @@ enriched AS (
     LAX_STRING(f.json.latitud)                                                           AS latitud,
     LAX_STRING(f.json.longitud)                                                          AS longitud,
     SAFE_CAST(LAX_INT64(f.json.pAXProd) AS INT64)                                          AS capacidad_pax,
-    SAFE_CAST(LAX_INT64(f.json.ovjchHabTotales) AS INT64)                                 AS capacidad_camas,
+    SAFE_CAST(LAX_INT64(f.json.ovjchHabTotales) AS INT64)                                 AS numero_habitaciones,
     SAFE_CAST(LAX_INT64(f.json.banos) AS INT64)                                           AS numero_banos,
     SAFE_CAST(LAX_INT64(f.json.ovjchPlantasReales) AS INT64)                              AS numero_plantas,
     SAFE_CAST(LAX_INT64(f.json.habitable) AS INT64)                                       AS m2_habitables,
