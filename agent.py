@@ -46,6 +46,7 @@ TABLA_TARIFA_DIA = f"`{PROJECT_ID}.{DATASET}.stg_etendo_TarifaDia`"
 
 _CONCEPTO_VILLA = "PrecioVilla"      # el resto de conceptos son extras
 _MAX_DIAS_CONSULTA = 92
+_DIAS_PRECIO_POR_DEFECTO = 30
 # Ocupacion (1 M de filas) y TarifaDia (1,4 M) son las tablas de grano diario.
 # Ninguna está particionada por fecha ni agrupada por villa, así que cualquier
 # consulta las escanea enteras: ~60 MB y ~190 MB respectivamente, por encima
@@ -93,6 +94,36 @@ _CTE_CAMAS = f"""
             GROUP BY p.villa_id
         )"""
 
+# Las valoraciones de verdad están en la ficha, no en la tabla de villas: son
+# ocho y las 204 villas activas las tienen todas rellenas.
+_CTE_RATINGS = f"""
+        ratings AS (
+            SELECT
+                propiedad_codigo,
+                ANY_VALUE(score_rating_banos) AS rating_banos,
+                ANY_VALUE(score_rating_cocina) AS rating_cocina,
+                ANY_VALUE(score_rating_interior) AS rating_interior,
+                ANY_VALUE(score_rating_exterior) AS rating_exterior,
+                ANY_VALUE(score_rating_vistas) AS rating_vistas,
+                ANY_VALUE(score_rating_privacidad) AS rating_privacidad,
+                ANY_VALUE(score_rating_tranquilidad) AS rating_tranquilidad,
+                ANY_VALUE(score_rating_distancia_mar) AS rating_distancia_mar
+            FROM {TABLA_FICHA_TECNICA}
+            WHERE propiedad_codigo IS NOT NULL
+            GROUP BY propiedad_codigo
+        )"""
+
+# La media es sobre baños, cocina, interior y exterior: las cuatro que el
+# docstring de buscar_por_valoracion ha descrito siempre.
+_RATING_MEDIO = """
+            ROUND((COALESCE(r.rating_banos, 0) + COALESCE(r.rating_cocina, 0) +
+                   COALESCE(r.rating_interior, 0) + COALESCE(r.rating_exterior, 0)) /
+                  NULLIF((CASE WHEN r.rating_banos IS NOT NULL THEN 1 ELSE 0 END +
+                          CASE WHEN r.rating_cocina IS NOT NULL THEN 1 ELSE 0 END +
+                          CASE WHEN r.rating_interior IS NOT NULL THEN 1 ELSE 0 END +
+                          CASE WHEN r.rating_exterior IS NOT NULL THEN 1 ELSE 0 END), 0),
+                  2) AS rating_medio"""
+
 _CTE_FICHA = f"""
         ficha AS (
             SELECT
@@ -100,7 +131,12 @@ _CTE_FICHA = f"""
                 ANY_VALUE(tiene_internet) AS tiene_internet,
                 ANY_VALUE(tiene_aire_salon) AS tiene_aire_acondicionado,
                 ANY_VALUE(tiene_lavadora) AS tiene_lavadora,
-                ANY_VALUE(tiene_lavavajillas) AS tiene_lavavajillas
+                ANY_VALUE(tiene_lavavajillas) AS tiene_lavavajillas,
+                ANY_VALUE(tiene_vista_mar) AS tiene_vista_mar,
+                ANY_VALUE(distancia_mar_m) AS distancia_mar_m,
+                ANY_VALUE(zona_tranquila) AS zona_tranquila,
+                ANY_VALUE(tiene_gimnasio) AS tiene_gimnasio,
+                ANY_VALUE(apto_movilidad_reducida) AS apto_movilidad_reducida
             FROM {TABLA_FICHA_TECNICA}
             WHERE propiedad_codigo IS NOT NULL
             GROUP BY propiedad_codigo
@@ -110,20 +146,16 @@ _CTE_FICHA = f"""
 # el contexto del modelo. Con 891 propiedades, arrastrar descripciones largas
 # multiplica el coste de cada consulta. La ficha completa de una villa concreta
 # se pide con obtener_detalle_propiedad.
-_COLUMNAS_RESUMEN = """
+_COLUMNAS_RESUMEN = f"""
             v.nombre, v.tipovilla_nombre_comercial,
             v.capacidad_pax, v.numero_banos, v.m2_habitables,
             COALESCE(c.camas_totales, 0) AS camas_totales,
             v.tiene_piscina_privada, v.admite_animales,
             f.tiene_internet, f.tiene_aire_acondicionado,
             f.tiene_lavadora, f.tiene_lavavajillas,
-            v.pueblo_cercano, v.zona,
-            ROUND((COALESCE(v.rating_exterior, 0) + COALESCE(v.rating_interior, 0) +
-                   COALESCE(v.rating_vistas, 0)) /
-                  NULLIF((CASE WHEN v.rating_exterior IS NOT NULL THEN 1 ELSE 0 END +
-                          CASE WHEN v.rating_interior IS NOT NULL THEN 1 ELSE 0 END +
-                          CASE WHEN v.rating_vistas IS NOT NULL THEN 1 ELSE 0 END), 0),
-                  2) AS rating_medio,
+            f.tiene_vista_mar, NULLIF(f.distancia_mar_m, 0) AS distancia_mar_m,
+            f.zona_tranquila,
+            v.pueblo_cercano, v.zona,{_RATING_MEDIO},
             COUNT(*) OVER () AS total_resultados"""
 
 
@@ -283,6 +315,11 @@ def buscar_propiedades(
     aire_acondicionado: bool | None = None,
     lavadora: bool | None = None,
     lavavajillas: bool | None = None,
+    vista_mar: bool | None = None,
+    distancia_mar_max_m: int | None = None,
+    zona_tranquila: bool | None = None,
+    gimnasio: bool | None = None,
+    accesible: bool | None = None,
     texto: str | None = None,
 ) -> dict[str, Any]:
     """Busca propiedades aplicando cualquier combinación de filtros.
@@ -307,6 +344,11 @@ def buscar_propiedades(
             a nivel de salón, puede no cubrir el resto de la villa).
         lavadora: True para exigir lavadora.
         lavavajillas: True para exigir lavavajillas.
+        vista_mar: True para exigir vista al mar.
+        distancia_mar_max_m: Distancia máxima al mar en METROS (1000 = 1 km).
+        zona_tranquila: True para zonas tranquilas.
+        gimnasio: True para villas con gimnasio.
+        accesible: True para villas aptas para movilidad reducida.
         texto: Busca en nombre y tipo de villa.
 
     Returns:
@@ -382,6 +424,41 @@ def buscar_propiedades(
             else f"COALESCE(f.tiene_lavavajillas, FALSE) = FALSE"
         )
 
+    if vista_mar is not None:
+        conditions.append(
+            "f.tiene_vista_mar = TRUE" if vista_mar
+            else "COALESCE(f.tiene_vista_mar, FALSE) = FALSE"
+        )
+
+    if distancia_mar_max_m is not None:
+        # Sin COALESCE a propósito: si no sabemos la distancia no podemos
+        # prometer que esté cerca. Y el 0 es "sin registrar", no primera
+        # línea: la distancia real más pequeña del catálogo es de 30 m.
+        conditions.append(
+            "f.distancia_mar_m > 0 AND f.distancia_mar_m <= @distancia_mar_max_m"
+        )
+        params.append(bigquery.ScalarQueryParameter(
+            "distancia_mar_max_m", "INT64", distancia_mar_max_m
+        ))
+
+    if zona_tranquila is not None:
+        conditions.append(
+            "f.zona_tranquila = TRUE" if zona_tranquila
+            else "COALESCE(f.zona_tranquila, FALSE) = FALSE"
+        )
+
+    if gimnasio is not None:
+        conditions.append(
+            "f.tiene_gimnasio = TRUE" if gimnasio
+            else "COALESCE(f.tiene_gimnasio, FALSE) = FALSE"
+        )
+
+    if accesible is not None:
+        conditions.append(
+            "f.apto_movilidad_reducida = TRUE" if accesible
+            else "COALESCE(f.apto_movilidad_reducida, FALSE) = FALSE"
+        )
+
     if texto:
         conditions.append(
             "(LOWER(v.nombre) LIKE LOWER(@texto) OR LOWER(v.tipovilla_descripcion) LIKE LOWER(@texto))"
@@ -390,12 +467,13 @@ def buscar_propiedades(
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     query = f"""
-        WITH{_CTE_VILLAS_VIGENTES},{_CTE_FICHA},{_CTE_CAMAS}
+        WITH{_CTE_VILLAS_VIGENTES},{_CTE_FICHA},{_CTE_CAMAS},{_CTE_RATINGS}
         SELECT
             v.{_columna_habitaciones()} AS numero_habitaciones,{_COLUMNAS_RESUMEN}
         FROM villa_dedup v
         LEFT JOIN ficha f ON SAFE_CAST(v.codigo_busqueda AS INT64) = f.propiedad_codigo
         LEFT JOIN camas c ON c.villa_id = v.villa_id
+        LEFT JOIN ratings r ON SAFE_CAST(v.codigo_busqueda AS INT64) = r.propiedad_codigo
         {where}
         ORDER BY v.nombre
     """
@@ -426,8 +504,9 @@ def buscar_por_valoracion(
 
     Usa cuando el usuario pida villas bien valoradas, con buena puntuación,
     las mejor valoradas, o mencione valoraciones/ratings.
-    La valoración media se calcula sobre las tres valoraciones que existen
-    en el catálogo: exterior, interior y vistas.
+    La valoración media se calcula sobre baños, cocina, interior y exterior.
+    Devuelve además, por separado, las valoraciones de vistas, privacidad,
+    tranquilidad y distancia al mar.
 
     Args:
         rating_min: Puntuación media mínima (escala 1-6). Si no se especifica, ordena por rating desc.
@@ -458,25 +537,19 @@ def buscar_por_valoracion(
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     query = f"""
-        WITH base AS (
+        WITH{_CTE_VILLAS_VIGENTES},{_CTE_RATINGS},
+        base AS (
             SELECT
-                nombre, pueblo_cercano, zona, region,
-                capacidad_pax, {_columna_habitaciones()} AS numero_habitaciones,
-                numero_banos,
-                tiene_piscina_privada, admite_animales,
-                rating_exterior, rating_interior, rating_vistas,
-                ROUND(
-                    (COALESCE(rating_exterior, 0) + COALESCE(rating_interior, 0) +
-                     COALESCE(rating_vistas, 0)) /
-                    NULLIF(
-                        (CASE WHEN rating_exterior IS NOT NULL THEN 1 ELSE 0 END +
-                         CASE WHEN rating_interior IS NOT NULL THEN 1 ELSE 0 END +
-                         CASE WHEN rating_vistas IS NOT NULL THEN 1 ELSE 0 END), 0
-                    ), 2
-                ) AS rating_medio
-            FROM {TABLA_VILLA}
-            WHERE es_activo = TRUE AND es_visible = TRUE
-            {_DEDUP_VILLA}
+                v.nombre, v.pueblo_cercano, v.zona, v.region,
+                v.capacidad_pax, v.{_columna_habitaciones()} AS numero_habitaciones,
+                v.numero_banos, v.tiene_piscina_privada, v.admite_animales,
+                r.rating_banos, r.rating_cocina,
+                r.rating_interior, r.rating_exterior,
+                r.rating_vistas, r.rating_privacidad,
+                r.rating_tranquilidad, r.rating_distancia_mar,{_RATING_MEDIO}
+            FROM villa_dedup v
+            LEFT JOIN ratings r
+                ON SAFE_CAST(v.codigo_busqueda AS INT64) = r.propiedad_codigo
         )
         SELECT *, COUNT(*) OVER () AS total_resultados
         FROM base
@@ -503,6 +576,89 @@ def buscar_por_valoracion(
 # Campos que se suman de las plantas para dar el total de la villa. El nombre
 # del total coincide con el de la planta salvo en los baños, donde se conserva
 # `banios_con_detalle` para no romper a quien ya lo consumía.
+# La ficha técnica tiene 170 columnas. Devolverlas todas en cada consulta
+# llenaría el contexto del modelo de datos que nadie ha pedido, así que por
+# defecto solo va lo básico y el resto se pide por secciones.
+_FICHA_BASICA = [
+    "tiene_internet", "tiene_aire_salon", "tiene_lavadora", "tiene_lavavajillas",
+]
+
+_SECCIONES_FICHA: dict[str, list[str]] = {
+    "vistas": [
+        "tiene_vista_mar", "tiene_vista_panoramica_mar", "tiene_vista_despejada",
+        "tiene_vista_montana", "tiene_vista_campo",
+    ],
+    "zona": [
+        "zona_tranquila", "zona_animada", "zona_centrica", "zona_aislada",
+        "zona_campo", "urbanizacion_residencial", "cerca_del_mar",
+    ],
+    "distancias": [
+        "distancia_mar_m", "distancia_playa_arena_m", "distancia_cala_m",
+        "distancia_supermercado_m", "distancia_restaurantes_m", "distancia_golf_m",
+        "distancia_tenis_m", "distancia_club_nautico_m", "distancia_centro_medico_m",
+        "distancia_farmacia_m", "distancia_pueblo_m",
+        "distancia_aeropuerto_alicante_m", "distancia_aeropuerto_valencia_m",
+    ],
+    "piscina": [
+        "piscina_largo_m", "piscina_ancho_m", "piscina_profundidad_min_m",
+        "piscina_profundidad_max_m", "tiene_piscina_infantil",
+        "piscina_climatizada", "tiene_piscina_comun",
+    ],
+    "banos": [
+        "banos_con_banera", "banos_con_ducha", "numero_aseos", "banos_en_suite",
+    ],
+    "climatizacion": [
+        "equipos_aire_frio", "equipos_aire_calor", "aire_dormitorios",
+        "equipos_aire_acondicionado", "tiene_bomba_calor", "tiene_suelo_radiante",
+        "tiene_chimenea", "tiene_radiadores",
+    ],
+    "cocina": [
+        "tiene_horno", "tiene_microondas", "tiene_congelador", "tiene_frigorifico",
+        "tiene_induccion", "tiene_vitroceramica", "tiene_plancha", "tiene_secadora",
+        "cocinas_americanas", "cocinas_separadas", "cocinas_exteriores",
+        "tipo_cafetera",
+    ],
+    "exterior": [
+        "tiene_terraza_cubierta", "tiene_terraza_descubierta",
+        "tiene_ducha_exterior", "tiene_barbacoa", "tipo_barbacoa",
+        "tiene_cesped", "tiene_arbolado", "tiene_solarium", "tiene_jardin",
+    ],
+    "ocio": [
+        "tiene_gimnasio", "tiene_sauna", "tiene_jacuzzi", "tiene_hidromasaje",
+        "tiene_billar", "tiene_pingpong", "tiene_pista_tenis", "tiene_pista_padel",
+        "tiene_columpio", "tiene_tobogan", "tiene_futbolin", "tiene_cama_elastica",
+    ],
+    "accesibilidad": ["apto_movilidad_reducida", "accesible_silla_ruedas",
+                      "distancia_playa_adaptada_m"],
+    "parking": ["plazas_calle", "plazas_cubiertas", "plazas_descubiertas",
+                "plazas_garaje", "tiene_garaje"],
+    "multimedia": ["tiene_tv", "tiene_smart_tv", "tv_satelite", "tiene_altavoz"],
+    "valoraciones": [
+        "score_rating_banos", "score_rating_cocina", "score_rating_interior",
+        "score_rating_exterior", "score_rating_vistas", "score_rating_privacidad",
+        "score_rating_tranquilidad", "score_rating_distancia_mar",
+    ],
+    "licencia": [
+        "licencia_vut", "codigo_establecimiento", "vut_fecha_antiguedad",
+        "vut_fecha_caducidad", "vut_baja_registro", "vut_fecha_baja",
+        "alta_ses_hospedaje", "fecha_alta_ses_hospedaje",
+    ],
+    "comercial": [
+        "importe_fianza", "es_top_villa", "comision_pct", "esta_reformada",
+        "anyo_reforma", "clasificacion", "decorador", "interiorista",
+    ],
+    # Códigos de alarma, ubicación de la caja fuerte y credenciales de wifi.
+    # Solo llega a interno y admin (el rol cliente no tiene esta herramienta) y
+    # solo si se pide esta sección por su nombre.
+    "acceso_seguridad": [
+        "tiene_alarma", "alarma_activacion", "alarma_desactivacion", "alarma_uso",
+        "tiene_caja_fuerte", "caja_fuerte_ubicacion", "wifi_red", "wifi_proveedor",
+        "wifi_router_ubicacion", "wifi_tipo", "tipo_acceso", "acceso_coche",
+        "puerta_parking", "acceso_peatonal_desc", "escaleras", "plantas_desc",
+    ],
+}
+
+
 _TOTALES_PLANTA = {
     "banios_con_detalle": "banios",
     "banios_con_banera": "banios_con_banera",
@@ -530,11 +686,32 @@ def _totales_de_plantas(plantas: list[dict[str, Any]]) -> dict[str, int]:
     }
 
 
-def obtener_detalle_propiedad(nombre: str) -> dict[str, Any]:
+def obtener_detalle_propiedad(
+    nombre: str,
+    secciones: list[str] | None = None,
+) -> dict[str, Any]:
     """Devuelve la ficha completa de una propiedad específica.
 
     Usa cuando el usuario pregunte por una villa concreta por su nombre,
     quiera más información sobre una propiedad, o pida ver todos los detalles.
+    Por defecto devuelve solo la información básica: ubicación, capacidad,
+    habitaciones, camas, baños, piscina, metros y amenidades principales. La
+    ficha tiene más de 150 datos; el resto se pide POR SECCIONES y solo cuando
+    el usuario lo pregunte, para no llenar la respuesta de cosas que no ha
+    pedido.
+
+    Args:
+        nombre: Nombre o parte del nombre de la propiedad.
+        secciones: Lista de secciones extra a incluir. Solo si el usuario
+            pregunta por ellas. Disponibles: vistas, zona, distancias, piscina,
+            banos, climatizacion, cocina, exterior, ocio, accesibilidad,
+            parking, multimedia, valoraciones, licencia, comercial,
+            acceso_seguridad.
+            `licencia` trae la licencia turística y su caducidad; `comercial`,
+            la fianza y la comisión; `acceso_seguridad`, los códigos de alarma,
+            la ubicación de la caja fuerte y los datos del wifi: pídela solo si
+            te lo piden expresamente.
+
     Incluye dirección completa, coordenadas, métricas de habitaciones, ratings,
     amenidades (internet, aire acondicionado, lavadora, lavavajillas), el
     desglose real de los baños (cuántos tienen bañera, ducha, jacuzzi, bidé
@@ -547,9 +724,6 @@ def obtener_detalle_propiedad(nombre: str) -> dict[str, Any]:
     nombre y número de cada una, sus baños y sus dormitorios. Úsalo para
     preguntas del tipo "cuántos baños hay en cada planta" o "qué hay en el
     sótano". Los totales de la villa son la suma de sus plantas.
-
-    Args:
-        nombre: Nombre o parte del nombre de la propiedad.
 
     Returns:
         Diccionario con 'matches' (lista de propiedades encontradas) y 'count'.
@@ -614,16 +788,25 @@ def obtener_detalle_propiedad(nombre: str) -> dict[str, Any]:
         for match in matches
         if str(match.get("codigo_busqueda") or "").isdigit()
     ]
+    pedidas = [s for s in (secciones or []) if s in _SECCIONES_FICHA]
+    desconocidas = [s for s in (secciones or []) if s not in _SECCIONES_FICHA]
+
     ficha_por_codigo: dict[int, dict[str, Any]] = {}
     detalle_amenidades_disponible = True
     if codigos:
+        columnas = list(_FICHA_BASICA)
+        for seccion in pedidas:
+            columnas.extend(_SECCIONES_FICHA[seccion])
+        # tiene_aire_salon se expone con el nombre que ya usaba el resto.
+        seleccion = ",\n                ".join(
+            f"ANY_VALUE({c}) AS "
+            + ("tiene_aire_acondicionado" if c == "tiene_aire_salon" else c)
+            for c in dict.fromkeys(columnas)
+        )
         query_ficha = f"""
             SELECT
                 propiedad_codigo,
-                ANY_VALUE(tiene_internet) AS tiene_internet,
-                ANY_VALUE(tiene_aire_salon) AS tiene_aire_acondicionado,
-                ANY_VALUE(tiene_lavadora) AS tiene_lavadora,
-                ANY_VALUE(tiene_lavavajillas) AS tiene_lavavajillas
+                {seleccion}
             FROM {TABLA_FICHA_TECNICA}
             WHERE propiedad_codigo IN UNNEST(@codigos)
             GROUP BY propiedad_codigo
@@ -759,13 +942,17 @@ def obtener_detalle_propiedad(nombre: str) -> dict[str, Any]:
             match["plantas"] = plantas
             match.update(_totales_de_plantas(plantas))
 
-    return {
+    resultado = {
         "matches": matches,
         "count": len(matches),
         "detalle_amenidades_disponible": detalle_amenidades_disponible,
         "detalle_banios_disponible": detalle_plantas_disponible,
         "detalle_dormitorios_disponible": detalle_plantas_disponible,
     }
+    if desconocidas:
+        resultado["secciones_ignoradas"] = desconocidas
+        resultado["secciones_disponibles"] = sorted(_SECCIONES_FICHA)
+    return resultado
 
 
 _DOMINIO_WEB = "abahanavillas.com"
@@ -1259,7 +1446,7 @@ def _redondear(valor):
 
 def consultar_precios(
     villa_nombre: str,
-    fecha_desde: str,
+    fecha_desde: str | None = None,
     fecha_hasta: str | None = None,
 ) -> dict[str, Any]:
     """Precio de venta, precio de compra y margen de una villa, noche a noche.
@@ -1272,14 +1459,22 @@ def consultar_precios(
 
     Args:
         villa_nombre: Nombre o parte del nombre de la villa.
-        fecha_desde: Primera noche (YYYY-MM-DD).
-        fecha_hasta: Última noche (YYYY-MM-DD). Si se omite, solo esa noche.
-            El rango no puede superar 92 días.
+        fecha_desde: Primera noche (YYYY-MM-DD). Si se omite, se toman los
+            próximos 30 días desde hoy, para poder responder "cuánto cuesta
+            esta villa" sin pedirle fechas al usuario.
+        fecha_hasta: Última noche (YYYY-MM-DD). El rango no puede superar
+            92 días.
 
     Returns:
         Diccionario con 'noches' (venta, compra y margen por fecha),
         'resumen' del periodo, 'larga_estancia' y 'extras'.
     """
+    if not fecha_desde:
+        hoy = _ahora_local().date()
+        fecha_desde = hoy.isoformat()
+        fecha_hasta = fecha_hasta or (
+            hoy + datetime.timedelta(days=_DIAS_PRECIO_POR_DEFECTO)
+        ).isoformat()
     try:
         desde, hasta = _rango_valido(fecha_desde, fecha_hasta)
     except ValueError as exc:
@@ -1949,6 +2144,20 @@ en la Costa Blanca (España). Ayudas con villas Y con información turística lo
 - Para ubicación usa pueblo_cercano (Altea, Calpe, Moraira…) o zona.
 - Habitaciones y camas NO son lo mismo. "4 habitaciones" es `habitaciones_min=4`;
   "duerme a 8 en camas" es `camas_min=8`. Una habitación puede tener varias camas.
+
+## Cuánta información dar de una villa
+- Si preguntan por una villa en general, responde lo BÁSICO: ubicación,
+  capacidad, habitaciones, camas, baños, piscina, metros y precio. Nada más.
+- La ficha tiene más de 150 datos repartidos en secciones (vistas, distancias,
+  piscina, cocina, ocio, accesibilidad, licencia, comercial...). Pide una
+  sección a `obtener_detalle_propiedad(nombre, secciones=[...])` SOLO cuando
+  el usuario pregunte por ese tema. No las traigas "por si acaso".
+- Da el precio en esa misma respuesta, sin preguntar antes: llama a
+  `consultar_precios`, que sin fechas toma los próximos 30 días. No pidas
+  fechas al usuario para dar un precio orientativo.
+- La sección `acceso_seguridad` contiene códigos de alarma, la ubicación de la
+  caja fuerte y las credenciales del wifi. Pídela únicamente si te lo piden de
+  forma explícita, y no la menciones si no.
 - Muestra el rating_medio cuando uses buscar_por_valoracion.
 - Puedes combinar varios filtros en una sola llamada.
 - Nunca inventes datos. Si no hay resultados en BigQuery, sugiere alternativas.
@@ -2030,6 +2239,9 @@ INSTRUCTION_CLIENTE = f"""{_INSTRUCCION_BASE}
 - `listar_propiedades()`: catálogo completo sin filtros.
 - `buscar_propiedades(...)`: búsqueda con filtros: ubicación, zona, capacidad,
   habitaciones (`habitaciones_min`), camas reales (`camas_min`),
+  vista al mar (`vista_mar`), distancia al mar en metros
+  (`distancia_mar_max_m`), zona tranquila, gimnasio, accesibilidad
+  (`accesible`),
   baños, metros habitables, piscina privada, mascotas, internet, aire acondicionado,
   lavadora, lavavajillas.
 - `buscar_por_valoracion(...)`: cuando el usuario pida villas bien valoradas o con
@@ -2051,6 +2263,9 @@ INSTRUCTION_INTERNO = f"""{_INSTRUCCION_BASE}
 - `listar_propiedades()`: catálogo completo sin filtros.
 - `buscar_propiedades(...)`: búsqueda con filtros: ubicación, zona, capacidad,
   habitaciones (`habitaciones_min`), camas reales (`camas_min`),
+  vista al mar (`vista_mar`), distancia al mar en metros
+  (`distancia_mar_max_m`), zona tranquila, gimnasio, accesibilidad
+  (`accesible`),
   baños, metros habitables, piscina privada, mascotas, internet, aire acondicionado,
   lavadora, lavavajillas.
 - `buscar_por_valoracion(...)`: cuando el usuario pida villas bien valoradas o con
@@ -2095,6 +2310,9 @@ INSTRUCTION_ADMIN = f"""{_INSTRUCCION_BASE}
 - `listar_propiedades()`: catálogo completo sin filtros.
 - `buscar_propiedades(...)`: búsqueda con filtros: ubicación, zona, capacidad,
   habitaciones (`habitaciones_min`), camas reales (`camas_min`),
+  vista al mar (`vista_mar`), distancia al mar en metros
+  (`distancia_mar_max_m`), zona tranquila, gimnasio, accesibilidad
+  (`accesible`),
   baños, metros habitables, piscina privada, mascotas, internet, aire acondicionado,
   lavadora, lavavajillas.
 - `buscar_por_valoracion(...)`: cuando el usuario pida villas bien valoradas o con

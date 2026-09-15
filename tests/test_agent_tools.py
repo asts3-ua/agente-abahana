@@ -577,6 +577,166 @@ class CalendarioVillaTest(unittest.TestCase):
         self.assertIn("error", r)
 
 
+class SeccionesDeFichaTest(unittest.TestCase):
+    """La ficha da lo básico; el resto solo si el usuario lo pide."""
+
+    def setUp(self):
+        self.bq = Mock()
+        villa = _Fila(villa_id="v1", codigo_busqueda="123", nombre="ADORA",
+                      capacidad_pax=10)
+        self.bq.query.side_effect = [
+            Mock(**{"result.return_value": [villa]}),   # villa
+            Mock(**{"result.return_value": []}),        # ficha
+            Mock(**{"result.return_value": []}),        # plantas
+        ]
+        patcher = patch.object(agent, "_bq", self.bq)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _sql_ficha(self):
+        return self.bq.query.call_args_list[1][0][0]
+
+    def test_por_defecto_no_arrastra_las_secciones_extra(self):
+        agent.obtener_detalle_propiedad("ADORA")
+        sql = self._sql_ficha()
+        for columna in ("distancia_mar_m", "tiene_gimnasio", "importe_fianza",
+                        "alarma_activacion", "wifi_red"):
+            self.assertNotIn(columna, sql, columna)
+
+    def test_por_defecto_si_trae_las_amenidades_de_siempre(self):
+        agent.obtener_detalle_propiedad("ADORA")
+        self.assertIn("tiene_internet", self._sql_ficha())
+
+    def test_una_seccion_pedida_se_incluye(self):
+        agent.obtener_detalle_propiedad("ADORA", secciones=["distancias"])
+        sql = self._sql_ficha()
+        self.assertIn("distancia_mar_m", sql)
+        self.assertNotIn("tiene_gimnasio", sql)
+
+    def test_se_pueden_pedir_varias(self):
+        agent.obtener_detalle_propiedad("ADORA", secciones=["ocio", "piscina"])
+        sql = self._sql_ficha()
+        self.assertIn("tiene_gimnasio", sql)
+        self.assertIn("piscina_largo_m", sql)
+
+    def test_una_seccion_inexistente_no_rompe_ni_inventa(self):
+        r = agent.obtener_detalle_propiedad("ADORA", secciones=["inventada"])
+        self.assertEqual(1, r["count"])
+        self.assertIn("secciones_disponibles", r)
+
+    def test_acceso_y_seguridad_existe_pero_hay_que_pedirla(self):
+        self.assertIn("acceso_seguridad", agent._SECCIONES_FICHA)
+        agent.obtener_detalle_propiedad("ADORA")
+        self.assertNotIn("alarma_activacion", self._sql_ficha())
+        self.bq.reset_mock()
+        self.bq.query.side_effect = [
+            Mock(**{"result.return_value": [_Fila(villa_id="v1", codigo_busqueda="123")]}),
+            Mock(**{"result.return_value": []}),
+            Mock(**{"result.return_value": []}),
+        ]
+        agent.obtener_detalle_propiedad("ADORA", secciones=["acceso_seguridad"])
+        self.assertIn("alarma_activacion", self._sql_ficha())
+
+
+class PreciosPorDefectoTest(unittest.TestCase):
+    """Preguntar el precio de una villa no debería exigir fechas."""
+
+    def setUp(self):
+        self.bq = Mock()
+        self.bq.query.return_value.result.return_value = []
+        patcher = patch.object(agent, "_bq", self.bq)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_sin_fechas_usa_los_proximos_dias(self):
+        r = agent.consultar_precios("ADORA")
+        self.assertNotIn("error", r)
+        self.assertIn("periodo", r)
+        params = {p.name: p.value for p in
+                  self.bq.query.call_args[1]["job_config"].query_parameters}
+        self.assertEqual(agent._ahora_local().date(), params["desde"])
+        self.assertGreater(params["hasta"], params["desde"])
+
+
+class ValoracionesDeLaFichaTest(unittest.TestCase):
+    """La media debe salir de baños, cocina, interior y exterior, que es lo
+    que decía el docstring original y lo que hay en la ficha técnica."""
+
+    def setUp(self):
+        self.bq = Mock()
+        self.bq.query.return_value.result.return_value = []
+        patcher = patch.object(agent, "_bq", self.bq)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_la_media_usa_las_cuatro_de_la_ficha(self):
+        agent.buscar_por_valoracion()
+        sql = _consulta_ejecutada(self.bq)
+        for col in ("score_rating_banos", "score_rating_cocina",
+                    "score_rating_interior", "score_rating_exterior"):
+            self.assertIn(col, sql, col)
+
+    def test_ya_no_promedia_las_de_la_tabla_villa(self):
+        agent.buscar_por_valoracion()
+        cuerpo = _consulta_ejecutada(self.bq)
+        cuerpo = cuerpo[cuerpo.index("rating_medio") - 900:cuerpo.index("rating_medio")]
+        self.assertNotIn("v.rating_vistas", cuerpo)
+
+    def test_expone_tambien_las_demas_valoraciones(self):
+        agent.buscar_por_valoracion()
+        sql = _consulta_ejecutada(self.bq)
+        for col in ("score_rating_privacidad", "score_rating_tranquilidad",
+                    "score_rating_distancia_mar", "score_rating_vistas"):
+            self.assertIn(col, sql, col)
+
+    def test_el_docstring_vuelve_a_decir_la_verdad(self):
+        doc = agent.buscar_por_valoracion.__doc__
+        for palabra in ("baños", "cocina", "interior", "exterior"):
+            self.assertIn(palabra, doc, palabra)
+
+
+class FiltrosDeFichaEnBusquedaTest(unittest.TestCase):
+    """Datos que están en la ficha pero no se podían filtrar."""
+
+    def setUp(self):
+        self.bq = Mock()
+        self.bq.query.return_value.result.return_value = []
+        patcher = patch.object(agent, "_bq", self.bq)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        col = patch.object(agent, "_columna_habitaciones",
+                           return_value="numero_habitaciones")
+        col.start()
+        self.addCleanup(col.stop)
+
+    def test_filtra_por_vista_al_mar(self):
+        agent.buscar_propiedades(vista_mar=True)
+        self.assertIn("f.tiene_vista_mar = TRUE", _consulta_ejecutada(self.bq))
+
+    def test_filtra_por_distancia_maxima_al_mar(self):
+        agent.buscar_propiedades(distancia_mar_max_m=1000)
+        sql = _consulta_ejecutada(self.bq)
+        self.assertIn("f.distancia_mar_m <= @distancia_mar_max_m", sql)
+
+    def test_filtra_por_zona_tranquila_gimnasio_y_accesibilidad(self):
+        agent.buscar_propiedades(zona_tranquila=True, gimnasio=True, accesible=True)
+        sql = _consulta_ejecutada(self.bq)
+        self.assertIn("f.zona_tranquila = TRUE", sql)
+        self.assertIn("f.tiene_gimnasio = TRUE", sql)
+        self.assertIn("f.apto_movilidad_reducida = TRUE", sql)
+
+    def test_la_distancia_cero_es_sin_dato_no_primera_linea(self):
+        agent.buscar_propiedades(distancia_mar_max_m=1000)
+        sql = _consulta_ejecutada(self.bq)
+        self.assertIn("f.distancia_mar_m > 0", sql)
+        self.assertIn("NULLIF(f.distancia_mar_m, 0)", sql)
+
+    def test_pedir_lo_contrario_no_descarta_las_villas_sin_ficha(self):
+        agent.buscar_propiedades(vista_mar=False)
+        sql = _consulta_ejecutada(self.bq)
+        self.assertIn("COALESCE(f.tiene_vista_mar, FALSE) = FALSE", sql)
+
+
 class EtiquetasYRolesTest(unittest.TestCase):
     def test_cada_codigo_acepta_sus_grafias(self):
         self.assertIn("BLOQUEADA", agent._ESTADOS_RESERVA["BO"])
@@ -584,11 +744,6 @@ class EtiquetasYRolesTest(unittest.TestCase):
         # Se conservan las grafías que ya casaban con los datos de silver.
         self.assertIn("BORRADOR", agent._ESTADOS_RESERVA["BO"])
         self.assertIn("COMPLETADA", agent._ESTADOS_DOCUMENTO["CO"])
-
-    def test_el_docstring_de_valoracion_dice_lo_que_calcula(self):
-        doc = agent.buscar_por_valoracion.__doc__
-        self.assertIn("vistas", doc)
-        self.assertNotIn("cocina", doc)
 
     def test_el_cliente_no_ve_el_feedback_de_otros_usuarios(self):
         nombres = {t.__name__ for t in agent.agent_cliente.tools}
