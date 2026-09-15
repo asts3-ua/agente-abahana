@@ -196,6 +196,12 @@ class TotalDeReservasTest(unittest.TestCase):
         self.assertNotIn("total_resultados", r["reservas"][0])
         self.assertIn("COUNT(*) OVER ()", _sql(bq))
 
+    def test_cada_reserva_dice_si_es_del_propietario(self):
+        bq = _bq_con([])
+        with patch.object(agent, "_bq", bq):
+            agent.consultar_reservas()
+        self.assertIn("r.subtipo_reserva", _sql(bq))
+
 
 # ---------------------------------------------------------------------------
 # 5. resumen_reservas: solo reservas en firme, meses en orden, monedas
@@ -254,6 +260,19 @@ class ResumenReservasTest(unittest.TestCase):
         with patch.object(agent, "_bq", bq):
             agent.resumen_reservas(agrupar_por="villa")
         self.assertNotIn("CURRENT_DATE", _sql(bq))
+
+    def test_por_defecto_no_cuenta_las_estancias_del_propietario(self):
+        # En 2025 eran 590 de 3.293 "reservas", todas a 0 €.
+        bq = _bq_con([])
+        with patch.object(agent, "_bq", bq):
+            agent.resumen_reservas()
+        self.assertIn("'Reserva Propietario'", _sql(bq))
+
+    def test_se_pueden_incluir_las_estancias_del_propietario(self):
+        bq = _bq_con([])
+        with patch.object(agent, "_bq", bq):
+            agent.resumen_reservas(incluir_propietario=True)
+        self.assertNotIn("'Reserva Propietario'", _sql(bq))
 
     def test_avisa_si_los_importes_mezclan_monedas(self):
         filas = [_Fila(dimension="Calpe", total_reservas=5, monedas=["EUR"],

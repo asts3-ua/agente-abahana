@@ -1905,6 +1905,8 @@ def consultar_reservas(
             r.num_mascotas,
             r.estado_reserva,
             r.estado_documento,
+            -- Reserva, Reserva Agencia, Reserva TTOO o Reserva Propietario.
+            r.subtipo_reserva,
             r.importe_total,
             r.moneda_id,
             r.es_prereserva,
@@ -1944,6 +1946,7 @@ def resumen_reservas(
     fecha_desde: str | None = None,
     fecha_hasta: str | None = None,
     solo_en_firme: bool = True,
+    incluir_propietario: bool = False,
     limite: int = 20,
 ) -> dict[str, Any]:
     """Estadísticas agregadas de reservas: conteos, importes y noches medias.
@@ -1960,6 +1963,10 @@ def resumen_reservas(
         solo_en_firme: Si True (defecto), cuenta solo reservas en firme y no
             shows: excluye canceladas, anuladas, perdidas, prerreservas y
             borradores. Pon False solo si piden expresamente incluirlas.
+        incluir_propietario: Si False (defecto), no cuenta las estancias del
+            propietario en su propia villa: no facturan y distorsionan el
+            importe medio y las noches medias. Pon True si preguntan por el
+            uso que hacen los propietarios.
         limite: Máximo de filas (defecto 20, máx. 50). Por mes o año se
             devuelven los periodos más recientes, en orden cronológico, hasta
             el mes (o año) en curso. Para incluir reservas futuras pasa
@@ -2010,6 +2017,11 @@ def resumen_reservas(
         conditions.append(
             "UPPER(COALESCE(r.estado_documento, '')) NOT IN "
             "('VO', 'ANULADA', 'ANULADO', 'DR', 'BORRADOR')"
+        )
+
+    if not incluir_propietario:
+        conditions.append(
+            "COALESCE(r.subtipo_reserva, '') != 'Reserva Propietario'"
         )
 
     cronologico = group_key in ("mes", "ano")
@@ -2436,8 +2448,11 @@ _REGLAS_GESTION = """
 
 ## Reservas y facturación
 - La ausencia de filas en `consultar_reservas` no demuestra disponibilidad.
-- `resumen_reservas` cuenta por defecto solo reservas en firme (y no shows). Si
-  devuelve `aviso_monedas`, advierte de que los importes mezclan monedas.
+- `resumen_reservas` cuenta por defecto solo reservas en firme (y no shows) y
+  deja fuera las estancias del propietario. Si devuelve `aviso_monedas`,
+  advierte de que los importes mezclan monedas.
+- En `consultar_reservas`, `subtipo_reserva` = 'Reserva Propietario' es el
+  propietario usando su villa, no un cliente: no lo presentes como una venta.
 - Usa `consultar_feedback_negativo()` si necesitas ver qué respuestas han fallado o
   quedado incompletas recientemente en otras conversaciones para no repetir errores.
 """.strip()
