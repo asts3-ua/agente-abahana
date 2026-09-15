@@ -272,19 +272,31 @@ def _handle_oauth_callback() -> None:
 # ADK Runner
 # ---------------------------------------------------------------------------
 
-def _run_agent(role: str, user_id: str, session_id: str, message: str) -> str:
+def _run_agent(
+    role: str,
+    user_id: str,
+    session_id: str,
+    message: str,
+    contexto_si_se_perdio: str = "",
+) -> str:
     agent = AGENTS[role]
     runner = Runner(agent=agent, app_name=APP_NAME, session_service=_session_service)
-    content = types.Content(role="user", parts=[types.Part(text=message)])
 
     async def _run() -> str:
         existing = await _session_service.get_session(
             app_name=APP_NAME, user_id=user_id, session_id=session_id
         )
+        texto = message
         if existing is None:
             await _session_service.create_session(
                 app_name=APP_NAME, user_id=user_id, session_id=session_id
             )
+            # La sesión ADK vive en la memoria del proceso: un reinicio o un
+            # cambio de instancia de Cloud Run la borra aunque la pantalla
+            # conserve la conversación. Sin esto el agente seguía sin hilo y
+            # sin avisar ("¿y cuánto cuesta?" ya no sabía de qué villa).
+            texto = contexto_si_se_perdio + message
+        content = types.Content(role="user", parts=[types.Part(text=texto)])
         parts: list[str] = []
         async for event in runner.run_async(
             user_id=user_id,
@@ -530,6 +542,11 @@ def _process_user_prompt(prompt: str, *, role: str, email: str) -> None:
     resumen = ""
     if st.session_state.pop("resume_context_pending", False):
         resumen = _conversation_context_for_agent(st.session_state.messages)
+    # Por si la sesión del agente se ha perdido a mitad de conversación; solo
+    # se usa si de verdad no existe, y nunca junto al resumen de arriba.
+    rescate = "" if resumen else _conversation_context_for_agent(
+        st.session_state.messages
+    )
 
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
@@ -550,6 +567,7 @@ def _process_user_prompt(prompt: str, *, role: str, email: str) -> None:
                     user_id=email,
                     session_id=st.session_state.session_id,
                     message=agent_prompt,
+                    contexto_si_se_perdio=rescate,
                 )
                 if not response:
                     response = "_(sin respuesta del agente)_"

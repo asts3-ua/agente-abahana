@@ -123,11 +123,19 @@ gcloud run deploy "$SERVICE" \
     --allow-unauthenticated \
     --memory=2Gi \
     --cpu=2 \
-    --concurrency=10 \
-    --timeout=120 \
+    --concurrency=80 \
+    --timeout=3600 \
     --min-instances=1 \
-    --max-instances=3 \
+    --max-instances=1 \
     --session-affinity
+
+# Streamlit mantiene una conexión abierta por pestaña y guarda en la memoria de
+# la instancia la conversación de pantalla y el hilo del agente. Con
+# --timeout=120 Cloud Run cortaba esa conexión cada 2 minutos; con
+# --concurrency=10 y hasta 3 instancias, la reconexión caía a menudo en otra
+# instancia y la conversación se reiniciaba a mitad. Una sola instancia con
+# conexiones de hasta 1 hora evita las dos cosas. Si el uso crece, habrá que
+# sacar las sesiones de memoria antes de volver a subir --max-instances.
 
 # Nota: --allow-unauthenticated en la capa Cloud Run.
 # La autenticación real la gestiona Streamlit via Google OAuth (secrets.toml).
