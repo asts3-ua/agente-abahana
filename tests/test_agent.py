@@ -104,26 +104,21 @@ class AgentToolsTest(unittest.TestCase):
         self.assertNotIn("villa_id", result["matches"][0])
         self.assertFalse(result["detalle_banios_disponible"])
 
-    def test_existing_villa_survives_amenities_failure_and_strips_prefix(self):
+    def test_existing_villa_strips_prefix_and_reads_ficha_from_villa(self):
         villa = {
             "villa_id": "villa-1",
-            "codigo_busqueda": "123",
             "nombre": "ADORA",
             "capacidad_pax": 10,
             "tiene_piscina_privada": True,
         }
         bq = Mock()
-        # villa -> ficha -> plantas
+        # villa (con su ficha técnica) -> plantas
         bq.query.side_effect = [
             _QueryResult([villa]),
-            RuntimeError("tabla de ficha técnica no disponible"),
             _QueryResult([]),
         ]
 
-        with (
-            patch.object(agent, "_bq", bq),
-            self.assertLogs("agente-villas", level="WARNING"),
-        ):
+        with patch.object(agent, "_bq", bq):
             result = agent.obtener_detalle_propiedad("Villa ADORA")
 
         base_config = bq.query.call_args_list[0].kwargs["job_config"]
@@ -135,7 +130,7 @@ class AgentToolsTest(unittest.TestCase):
         self.assertEqual(base_values["nombre_exacto"], "ADORA")
         self.assertEqual(result["matches"][0]["nombre"], "ADORA")
         self.assertEqual(result["matches"][0]["capacidad_pax"], 10)
-        self.assertFalse(result["detalle_amenidades_disponible"])
+        self.assertEqual(2, bq.query.call_count)
         self.assertTrue(result["detalle_banios_disponible"])
 
     def test_booking_status_codes_match_mapped_silver_values(self):

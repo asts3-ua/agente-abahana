@@ -257,12 +257,12 @@ class FiltroAmenidadesTest(unittest.TestCase):
 
     def test_exigir_la_amenidad_compara_contra_true(self):
         agent.buscar_propiedades(internet=True)
-        self.assertIn("f.tiene_internet = TRUE", _consulta_ejecutada(self.bq))
+        self.assertIn("v.tiene_internet = TRUE", _consulta_ejecutada(self.bq))
 
     def test_no_exigirla_trata_el_dato_ausente_como_ausencia(self):
         agent.buscar_propiedades(lavavajillas=False)
         sql = _consulta_ejecutada(self.bq)
-        self.assertIn("COALESCE(f.tiene_lavavajillas, FALSE) = FALSE", sql)
+        self.assertIn("COALESCE(v.tiene_lavavajillas, FALSE) = FALSE", sql)
 
 
 class DesglosePorPlantaTest(unittest.TestCase):
@@ -585,8 +585,7 @@ class SeccionesDeFichaTest(unittest.TestCase):
         villa = _Fila(villa_id="v1", codigo_busqueda="123", nombre="ADORA",
                       capacidad_pax=10)
         self.bq.query.side_effect = [
-            Mock(**{"result.return_value": [villa]}),   # villa
-            Mock(**{"result.return_value": []}),        # ficha
+            Mock(**{"result.return_value": [villa]}),   # villa con su ficha
             Mock(**{"result.return_value": []}),        # plantas
         ]
         patcher = patch.object(agent, "_bq", self.bq)
@@ -594,7 +593,8 @@ class SeccionesDeFichaTest(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def _sql_ficha(self):
-        return self.bq.query.call_args_list[1][0][0]
+        # La ficha va en la misma consulta que la villa.
+        return self.bq.query.call_args_list[0][0][0]
 
     def test_por_defecto_no_arrastra_las_secciones_extra(self):
         agent.obtener_detalle_propiedad("ADORA")
@@ -631,7 +631,6 @@ class SeccionesDeFichaTest(unittest.TestCase):
         self.bq.reset_mock()
         self.bq.query.side_effect = [
             Mock(**{"result.return_value": [_Fila(villa_id="v1", codigo_busqueda="123")]}),
-            Mock(**{"result.return_value": []}),
             Mock(**{"result.return_value": []}),
         ]
         agent.obtener_detalle_propiedad("ADORA", secciones=["acceso_seguridad"])
@@ -711,30 +710,30 @@ class FiltrosDeFichaEnBusquedaTest(unittest.TestCase):
 
     def test_filtra_por_vista_al_mar(self):
         agent.buscar_propiedades(vista_mar=True)
-        self.assertIn("f.tiene_vista_mar = TRUE", _consulta_ejecutada(self.bq))
+        self.assertIn("v.tiene_vista_mar = TRUE", _consulta_ejecutada(self.bq))
 
     def test_filtra_por_distancia_maxima_al_mar(self):
         agent.buscar_propiedades(distancia_mar_max_m=1000)
         sql = _consulta_ejecutada(self.bq)
-        self.assertIn("f.distancia_mar_m <= @distancia_mar_max_m", sql)
+        self.assertIn("v.distancia_mar_m <= @distancia_mar_max_m", sql)
 
     def test_filtra_por_zona_tranquila_gimnasio_y_accesibilidad(self):
         agent.buscar_propiedades(zona_tranquila=True, gimnasio=True, accesible=True)
         sql = _consulta_ejecutada(self.bq)
-        self.assertIn("f.zona_tranquila = TRUE", sql)
-        self.assertIn("f.tiene_gimnasio = TRUE", sql)
-        self.assertIn("f.apto_movilidad_reducida = TRUE", sql)
+        self.assertIn("v.zona_tranquila = TRUE", sql)
+        self.assertIn("v.tiene_gimnasio = TRUE", sql)
+        self.assertIn("v.apto_movilidad_reducida = TRUE", sql)
 
     def test_la_distancia_cero_es_sin_dato_no_primera_linea(self):
         agent.buscar_propiedades(distancia_mar_max_m=1000)
         sql = _consulta_ejecutada(self.bq)
-        self.assertIn("f.distancia_mar_m > 0", sql)
-        self.assertIn("NULLIF(f.distancia_mar_m, 0)", sql)
+        self.assertIn("v.distancia_mar_m > 0", sql)
+        self.assertIn("NULLIF(v.distancia_mar_m, 0)", sql)
 
     def test_pedir_lo_contrario_no_descarta_las_villas_sin_ficha(self):
         agent.buscar_propiedades(vista_mar=False)
         sql = _consulta_ejecutada(self.bq)
-        self.assertIn("COALESCE(f.tiene_vista_mar, FALSE) = FALSE", sql)
+        self.assertIn("COALESCE(v.tiene_vista_mar, FALSE) = FALSE", sql)
 
 
 class EtiquetasYRolesTest(unittest.TestCase):
