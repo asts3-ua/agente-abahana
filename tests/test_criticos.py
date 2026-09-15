@@ -231,6 +231,30 @@ class ResumenReservasTest(unittest.TestCase):
         self.assertEqual(30, r["total_grupos"])
         self.assertNotIn("total_grupos", r["resumen"][0])
 
+    def test_sin_fecha_final_los_periodos_recientes_acaban_hoy(self):
+        # Con reservas hasta 2028, "los más recientes" eran meses futuros con
+        # un puñado de reservas en vez de la evolución real hasta hoy.
+        for agrupar, corte in (
+            ("mes", "LAST_DAY(CURRENT_DATE('Europe/Madrid'))"),
+            ("ano", "LAST_DAY(CURRENT_DATE('Europe/Madrid'), YEAR)"),
+        ):
+            bq = _bq_con([])
+            with patch.object(agent, "_bq", bq):
+                agent.resumen_reservas(agrupar_por=agrupar)
+            self.assertIn(f"r.fecha_entrada <= {corte}", _sql(bq), agrupar)
+
+    def test_con_fecha_final_no_se_corta_en_hoy(self):
+        bq = _bq_con([])
+        with patch.object(agent, "_bq", bq):
+            agent.resumen_reservas(agrupar_por="mes", fecha_hasta="2028-12-31")
+        self.assertNotIn("CURRENT_DATE", _sql(bq))
+
+    def test_por_villa_no_se_corta_en_hoy(self):
+        bq = _bq_con([])
+        with patch.object(agent, "_bq", bq):
+            agent.resumen_reservas(agrupar_por="villa")
+        self.assertNotIn("CURRENT_DATE", _sql(bq))
+
     def test_avisa_si_los_importes_mezclan_monedas(self):
         filas = [_Fila(dimension="Calpe", total_reservas=5, monedas=["EUR"],
                        total_grupos=2),

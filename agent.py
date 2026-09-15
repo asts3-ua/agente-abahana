@@ -1961,7 +1961,9 @@ def resumen_reservas(
             shows: excluye canceladas, anuladas, perdidas, prerreservas y
             borradores. Pon False solo si piden expresamente incluirlas.
         limite: Máximo de filas (defecto 20, máx. 50). Por mes o año se
-            devuelven los periodos más recientes, en orden cronológico.
+            devuelven los periodos más recientes, en orden cronológico, hasta
+            el mes (o año) en curso. Para incluir reservas futuras pasa
+            fecha_hasta.
 
     Returns:
         Diccionario con 'resumen' (lista con dimension, total_reservas,
@@ -2010,9 +2012,17 @@ def resumen_reservas(
             "('VO', 'ANULADA', 'ANULADO', 'DR', 'BORRADOR')"
         )
 
+    cronologico = group_key in ("mes", "ano")
+    if cronologico and not fecha_hasta:
+        # Hay reservas cargadas años por delante: sin tope, "los periodos más
+        # recientes" eran meses futuros con un puñado de reservas.
+        conditions.append(
+            "r.fecha_entrada <= LAST_DAY(CURRENT_DATE('Europe/Madrid')"
+            + (", YEAR)" if group_key == "ano" else ")")
+        )
+
     where = f"WHERE {' AND '.join(conditions)}"
     limite = min(max(1, limite), 50)
-    cronologico = group_key in ("mes", "ano")
     # Por tiempo interesan los periodos más recientes, no los de más volumen.
     orden = "dimension DESC" if cronologico else "total_reservas DESC"
 
