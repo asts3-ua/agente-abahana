@@ -1,7 +1,7 @@
 config {
   type: "table",
   name: "stg_etendo_Villa",
-  description: "Staging: Villas (1 fila por villa_id; join corregido via ficha técnica)"
+  description: "Staging: Villas con su ficha técnica completa (1 fila por villa_id)"
 }
 
 WITH resource_raw AS (
@@ -68,6 +68,204 @@ enriched AS (
     SAFE_CAST(LAX_BOOL(f.json.jardin) AS BOOL)                                            AS tiene_jardin,
     SAFE_CAST(LAX_BOOL(f.json.garaje) AS BOOL)                                            AS tiene_garaje,
     SAFE_CAST(LAX_BOOL(f.json.animales) AS BOOL)                                          AS admite_animales,
+    -- Ficha técnica de Etendo. Sustituye a la vista manual stg_etendo_opxdes_ficha_tecnica,
+    -- que no deduplicaba. Fuera quedan zona_animada, zona_centrica, tiene_piscina_infantil y
+    -- accesible_silla_ruedas: valen FALSE en todas las villas, nadie las rellena en Etendo.
+    -- Equipamiento básico
+    SAFE_CAST(LAX_BOOL(f.json.internet) AS BOOL)                                        AS tiene_internet,
+    (COALESCE(SAFE_CAST(LAX_INT64(f.json.ovjchNumAacc) AS INT64), 0)
+           + COALESCE(SAFE_CAST(LAX_INT64(f.json.aircofrio) AS INT64), 0)
+           + COALESCE(SAFE_CAST(LAX_INT64(f.json.aircoBed) AS INT64), 0)
+           + COALESCE(SAFE_CAST(LAX_INT64(f.json.aircoLiving) AS INT64), 0)) > 0        AS tiene_aire_acondicionado,
+    SAFE_CAST(LAX_INT64(f.json.ovjchNumAacc) AS INT64)                                  AS equipos_aire_acondicionado,
+    SAFE_CAST(LAX_INT64(f.json.aircofrio) AS INT64)                                     AS equipos_aire_frio,
+    SAFE_CAST(LAX_INT64(f.json.aircohot) AS INT64)                                      AS equipos_aire_calor,
+    SAFE_CAST(LAX_INT64(f.json.aircoBed) AS INT64)                                      AS aire_dormitorios,
+    SAFE_CAST(LAX_INT64(f.json.aircoLiving) AS INT64)                                   AS aire_salon,
+    SAFE_CAST(LAX_BOOL(f.json.lavadora) AS BOOL)                                        AS tiene_lavadora,
+    SAFE_CAST(LAX_INT64(f.json.ovjchNumLavadora) AS INT64)                              AS num_lavadoras,
+    SAFE_CAST(LAX_BOOL(f.json.secadora) AS BOOL)                                        AS tiene_secadora,
+    SAFE_CAST(LAX_INT64(f.json.ovjchNumSecadora) AS INT64)                              AS num_secadoras,
+    SAFE_CAST(LAX_BOOL(f.json.lavavajillas) AS BOOL)                                    AS tiene_lavavajillas,
+    SAFE_CAST(LAX_BOOL(f.json.plancha) AS BOOL)                                         AS tiene_plancha,
+    SAFE_CAST(LAX_INT64(f.json.nummosquiteras) AS INT64)                                AS num_mosquiteras,
+    -- Vistas
+    SAFE_CAST(LAX_BOOL(f.json.vistaMar) AS BOOL)                                        AS tiene_vista_mar,
+    SAFE_CAST(LAX_BOOL(f.json.vistaPanomar) AS BOOL)                                    AS tiene_vista_panoramica_mar,
+    SAFE_CAST(LAX_BOOL(f.json.vistaDespe) AS BOOL)                                      AS tiene_vista_despejada,
+    SAFE_CAST(LAX_BOOL(f.json.vistaMonte) AS BOOL)                                      AS tiene_vista_montana,
+    SAFE_CAST(LAX_BOOL(f.json.vistaCampo) AS BOOL)                                      AS tiene_vista_campo,
+    SAFE_CAST(LAX_BOOL(f.json.vistaLim) AS BOOL)                                        AS tiene_vista_limitada,
+    -- Carácter de la zona
+    SAFE_CAST(LAX_BOOL(f.json.zonaTranquila) AS BOOL)                                   AS zona_tranquila,
+    SAFE_CAST(LAX_BOOL(f.json.zonaAislada) AS BOOL)                                     AS zona_aislada,
+    SAFE_CAST(LAX_BOOL(f.json.zonaCampo) AS BOOL)                                       AS zona_campo,
+    SAFE_CAST(LAX_BOOL(f.json.urbresidencial) AS BOOL)                                  AS urbanizacion_residencial,
+    SAFE_CAST(LAX_BOOL(f.json.cercamar) AS BOOL)                                        AS cerca_del_mar,
+    -- Distancias en metros
+    -- 0 es "sin registrar", no "al lado": la distancia real más corta al mar es de 30 m.
+    NULLIF(SAFE_CAST(LAX_INT64(f.json.distAlmar) AS INT64), 0)                          AS distancia_mar_m,
+    NULLIF(SAFE_CAST(LAX_INT64(f.json.playaArenafina) AS INT64), 0)                     AS distancia_playa_arena_m,
+    NULLIF(SAFE_CAST(LAX_INT64(f.json.playaCalita) AS INT64), 0)                        AS distancia_cala_m,
+    NULLIF(SAFE_CAST(LAX_INT64(f.json.playaMinusvalido) AS INT64), 0)                   AS distancia_playa_adaptada_m,
+    NULLIF(SAFE_CAST(LAX_INT64(f.json.distSuper) AS INT64), 0)                          AS distancia_supermercado_m,
+    NULLIF(SAFE_CAST(LAX_INT64(f.json.distResto) AS INT64), 0)                          AS distancia_restaurantes_m,
+    NULLIF(SAFE_CAST(LAX_INT64(f.json.distGolf) AS INT64), 0)                           AS distancia_golf_m,
+    NULLIF(SAFE_CAST(LAX_INT64(f.json.distTennis) AS INT64), 0)                         AS distancia_tenis_m,
+    NULLIF(SAFE_CAST(LAX_INT64(f.json.distNautico) AS INT64), 0)                        AS distancia_club_nautico_m,
+    NULLIF(SAFE_CAST(LAX_INT64(f.json.distHipico) AS INT64), 0)                         AS distancia_hipica_m,
+    NULLIF(SAFE_CAST(LAX_INT64(f.json.distMedico) AS INT64), 0)                         AS distancia_centro_medico_m,
+    NULLIF(SAFE_CAST(LAX_INT64(f.json.distBanco) AS INT64), 0)                          AS distancia_banco_m,
+    NULLIF(SAFE_CAST(LAX_INT64(f.json.distPueblocercano) AS INT64), 0)                  AS distancia_pueblo_m,
+    NULLIF(SAFE_CAST(LAX_INT64(f.json.distAlicante) AS INT64), 0)                       AS distancia_alicante_m,
+    NULLIF(SAFE_CAST(LAX_INT64(f.json.distValencia) AS INT64), 0)                       AS distancia_valencia_m,
+    NULLIF(SAFE_CAST(LAX_INT64(f.json.distAeroAlicante) AS INT64), 0)                   AS distancia_aeropuerto_alicante_m,
+    NULLIF(SAFE_CAST(LAX_INT64(f.json.distAeroValencia) AS INT64), 0)                   AS distancia_aeropuerto_valencia_m,
+    -- Piscina
+    -- La profundidad viene en metros salvo en 3 villas, que la guardan en centímetros (120, 140, 215).
+    SAFE_CAST(LAX_INT64(f.json.piscinaPrivadaLar) AS INT64)                             AS piscina_largo_m,
+    SAFE_CAST(LAX_INT64(f.json.piscinaPrivadaLon) AS INT64)                             AS piscina_ancho_m,
+    IF(SAFE_CAST(LAX_INT64(f.json.profundidadMinPiscina) AS INT64) > 10, SAFE_CAST(LAX_INT64(f.json.profundidadMinPiscina) AS INT64) / 100, SAFE_CAST(LAX_INT64(f.json.profundidadMinPiscina) AS FLOAT64)) AS piscina_profundidad_min_m,
+    IF(SAFE_CAST(LAX_INT64(f.json.profundidadMaxPiscina) AS INT64) > 10, SAFE_CAST(LAX_INT64(f.json.profundidadMaxPiscina) AS INT64) / 100, SAFE_CAST(LAX_INT64(f.json.profundidadMaxPiscina) AS FLOAT64)) AS piscina_profundidad_max_m,
+    -- Baños y estancias
+    SAFE_CAST(LAX_INT64(f.json.banosBanera) AS INT64)                                   AS banos_con_banera,
+    SAFE_CAST(LAX_INT64(f.json.banosDucha) AS INT64)                                    AS banos_con_ducha,
+    SAFE_CAST(LAX_INT64(f.json.aseo) AS INT64)                                          AS numero_aseos,
+    SAFE_CAST(LAX_INT64(f.json.ensuite) AS INT64)                                       AS banos_en_suite,
+    SAFE_CAST(LAX_INT64(f.json.salon) AS INT64)                                         AS salones,
+    SAFE_CAST(LAX_INT64(f.json.salonComedor) AS INT64)                                  AS salones_comedor,
+    SAFE_CAST(LAX_INT64(f.json.comedor) AS INT64)                                       AS comedores,
+    SAFE_CAST(LAX_BOOL(f.json.ovjchAnexo) AS BOOL)                                      AS tiene_anexo,
+    SAFE_CAST(LAX_INT64(f.json.ovjchNumAnexo) AS INT64)                                 AS num_anexos,
+    -- Climatización
+    SAFE_CAST(LAX_BOOL(f.json.bombacalor) AS BOOL)                                      AS tiene_bomba_calor,
+    SAFE_CAST(LAX_BOOL(f.json.sueloradiante) AS BOOL)                                   AS tiene_suelo_radiante,
+    SAFE_CAST(LAX_BOOL(f.json.chimenea) AS BOOL)                                        AS tiene_chimenea,
+    SAFE_CAST(LAX_INT64(f.json.ovjchNumChimenea) AS INT64)                              AS num_chimeneas,
+    SAFE_CAST(LAX_BOOL(f.json.radiador) AS BOOL)                                        AS tiene_radiadores,
+    SAFE_CAST(LAX_INT64(f.json.ovjchNumVentiladortecho) AS INT64)                       AS ventiladores_techo,
+    SAFE_CAST(LAX_INT64(f.json.ovjchNumVentiladorpie) AS INT64)                         AS ventiladores_pie,
+    -- Cocina
+    -- Los *_codigo son códigos de Etendo; bronze no trae su descripción.
+    SAFE_CAST(LAX_BOOL(f.json.horno) AS BOOL)                                           AS tiene_horno,
+    SAFE_CAST(LAX_BOOL(f.json.microondas) AS BOOL)                                      AS tiene_microondas,
+    SAFE_CAST(LAX_BOOL(f.json.congelador) AS BOOL)                                      AS tiene_congelador,
+    SAFE_CAST(LAX_BOOL(f.json.frigo) AS BOOL)                                           AS tiene_frigorifico,
+    SAFE_CAST(LAX_BOOL(f.json.induccion) AS BOOL)                                       AS tiene_induccion,
+    SAFE_CAST(LAX_BOOL(f.json.placaVitro) AS BOOL)                                      AS tiene_vitroceramica,
+    SAFE_CAST(LAX_BOOL(f.json.placaGaz) AS BOOL)                                        AS tiene_placa_gas,
+    SAFE_CAST(LAX_BOOL(f.json.placaElec) AS BOOL)                                       AS tiene_placa_electrica,
+    SAFE_CAST(LAX_BOOL(f.json.gaz) AS BOOL)                                             AS tiene_gas,
+    SAFE_CAST(LAX_INT64(f.json.cocinaAmericana) AS INT64)                               AS cocinas_americanas,
+    SAFE_CAST(LAX_INT64(f.json.cocinaSeparada) AS INT64)                                AS cocinas_separadas,
+    SAFE_CAST(LAX_INT64(f.json.cocinaExterior) AS INT64)                                AS cocinas_exteriores,
+    NULLIF(TRIM(LAX_STRING(f.json.ovjchCafeteras)), '')                                 AS tipo_cafetera_codigo,
+    -- Exterior
+    SAFE_CAST(LAX_BOOL(f.json.terrazaCubierta) AS BOOL)                                 AS tiene_terraza_cubierta,
+    SAFE_CAST(LAX_BOOL(f.json.terrazaDescubierta) AS BOOL)                              AS tiene_terraza_descubierta,
+    SAFE_CAST(LAX_BOOL(f.json.duchaExt) AS BOOL)                                        AS tiene_ducha_exterior,
+    SAFE_CAST(LAX_BOOL(f.json.bbq) AS BOOL)                                             AS tiene_barbacoa,
+    NULLIF(TRIM(LAX_STRING(f.json.ovjchBarbacoa)), '')                                  AS tipo_barbacoa_codigo,
+    NULLIF(TRIM(LAX_STRING(f.json.bBQPortatil)), '')                                    AS barbacoa_portatil_codigo,
+    SAFE_CAST(LAX_BOOL(f.json.cesped) AS BOOL)                                          AS tiene_cesped,
+    SAFE_CAST(LAX_BOOL(f.json.arbolado) AS BOOL)                                        AS tiene_arbolado,
+    SAFE_CAST(LAX_BOOL(f.json.solarium) AS BOOL)                                        AS tiene_solarium,
+    -- Ocio y deporte
+    SAFE_CAST(LAX_BOOL(f.json.ovjchGimnasio) AS BOOL)                                   AS tiene_gimnasio,
+    SAFE_CAST(LAX_BOOL(f.json.sauna) AS BOOL)                                           AS tiene_sauna,
+    SAFE_CAST(LAX_BOOL(f.json.jacuzzi) AS BOOL)                                         AS tiene_jacuzzi,
+    SAFE_CAST(LAX_BOOL(f.json.hidromasaje) AS BOOL)                                     AS tiene_hidromasaje,
+    SAFE_CAST(LAX_BOOL(f.json.ovjchBillar) AS BOOL)                                     AS tiene_billar,
+    SAFE_CAST(LAX_BOOL(f.json.ovjchPingpong) AS BOOL)                                   AS tiene_pingpong,
+    SAFE_CAST(LAX_BOOL(f.json.ovjchTenis) AS BOOL)                                      AS tiene_pista_tenis,
+    SAFE_CAST(LAX_BOOL(f.json.ovjchPadel) AS BOOL)                                      AS tiene_pista_padel,
+    SAFE_CAST(LAX_BOOL(f.json.ovjchPetanca) AS BOOL)                                    AS tiene_petanca,
+    SAFE_CAST(LAX_BOOL(f.json.ovjchColumpio) AS BOOL)                                   AS tiene_columpio,
+    SAFE_CAST(LAX_BOOL(f.json.ovjchTobogan) AS BOOL)                                    AS tiene_tobogan,
+    SAFE_CAST(LAX_BOOL(f.json.ovjchFutbolin) AS BOOL)                                   AS tiene_futbolin,
+    SAFE_CAST(LAX_BOOL(f.json.ovjchCamaelastica) AS BOOL)                               AS tiene_cama_elastica,
+    -- Accesibilidad
+    SAFE_CAST(LAX_BOOL(f.json.minusvalidos) AS BOOL)                                    AS apto_movilidad_reducida,
+    -- Parking
+    SAFE_CAST(LAX_INT64(f.json.numpcalle) AS INT64)                                     AS plazas_calle,
+    SAFE_CAST(LAX_INT64(f.json.numpcubierto) AS INT64)                                  AS plazas_cubiertas,
+    SAFE_CAST(LAX_INT64(f.json.numpdescubierto) AS INT64)                               AS plazas_descubiertas,
+    SAFE_CAST(LAX_INT64(f.json.numpgaraje) AS INT64)                                    AS plazas_garaje,
+    SAFE_CAST(LAX_BOOL(f.json.parkingCalle) AS BOOL)                                    AS tiene_parking_calle,
+    SAFE_CAST(LAX_BOOL(f.json.parkingCubierto) AS BOOL)                                 AS tiene_parking_cubierto,
+    SAFE_CAST(LAX_BOOL(f.json.parkingDescubierto) AS BOOL)                              AS tiene_parking_descubierto,
+    -- Multimedia
+    -- satelite es un código (as19, hot, fre, no...), no un booleano: la vista lo leía como booleano y salía siempre vacío.
+    SAFE_CAST(LAX_BOOL(f.json.tv) AS BOOL)                                              AS tiene_tv,
+    SAFE_CAST(LAX_BOOL(f.json.ovjchSmarttv) AS BOOL)                                    AS tiene_smart_tv,
+    SAFE_CAST(LAX_BOOL(f.json.tdt) AS BOOL)                                             AS tiene_tdt,
+    SAFE_CAST(LAX_BOOL(f.json.dvd) AS BOOL)                                             AS tiene_dvd,
+    NULLIF(TRIM(LAX_STRING(f.json.satelite)), '')                                       AS tv_satelite_codigo,
+    CASE WHEN NULLIF(TRIM(LAX_STRING(f.json.satelite)), '') IS NULL THEN NULL
+             ELSE LOWER(TRIM(LAX_STRING(f.json.satelite))) != 'no' END                  AS tiene_tv_satelite,
+    SAFE_CAST(LAX_BOOL(f.json.ovjchAltavoz) AS BOOL)                                    AS tiene_altavoz,
+    NULLIF(TRIM(LAX_STRING(f.json.ovjchDesAltavoz)), '')                                AS altavoz_descripcion,
+    SAFE_CAST(LAX_BOOL(f.json.ovjchAmplificador) AS BOOL)                               AS tiene_amplificador_wifi,
+    NULLIF(TRIM(LAX_STRING(f.json.ovjchNumAmplificadores)), '')                         AS amplificadores_wifi,
+    NULLIF(TRIM(LAX_STRING(f.json.ovjchUbiAmplificadores)), '')                         AS amplificadores_wifi_ubicacion,
+    NULLIF(TRIM(LAX_STRING(f.json.ovjchUbicacionRouter)), '')                           AS wifi_router_ubicacion,
+    -- Valoraciones (escala 1-6)
+    -- El rating de equipamiento vale 0 cuando no se ha puntuado.
+    SAFE_CAST(LAX_INT64(f.json.ratingBanos) AS INT64)                                   AS score_rating_banos,
+    SAFE_CAST(LAX_INT64(f.json.ratingCocina) AS INT64)                                  AS score_rating_cocina,
+    SAFE_CAST(LAX_INT64(f.json.ratingInterior) AS INT64)                                AS score_rating_interior,
+    SAFE_CAST(LAX_INT64(f.json.ratingExterior) AS INT64)                                AS score_rating_exterior,
+    SAFE_CAST(LAX_INT64(f.json.ratingVistas) AS INT64)                                  AS score_rating_vistas,
+    SAFE_CAST(LAX_INT64(f.json.ratingPrivacidad) AS INT64)                              AS score_rating_privacidad,
+    SAFE_CAST(LAX_INT64(f.json.ratingTranquilidad) AS INT64)                            AS score_rating_tranquilidad,
+    SAFE_CAST(LAX_INT64(f.json.ratingDistanciaalmar) AS INT64)                          AS score_rating_distancia_mar,
+    NULLIF(SAFE_CAST(LAX_INT64(f.json.ovRatingEquipamiento) AS INT64), 0)               AS score_rating_equipamiento,
+    -- Licencia turística (uso interno)
+    NULLIF(TRIM(LAX_STRING(f.json.turismo)), '')                                        AS licencia_vut,
+    CASE
+          WHEN REGEXP_CONTAINS(REGEXP_REPLACE(UPPER(LAX_STRING(f.json.turismo)), r'[^A-Z0-9]', ''), r'VT([0-9]{5,6})A')
+          THEN CONCAT('VT-', REGEXP_EXTRACT(REGEXP_REPLACE(UPPER(LAX_STRING(f.json.turismo)), r'[^A-Z0-9]', ''), r'VT([0-9]{5,6})A'), '-A')
+          ELSE NULLIF(UPPER(TRIM(LAX_STRING(f.json.turismo))), '')
+        END                                                                             AS licencia_vut_normalizada,
+    NULLIF(TRIM(LAX_STRING(f.json.ovjchCodEstablecimiento)), '')                        AS codigo_establecimiento,
+    SAFE.PARSE_DATE('%Y-%m-%d', LAX_STRING(f.json.ovjchFechaAntiguedadVut))             AS vut_fecha_antiguedad,
+    SAFE.PARSE_DATE('%Y-%m-%d', LAX_STRING(f.json.ovjchFechaCaducidadVut))              AS vut_fecha_caducidad,
+    SAFE_CAST(LAX_BOOL(f.json.ovjchBajaRegTurismo) AS BOOL)                             AS vut_baja_registro,
+    SAFE.PARSE_DATE('%Y-%m-%d', LAX_STRING(f.json.ovjchFBajaRegTur))                    AS vut_fecha_baja,
+    SAFE_CAST(LAX_BOOL(f.json.ovjchAltaSesHospedaje) AS BOOL)                           AS alta_ses_hospedaje,
+    SAFE.PARSE_DATE('%Y-%m-%d', LAX_STRING(f.json.ovjchFAltaSesHos))                    AS fecha_alta_ses_hospedaje,
+    -- Comercial (uso interno)
+    SAFE_CAST(LAX_INT64(f.json.importeFianza) AS INT64)                                 AS importe_fianza,
+    SAFE_CAST(LAX_BOOL(f.json.topvilla) AS BOOL)                                        AS es_top_villa,
+    SAFE_CAST(LAX_INT64(f.json.ovComisionWr) AS INT64)                                  AS comision_pct,
+    SAFE_CAST(LAX_BOOL(f.json.reformada) AS BOOL)                                       AS esta_reformada,
+    SAFE_CAST(NULLIF(TRIM(LAX_STRING(f.json.ovjchAnyoReforma)), '') AS INT64)           AS anyo_reforma,
+    SAFE_CAST(LAX_INT64(f.json.classification) AS INT64)                                AS clasificacion,
+    NULLIF(TRIM(LAX_STRING(f.json.ovDecorator)), '')                                    AS decorador,
+    NULLIF(TRIM(LAX_STRING(f.json.ovDesigner)), '')                                     AS interiorista,
+    -- Acceso y seguridad (uso interno)
+    -- OJO: códigos de alarma, caja fuerte y datos del wifi. Solo para los roles
+    -- interno y admin, y solo cuando el usuario lo pida expresamente.
+    SAFE_CAST(LAX_BOOL(f.json.ovjchAlarma) AS BOOL)                                     AS tiene_alarma,
+    NULLIF(TRIM(LAX_STRING(f.json.ovjchActivacionAlarma)), '')                          AS alarma_activacion,
+    NULLIF(TRIM(LAX_STRING(f.json.ovjchDesactivacionAlarma)), '')                       AS alarma_desactivacion,
+    NULLIF(TRIM(LAX_STRING(f.json.ovjchUsoalarma)), '')                                 AS alarma_uso,
+    SAFE_CAST(LAX_BOOL(f.json.ovjchCajafuerte) AS BOOL)                                 AS tiene_caja_fuerte,
+    NULLIF(TRIM(LAX_STRING(f.json.ovjchCajaAutomatico)), '')                            AS caja_fuerte_ubicacion,
+    NULLIF(TRIM(LAX_STRING(f.json.ovjchRedwifi)), '')                                   AS wifi_red,
+    NULLIF(TRIM(LAX_STRING(f.json.ovjchProveedorWifi)), '')                             AS wifi_proveedor,
+    NULLIF(TRIM(LAX_STRING(f.json.ovjchTipowifi)), '')                                  AS wifi_tipo,
+    NULLIF(TRIM(LAX_STRING(f.json.ovjchNumClienteWifi)), '')                            AS wifi_num_cliente,
+    NULLIF(TRIM(LAX_STRING(f.json.ovjchEspecificacionWifi)), '')                        AS wifi_especificacion,
+    NULLIF(TRIM(LAX_STRING(f.json.acceso)), '')                                         AS tipo_acceso,
+    NULLIF(TRIM(LAX_STRING(f.json.ovjchAccesoCoche)), '')                               AS acceso_coche,
+    NULLIF(TRIM(LAX_STRING(f.json.ovjchPuertaParking)), '')                             AS puerta_parking,
+    NULLIF(TRIM(LAX_STRING(f.json.ovjchPuertaGaraje)), '')                              AS puerta_garaje,
+    NULLIF(TRIM(LAX_STRING(f.json.ovjchDesAccpeatonal)), '')                            AS acceso_peatonal_desc,
+    NULLIF(TRIM(LAX_STRING(f.json.ovjchEscaleras)), '')                                 AS escaleras,
+    NULLIF(TRIM(LAX_STRING(f.json.ovjchDesPlantas)), '')                                AS plantas_desc,
+    -- Auditoría de la ficha
+    SAFE.PARSE_TIMESTAMP("%Y-%m-%dT%H:%M:%E*S%Ez", LAX_STRING(f.json.updated))          AS fecha_actualizacion_ficha,
     SAFE_CAST(LAX_INT64(f.json.ratingExterior) AS INT64)                                  AS rating_exterior,
     SAFE_CAST(LAX_INT64(f.json.ratingInterior) AS INT64)                                  AS rating_interior,
     SAFE_CAST(LAX_INT64(f.json.ratingVistas) AS INT64)                                    AS rating_vistas,
@@ -100,7 +298,11 @@ FROM (
       ORDER BY
         es_visible DESC,
         IF(pueblo_cercano IS NULL, 1, 0),
-        dataform_ingestion_dt DESC
+        -- Una villa puede tener varios propietarios (VENTURA tiene dos). Sin
+        -- este desempate, cada ejecución se quedaba con uno distinto.
+        IF(es_propietario_por_defecto, 0, 1),
+        dataform_ingestion_dt DESC,
+        propietario_id
     ) AS row_num
   FROM enriched
 )
