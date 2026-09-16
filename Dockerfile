@@ -13,6 +13,7 @@ RUN playwright install --with-deps chromium
 COPY agent.py .
 COPY chat_app.py .
 COPY conversation_store.py .
+COPY visualizaciones.py .
 COPY assets/ assets/
 COPY agente_villas/ agente_villas/
 COPY .streamlit/ .streamlit/

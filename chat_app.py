@@ -9,6 +9,7 @@ Autenticación: OAuth 2.0 directo con Google (sin Streamlit native auth).
 
 import asyncio
 import base64
+import logging
 import hashlib
 import hmac
 import os
@@ -24,8 +25,11 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
-from agent import AGENTS
+import visualizaciones
+from agent import AGENTS, TABLA_VILLA, _bq
 from conversation_store import get_conversation_store
+
+log = logging.getLogger("chat-app")
 
 APP_NAME = "abahana_chat"
 ALLOWED_DOMAINS = {"abahanavillas.com", "inferia.io"}
@@ -278,11 +282,16 @@ def _run_agent(
     session_id: str,
     message: str,
     contexto_si_se_perdio: str = "",
-) -> str:
+) -> tuple[str, list[tuple[str, dict, dict]]]:
+    """Texto de la respuesta y lo que devolvió cada herramienta usada.
+
+    Lo segundo alimenta el mapa y los gráficos: salen de los datos, no del
+    texto del modelo.
+    """
     agent = AGENTS[role]
     runner = Runner(agent=agent, app_name=APP_NAME, session_service=_session_service)
 
-    async def _run() -> str:
+    async def _run() -> tuple[str, list[tuple[str, dict, dict]]]:
         existing = await _session_service.get_session(
             app_name=APP_NAME, user_id=user_id, session_id=session_id
         )
@@ -298,16 +307,27 @@ def _run_agent(
             texto = contexto_si_se_perdio + message
         content = types.Content(role="user", parts=[types.Part(text=texto)])
         parts: list[str] = []
+        argumentos: dict[str, dict] = {}
+        herramientas: list[tuple[str, dict, dict]] = []
         async for event in runner.run_async(
             user_id=user_id,
             session_id=session_id,
             new_message=content,
         ):
+            for llamada in event.get_function_calls() or []:
+                argumentos[llamada.id] = dict(llamada.args or {})
+            for respuesta in event.get_function_responses() or []:
+                if isinstance(respuesta.response, dict):
+                    herramientas.append((
+                        respuesta.name,
+                        argumentos.get(respuesta.id, {}),
+                        respuesta.response,
+                    ))
             if event.is_final_response() and event.content:
                 for part in event.content.parts:
                     if getattr(part, "text", None):
                         parts.append(part.text)
-        return "".join(parts)
+        return "".join(parts), herramientas
 
     return asyncio.run(_run())
 
@@ -498,12 +518,42 @@ def _render_formulario_feedback(msg: dict, feedback_key: str, draft_key: str) ->
             st.rerun()
 
 
+def _preparar_visualizaciones(
+    herramientas: list[tuple[str, dict, dict]], role: str
+) -> list[dict]:
+    """Mapa y gráficos de un turno; nunca rompe la respuesta de texto."""
+    try:
+        resultado = []
+        for v in visualizaciones.recoger(herramientas):
+            if v["tipo"] == "mapa":
+                v = visualizaciones.anadir_coordenadas(
+                    v, rol=role,
+                    consultar=visualizaciones.consulta_coordenadas(_bq, TABLA_VILLA),
+                )
+                if v is None:
+                    continue
+            resultado.append(v)
+        return resultado
+    except Exception:
+        log.warning("No se pudieron preparar las visualizaciones", exc_info=True)
+        return []
+
+
+def _render_visualizaciones(msg: dict) -> None:
+    for v in msg.get("visualizaciones") or []:
+        try:
+            visualizaciones.render(v)
+        except Exception:
+            log.warning("No se pudo pintar la visualización %s", v.get("tipo"), exc_info=True)
+
+
 def _render_chat_history(messages: list[dict]) -> None:
     avatar = _assistant_avatar()
     for i, msg in enumerate(messages):
         if msg["role"] == "assistant":
             with st.chat_message("assistant", avatar=avatar):
                 st.markdown(msg["content"])
+                _render_visualizaciones(msg)
                 _render_assistant_feedback(msg, i)
         else:
             with st.chat_message(msg["role"]):
@@ -557,12 +607,13 @@ def _process_user_prompt(prompt: str, *, role: str, email: str) -> None:
     )
 
     error_msg: str | None = None
+    herramientas: list[tuple[str, dict, dict]] = []
     started = time.perf_counter()
     avatar = _assistant_avatar()
     with st.chat_message("assistant", avatar=avatar):
         with st.spinner("Consultando..."):
             try:
-                response = _run_agent(
+                response, herramientas = _run_agent(
                     role=role,
                     user_id=email,
                     session_id=st.session_state.session_id,
@@ -575,6 +626,7 @@ def _process_user_prompt(prompt: str, *, role: str, email: str) -> None:
                 error_msg = str(exc)
                 response = f"Error: {exc}"
         st.markdown(response)
+        visuales = _preparar_visualizaciones(herramientas, role)
 
     response_ms = int((time.perf_counter() - started) * 1000)
     turn_id = get_conversation_store().save_turn(
@@ -592,6 +644,9 @@ def _process_user_prompt(prompt: str, *, role: str, email: str) -> None:
         "role": "assistant",
         "content": response,
         "turn_id": turn_id,
+        # Solo en la sesión: al reabrir la conversación desde el histórico
+        # vuelve el texto, no el mapa ni los gráficos.
+        "visualizaciones": visuales,
     })
     # El turno recién guardado cambia el histórico (conversación nueva, título
     # o recuento), así que la lista cacheada deja de valer.
@@ -1258,6 +1313,52 @@ a:focus-visible,
     color: var(--abv-ink-soft);
     font-size: 0.8rem;
     font-weight: 500;
+}
+
+/* Mapa y gráficos bajo la respuesta: cifras resumen en la tinta de marca,
+   la tabla de datos plegada con el mismo filo discreto que las tarjetas. */
+.abv-cifras {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1.75rem;
+    margin: 0.35rem 0 0.5rem;
+}
+
+.abv-cifra {
+    display: flex;
+    flex-direction: column;
+    min-width: 6.5rem;
+}
+
+.abv-cifra-etiqueta {
+    color: var(--abv-ink-soft);
+    font-size: 0.74rem;
+    letter-spacing: 0.01em;
+}
+
+.abv-cifra-valor {
+    color: var(--abv-ink);
+    font-size: 1.2rem;
+    font-weight: 600;
+    line-height: 1.3;
+}
+
+[data-testid="stChatMessage"] [data-testid="stExpander"] details {
+    background-color: var(--abv-surface) !important;
+    border: 1px solid var(--abv-line) !important;
+    border-radius: 0.6rem;
+}
+
+/* Solo el mapa se recorta a esquinas redondeadas: en los gráficos de Altair el
+   recorte se comía las fechas del eje. */
+[data-testid="stChatMessage"] [data-testid="stDeckGlJsonChart"] {
+    border-radius: 0.6rem;
+    overflow: hidden;
+    margin-top: 0.25rem;
+}
+
+[data-testid="stChatMessage"] [data-testid="stVegaLiteChart"] {
+    margin-top: 0.25rem;
 }
 
 /* Avisos: fondo propio claro, porque el del tema puede venir oscuro. */
