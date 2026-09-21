@@ -26,6 +26,14 @@ BQ_TABLE = os.environ.get("CONVERSATIONS_TABLE", "chat_turns")
 # rechaza UPDATE sobre filas recién insertadas por streaming ("would affect
 # rows in the streaming buffer"), que es justo cuando el usuario valora.
 BQ_FEEDBACK_TABLE = os.environ.get("CONVERSATIONS_FEEDBACK_TABLE", "chat_feedback")
+# Borrar una consulta o una conversación AÑADE una marca aquí, por el mismo
+# motivo que el feedback: BigQuery no admite DELETE sobre filas recién
+# insertadas por streaming, y las consultas de prueba se borran justo después.
+BQ_DELETIONS_TABLE = os.environ.get("CONVERSATIONS_DELETIONS_TABLE", "chat_deletions")
+# Renombrar una conversación también AÑADE una fila: vale el nombre más
+# reciente, y uno vacío (NULL) devuelve el título automático (1ª pregunta).
+BQ_TITLES_TABLE = os.environ.get("CONVERSATIONS_TITLES_TABLE", "chat_titles")
+TITLE_MAX_CHARS = 80
 SQLITE_PATH = Path(os.environ.get("CONVERSATIONS_SQLITE_PATH", "data/conversations.db"))
 BACKEND = os.environ.get("CONVERSATIONS_BACKEND", "auto").lower()
 
@@ -71,6 +79,23 @@ _COLUMNAS_FEEDBACK_RESUELTAS = """
     COALESCE(f.feedback_at, t.feedback_at, t.rated_at) AS feedback_at"""
 
 
+def _no_borrado(tabla: str) -> str:
+    """Condición sobre el alias `t` de chat_turns: el turno no está borrado.
+
+    Hay dos clases de marca: la de un turno (turn_id relleno) y la de una
+    conversación entera (turn_id NULL). La de un turno lleva también su
+    session_id para trazarla, así que no basta con comparar session_id.
+    """
+    return f"""NOT EXISTS (
+            SELECT 1 FROM {tabla} d
+            WHERE d.user_id = t.user_id
+              AND (d.turn_id = t.turn_id
+                   OR (d.turn_id IS NULL AND d.session_id = t.session_id)))"""
+
+
+_NO_BORRADO_SQLITE = _no_borrado("chat_deletions")
+
+
 class ConversationStore:
     """Persiste turnos de chat (pregunta + respuesta) de forma durable."""
 
@@ -79,6 +104,8 @@ class ConversationStore:
         self._bq_client = None
         self._bq_table_id: str | None = None
         self._bq_feedback_table_id: str | None = None
+        self._bq_deletions_table_id: str | None = None
+        self._bq_titles_table_id: str | None = None
 
     def save_turn(
         self,
@@ -180,6 +207,148 @@ class ConversationStore:
         except Exception:
             log.exception("No se pudo obtener feedback problemático reciente")
             return []
+
+    def delete_turn(self, turn_id: str, user_id: str) -> bool:
+        """Borra una consulta (pregunta y respuesta) del usuario.
+
+        Devuelve False si la consulta no existe o es de otro usuario: conocer
+        un turn_id no basta para borrar lo de otra persona.
+        """
+        return self._marcar_borrado(user_id=user_id, turn_id=turn_id)
+
+    def delete_session(self, session_id: str, user_id: str) -> bool:
+        """Borra una conversación entera del usuario."""
+        return self._marcar_borrado(user_id=user_id, session_id=session_id)
+
+    def rename_session(self, session_id: str, user_id: str, title: str | None) -> bool:
+        """Pone nombre a una conversación del usuario.
+
+        Un nombre vacío quita el personalizado y vuelve a mostrarse la primera
+        pregunta. Devuelve False si la conversación no existe o es de otro
+        usuario.
+        """
+        nombre = " ".join((title or "").split())[:TITLE_MAX_CHARS] or None
+        try:
+            backend = self._resolve_backend()
+            if backend == "bigquery":
+                encontrada = self._propietario_bigquery(user_id, None, session_id)
+            else:
+                encontrada = self._propietario_sqlite(user_id, None, session_id)
+            if encontrada is None:
+                return False
+            fila = {
+                "title_id": str(uuid.uuid4()),
+                "user_id": user_id,
+                "session_id": session_id,
+                "title": nombre,
+                "renamed_at": datetime.now(timezone.utc).isoformat(),
+            }
+            if backend == "bigquery":
+                fila["renamed_at"] = fila["renamed_at"].replace("+00:00", "Z")
+                errors = self._bq_client.insert_rows_json(
+                    self._bq_titles_table_id, [fila]
+                )
+                if errors:
+                    raise RuntimeError(f"BigQuery insert errors (título): {errors}")
+            else:
+                with sqlite3.connect(SQLITE_PATH) as conn:
+                    self._ensure_sqlite_columns(conn)
+                    conn.execute(
+                        "INSERT INTO chat_titles (title_id, user_id, session_id, "
+                        "title, renamed_at) VALUES (?, ?, ?, ?, ?)",
+                        (fila["title_id"], fila["user_id"], fila["session_id"],
+                         fila["title"], fila["renamed_at"]),
+                    )
+                    conn.commit()
+            return True
+        except Exception:
+            log.exception("No se pudo renombrar session_id=%s", session_id)
+            return False
+
+    def _marcar_borrado(
+        self,
+        *,
+        user_id: str,
+        turn_id: str | None = None,
+        session_id: str | None = None,
+    ) -> bool:
+        try:
+            backend = self._resolve_backend()
+            if backend == "bigquery":
+                encontrada = self._propietario_bigquery(user_id, turn_id, session_id)
+            else:
+                encontrada = self._propietario_sqlite(user_id, turn_id, session_id)
+            if encontrada is None:
+                return False
+            marca = {
+                "deletion_id": str(uuid.uuid4()),
+                "user_id": user_id,
+                # En el borrado de un turno se guarda su conversación solo
+                # para trazarlo; el filtro distingue por turn_id.
+                "session_id": session_id or encontrada,
+                "turn_id": turn_id,
+                "deleted_at": datetime.now(timezone.utc).isoformat(),
+            }
+            if backend == "bigquery":
+                marca["deleted_at"] = marca["deleted_at"].replace("+00:00", "Z")
+                errors = self._bq_client.insert_rows_json(
+                    self._bq_deletions_table_id, [marca]
+                )
+                if errors:
+                    raise RuntimeError(f"BigQuery insert errors (borrado): {errors}")
+            else:
+                with sqlite3.connect(SQLITE_PATH) as conn:
+                    self._ensure_sqlite_columns(conn)
+                    conn.execute(
+                        "INSERT INTO chat_deletions (deletion_id, user_id, "
+                        "session_id, turn_id, deleted_at) VALUES (?, ?, ?, ?, ?)",
+                        (marca["deletion_id"], marca["user_id"],
+                         marca["session_id"], marca["turn_id"], marca["deleted_at"]),
+                    )
+                    conn.commit()
+            return True
+        except Exception:
+            log.exception("No se pudo borrar turn_id=%s session_id=%s", turn_id, session_id)
+            return False
+
+    def _propietario_sqlite(self, user_id, turn_id, session_id) -> str | None:
+        """session_id de lo que se quiere borrar, si existe y es del usuario."""
+        if not SQLITE_PATH.exists():
+            return None
+        with sqlite3.connect(SQLITE_PATH) as conn:
+            if turn_id:
+                fila = conn.execute(
+                    "SELECT session_id FROM chat_turns WHERE turn_id = ? AND user_id = ?",
+                    (turn_id, user_id),
+                ).fetchone()
+            else:
+                fila = conn.execute(
+                    "SELECT session_id FROM chat_turns "
+                    "WHERE session_id = ? AND user_id = ? LIMIT 1",
+                    (session_id, user_id),
+                ).fetchone()
+        return fila[0] if fila else None
+
+    def _propietario_bigquery(self, user_id, turn_id, session_id) -> str | None:
+        from google.cloud import bigquery
+
+        self._init_bigquery()
+        assert self._bq_client is not None and self._bq_table_id is not None
+        campo, valor = ("turn_id", turn_id) if turn_id else ("session_id", session_id)
+        filas = list(self._bq_client.query(
+            f"""
+            SELECT ANY_VALUE(session_id) AS session_id, COUNT(*) AS n
+            FROM `{self._bq_table_id}`
+            WHERE {campo} = @valor AND user_id = @user_id
+            """,
+            job_config=bigquery.QueryJobConfig(query_parameters=[
+                bigquery.ScalarQueryParameter("valor", "STRING", valor),
+                bigquery.ScalarQueryParameter("user_id", "STRING", user_id),
+            ]),
+        ).result())
+        if not filas or not filas[0].n:
+            return None
+        return filas[0].session_id
 
     def list_sessions(self, user_id: str, limit: int = 25) -> list[dict]:
         """Conversaciones del usuario, de la más activa a la más antigua."""
@@ -286,6 +455,44 @@ class ConversationStore:
         self._bq_table_id = f"{PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}"
         self._bq_feedback_table_id = f"{PROJECT_ID}.{BQ_DATASET}.{BQ_FEEDBACK_TABLE}"
 
+        borrados_ref = dataset_ref.table(BQ_DELETIONS_TABLE)
+        try:
+            client.get_table(borrados_ref)
+        except NotFound:
+            tabla_borrados = bigquery.Table(borrados_ref, schema=[
+                bigquery.SchemaField("deletion_id", "STRING", mode="REQUIRED"),
+                bigquery.SchemaField("user_id", "STRING", mode="REQUIRED"),
+                bigquery.SchemaField("session_id", "STRING"),
+                bigquery.SchemaField("turn_id", "STRING"),
+                bigquery.SchemaField("deleted_at", "TIMESTAMP"),
+            ])
+            tabla_borrados.time_partitioning = bigquery.TimePartitioning(
+                type_=bigquery.TimePartitioningType.DAY, field="deleted_at",
+            )
+            client.create_table(tabla_borrados)
+            log.info("Tabla BigQuery creada: %s.%s", BQ_DATASET, BQ_DELETIONS_TABLE)
+        self._bq_deletions_table_id = (
+            f"{PROJECT_ID}.{BQ_DATASET}.{BQ_DELETIONS_TABLE}"
+        )
+
+        titulos_ref = dataset_ref.table(BQ_TITLES_TABLE)
+        try:
+            client.get_table(titulos_ref)
+        except NotFound:
+            tabla_titulos = bigquery.Table(titulos_ref, schema=[
+                bigquery.SchemaField("title_id", "STRING", mode="REQUIRED"),
+                bigquery.SchemaField("user_id", "STRING", mode="REQUIRED"),
+                bigquery.SchemaField("session_id", "STRING", mode="REQUIRED"),
+                bigquery.SchemaField("title", "STRING"),
+                bigquery.SchemaField("renamed_at", "TIMESTAMP"),
+            ])
+            tabla_titulos.time_partitioning = bigquery.TimePartitioning(
+                type_=bigquery.TimePartitioningType.DAY, field="renamed_at",
+            )
+            client.create_table(tabla_titulos)
+            log.info("Tabla BigQuery creada: %s.%s", BQ_DATASET, BQ_TITLES_TABLE)
+        self._bq_titles_table_id = f"{PROJECT_ID}.{BQ_DATASET}.{BQ_TITLES_TABLE}"
+
     @staticmethod
     def _bq_feedback_schema_fields(bigquery) -> list:
         campos = [
@@ -385,6 +592,24 @@ class ConversationStore:
 
     def _ensure_sqlite_columns(self, conn: sqlite3.Connection) -> None:
         conn.execute(self._sqlite_feedback_table_sql())
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS chat_deletions (
+                deletion_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                session_id TEXT,
+                turn_id TEXT,
+                deleted_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS chat_titles (
+                title_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                title TEXT,
+                renamed_at TEXT NOT NULL
+            )
+        """)
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_feedback_turn "
             "ON chat_feedback (turn_id, feedback_at DESC)"
@@ -490,9 +715,10 @@ class ConversationStore:
                        {_COLUMNAS_FEEDBACK_RESUELTAS}
                 FROM chat_turns t
                 LEFT JOIN ultimo_feedback f ON f.turn_id = t.turn_id
-                WHERE COALESCE(f.feedback_label, t.feedback_label)
-                          IN ('parcial', 'no_resolvio')
-                   OR COALESCE(f.rating, t.rating) IN (0, -1)
+                WHERE (COALESCE(f.feedback_label, t.feedback_label)
+                           IN ('parcial', 'no_resolvio')
+                       OR COALESCE(f.rating, t.rating) IN (0, -1))
+                  AND {_NO_BORRADO_SQLITE}
                 ORDER BY COALESCE(f.feedback_at, t.feedback_at, t.rated_at) DESC
                 LIMIT ?
                 """,
@@ -515,9 +741,10 @@ class ConversationStore:
                    {_COLUMNAS_FEEDBACK_RESUELTAS}
             FROM `{self._bq_table_id}` t
             LEFT JOIN ultimo_feedback f ON f.turn_id = t.turn_id
-            WHERE COALESCE(f.feedback_label, t.feedback_label)
-                      IN ('parcial', 'no_resolvio')
-               OR COALESCE(f.rating, t.rating) IN (0, -1)
+            WHERE (COALESCE(f.feedback_label, t.feedback_label)
+                       IN ('parcial', 'no_resolvio')
+                   OR COALESCE(f.rating, t.rating) IN (0, -1))
+              AND {_no_borrado(f"`{self._bq_deletions_table_id}`")}
             ORDER BY COALESCE(f.feedback_at, t.feedback_at, t.rated_at) DESC
             LIMIT @limit
         """
@@ -546,10 +773,20 @@ class ConversationStore:
         ]
 
     # Una sola consulta con funciones de ventana en los dos backends: el
-    # título es la primera pregunta de cada conversación, y el orden lo marca
-    # la última actividad, no la fecha de inicio.
-    _SESSIONS_SQLITE_SQL = """
-        SELECT session_id, started_at, last_at, turns, title FROM (
+    # título es el último nombre que le haya puesto el usuario o, si no, la
+    # primera pregunta; el orden lo marca la última actividad, no el inicio.
+    _SESSIONS_SQLITE_SQL = f"""
+        WITH ultimo_titulo AS (
+            SELECT session_id, title FROM (
+                SELECT session_id, title, ROW_NUMBER() OVER (
+                    PARTITION BY session_id ORDER BY renamed_at DESC) AS rn
+                FROM chat_titles
+                WHERE user_id = ?
+            ) WHERE rn = 1
+        )
+        SELECT s.session_id, s.started_at, s.last_at, s.turns,
+               COALESCE(n.title, s.title), n.title IS NOT NULL
+        FROM (
             SELECT
                 session_id,
                 MIN(created_at) OVER (PARTITION BY session_id) AS started_at,
@@ -561,11 +798,12 @@ class ConversationStore:
                 ROW_NUMBER() OVER (
                     PARTITION BY session_id ORDER BY created_at
                 ) AS rn
-            FROM chat_turns
-            WHERE user_id = ?
-        )
-        WHERE rn = 1
-        ORDER BY last_at DESC
+            FROM chat_turns t
+            WHERE t.user_id = ? AND {_NO_BORRADO_SQLITE}
+        ) s
+        LEFT JOIN ultimo_titulo n ON n.session_id = s.session_id
+        WHERE s.rn = 1
+        ORDER BY s.last_at DESC
         LIMIT ?
     """
 
@@ -577,7 +815,7 @@ class ConversationStore:
                COALESCE(f.feedback_comment, t.feedback_comment) AS feedback_comment
         FROM chat_turns t
         LEFT JOIN ultimo_feedback f ON f.turn_id = t.turn_id
-        WHERE t.session_id = ? AND t.user_id = ?
+        WHERE t.session_id = ? AND t.user_id = ? AND {_NO_BORRADO_SQLITE}
         ORDER BY t.created_at
     """
 
@@ -587,7 +825,7 @@ class ConversationStore:
         with sqlite3.connect(SQLITE_PATH) as conn:
             self._ensure_sqlite_columns(conn)
             rows = conn.execute(
-                self._SESSIONS_SQLITE_SQL, (user_id, limit)
+                self._SESSIONS_SQLITE_SQL, (user_id, user_id, limit)
             ).fetchall()
         return [self._row_to_session(row) for row in rows]
 
@@ -604,17 +842,32 @@ class ConversationStore:
         )
         rows = self._bq_client.query(
             f"""
-            SELECT
-                session_id,
-                MIN(created_at) AS started_at,
-                MAX(created_at) AS last_at,
-                COUNT(*) AS turns,
-                ARRAY_AGG(user_message ORDER BY created_at LIMIT 1)[OFFSET(0)]
-                    AS title
-            FROM `{self._bq_table_id}`
-            WHERE user_id = @user_id
-            GROUP BY session_id
-            ORDER BY last_at DESC
+            WITH ultimo_titulo AS (
+                SELECT session_id, title
+                FROM `{self._bq_titles_table_id}`
+                WHERE user_id = @user_id
+                QUALIFY ROW_NUMBER() OVER (
+                    PARTITION BY session_id ORDER BY renamed_at DESC) = 1
+            ),
+            sesiones AS (
+                SELECT
+                    session_id,
+                    MIN(created_at) AS started_at,
+                    MAX(created_at) AS last_at,
+                    COUNT(*) AS turns,
+                    ARRAY_AGG(user_message ORDER BY created_at LIMIT 1)[OFFSET(0)]
+                        AS title
+                FROM `{self._bq_table_id}` t
+                WHERE t.user_id = @user_id
+                  AND {_no_borrado(f"`{self._bq_deletions_table_id}`")}
+                GROUP BY session_id
+            )
+            SELECT s.session_id, s.started_at, s.last_at, s.turns,
+                   COALESCE(n.title, s.title) AS title,
+                   n.title IS NOT NULL AS renamed
+            FROM sesiones s
+            LEFT JOIN ultimo_titulo n USING (session_id)
+            ORDER BY s.last_at DESC
             LIMIT @limit
             """,
             job_config=job_config,
@@ -627,6 +880,7 @@ class ConversationStore:
                     str(row.last_at) if row.last_at else None,
                     row.turns,
                     row.title,
+                    row.renamed,
                 )
             )
             for row in rows
@@ -669,6 +923,7 @@ class ConversationStore:
             FROM `{self._bq_table_id}` t
             LEFT JOIN ultimo_feedback f ON f.turn_id = t.turn_id
             WHERE t.session_id = @session_id AND t.user_id = @user_id
+              AND {_no_borrado(f"`{self._bq_deletions_table_id}`")}
             ORDER BY t.created_at
             """,
             job_config=job_config,
@@ -696,6 +951,8 @@ class ConversationStore:
             "last_at": row[2],
             "turns": row[3],
             "title": (row[4] or "").strip() or "Sin título",
+            # Si el título lo puso el usuario o es la primera pregunta.
+            "renamed": bool(row[5]) if len(row) > 5 else False,
         }
 
     @classmethod
@@ -739,11 +996,16 @@ class ConversationStore:
                 self._init_bigquery()
                 assert self._bq_client is not None and self._bq_table_id is not None
                 result = self._bq_client.query(
-                    f"SELECT COUNT(*) AS n FROM `{self._bq_table_id}`"
+                    f"SELECT COUNT(*) AS n FROM `{self._bq_table_id}` t WHERE "
+                    + _no_borrado(f"`{self._bq_deletions_table_id}`")
                 ).result()
                 return next(result).n
             with sqlite3.connect(SQLITE_PATH) as conn:
-                cur = conn.execute("SELECT COUNT(*) FROM chat_turns")
+                conn.execute(self._sqlite_create_table_sql())
+                self._ensure_sqlite_columns(conn)
+                cur = conn.execute(
+                    f"SELECT COUNT(*) FROM chat_turns t WHERE {_NO_BORRADO_SQLITE}"
+                )
                 return cur.fetchone()[0]
         except Exception:
             log.exception("No se pudo contar turnos almacenados")
@@ -769,6 +1031,7 @@ class ConversationStore:
                                COALESCE(f.rating, t.rating) AS valoracion
                         FROM `{self._bq_table_id}` t
                         LEFT JOIN ultimo_feedback f ON f.turn_id = t.turn_id
+                        WHERE {_no_borrado(f"`{self._bq_deletions_table_id}`")}
                     )
                     SELECT
                       COUNTIF(etiqueta = 'util' OR valoracion = 1) AS util,
@@ -801,6 +1064,7 @@ class ConversationStore:
                                COALESCE(f.rating, t.rating) AS valoracion
                         FROM chat_turns t
                         LEFT JOIN ultimo_feedback f ON f.turn_id = t.turn_id
+                        WHERE {_NO_BORRADO_SQLITE}
                     )
                     SELECT
                         SUM(CASE WHEN etiqueta = 'util' OR valoracion = 1

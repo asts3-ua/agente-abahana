@@ -27,7 +27,7 @@ from google.genai import types
 
 import visualizaciones
 from agent import AGENTS, TABLA_VILLA, _bq
-from conversation_store import get_conversation_store
+from conversation_store import TITLE_MAX_CHARS, get_conversation_store
 
 log = logging.getLogger("chat-app")
 
@@ -547,7 +547,7 @@ def _render_visualizaciones(msg: dict) -> None:
             log.warning("No se pudo pintar la visualización %s", v.get("tipo"), exc_info=True)
 
 
-def _render_chat_history(messages: list[dict]) -> None:
+def _render_chat_history(messages: list[dict], email: str = "") -> None:
     avatar = _assistant_avatar()
     for i, msg in enumerate(messages):
         if msg["role"] == "assistant":
@@ -555,9 +555,97 @@ def _render_chat_history(messages: list[dict]) -> None:
                 st.markdown(msg["content"])
                 _render_visualizaciones(msg)
                 _render_assistant_feedback(msg, i)
+                if email:
+                    _render_borrar_consulta(msg, email)
         else:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
+
+
+def _render_borrar_consulta(msg: dict, email: str) -> None:
+    """Papelera de una consulta, con confirmación antes de borrar."""
+    turn_id = msg.get("turn_id")
+    if not turn_id:
+        return   # no llegó a guardarse: no hay nada que borrar en el store
+    clave = f"confirmar_consulta_{turn_id}"
+    if st.session_state.get(clave):
+        col_texto, col_si, col_no = st.columns([2.2, 1, 1], vertical_alignment="center")
+        with col_texto:
+            st.caption("¿Borrar esta consulta?")
+        with col_si:
+            if st.button("Borrar", key=f"siborrar_consulta_{turn_id}",
+                         use_container_width=True):
+                st.session_state.pop(clave, None)
+                _borrar_consulta(turn_id, email)
+        with col_no:
+            if st.button("Cancelar", key=f"noborrar_consulta_{turn_id}",
+                         use_container_width=True):
+                st.session_state.pop(clave, None)
+                st.rerun()
+        return
+    _, col_papelera = st.columns([12, 1])
+    with col_papelera:
+        if st.button("", key=f"borrarconsulta_{turn_id}",
+                     icon=":material/delete:"):
+            st.session_state[clave] = True
+            st.rerun()
+
+
+def _olvidar_sesion_agente(email: str, session_id: str | None) -> None:
+    """Descarta la sesión en memoria del agente. En el siguiente mensaje se
+    recrea con el hilo que queda en pantalla, así que olvida lo borrado."""
+    if not session_id:
+        return
+    try:
+        asyncio.run(_session_service.delete_session(
+            app_name=APP_NAME, user_id=email, session_id=session_id,
+        ))
+    except Exception:
+        log.warning("No se pudo descartar la sesión del agente", exc_info=True)
+
+
+def _borrar_consulta(turn_id: str, email: str) -> None:
+    if not get_conversation_store().delete_turn(turn_id, email):
+        st.error("No se pudo borrar la consulta. Inténtalo de nuevo.")
+        return
+    mensajes = st.session_state.messages
+    for i, msg in enumerate(mensajes):
+        if msg.get("role") == "assistant" and msg.get("turn_id") == turn_id:
+            # La pregunta va justo antes de su respuesta.
+            inicio = i - 1 if i > 0 and mensajes[i - 1].get("role") == "user" else i
+            del mensajes[inicio:i + 1]
+            break
+    # Si no se descarta, el agente seguiría "recordando" lo borrado.
+    _olvidar_sesion_agente(email, st.session_state.get("session_id"))
+    _invalidate_history_cache(email)
+    st.rerun()
+
+
+def _borrar_conversacion(session_id: str, email: str) -> None:
+    if not get_conversation_store().delete_session(session_id, email):
+        st.error("No se pudo borrar la conversación. Inténtalo de nuevo.")
+        return
+    _invalidate_history_cache(email)
+    if session_id == st.session_state.get("session_id"):
+        _start_new_conversation(email)   # borra la sesión del agente y recarga
+    _olvidar_sesion_agente(email, session_id)
+    st.rerun()
+
+
+# Los dos se llaman como callback del menú de la conversación: solo antes de
+# pintarlo se puede cambiar su estado (abierto/cerrado) en session_state.
+def _renombrar_conversacion(session_id: str, email: str) -> None:
+    nombre = st.session_state.get(f"nombre_{session_id}", "")
+    if not get_conversation_store().rename_session(session_id, email, nombre):
+        st.toast("No se pudo cambiar el nombre. Inténtalo de nuevo.")
+        return
+    _invalidate_history_cache(email)
+    st.session_state[f"menuconv_{session_id}"] = False
+
+
+def _pedir_borrar_conversacion(session_id: str) -> None:
+    st.session_state[f"menuconv_{session_id}"] = False
+    st.session_state[f"confirmar_conversacion_{session_id}"] = True
 
 
 def _get_suggestions(role: str) -> list[str]:
@@ -671,7 +759,7 @@ def _clear_conversation_widgets() -> None:
     """Descarta el estado de widgets atado a la conversación que se deja."""
     st.session_state.pop("pending_prompt", None)
     for key in list(st.session_state.keys()):
-        if key.startswith(("feedback_", "suggestion_")):
+        if key.startswith(("feedback_", "suggestion_", "confirmar_")):
             del st.session_state[key]
 
 
@@ -806,12 +894,59 @@ def _render_conversation_history(email: str) -> None:
         for sesion in sesiones:
             session_id = sesion["session_id"]
             es_actual = session_id == actual
-            pulsado = st.button(
-                _shorten(sesion["title"], 80),
-                key=f"conv_{session_id}",
-                use_container_width=True,
-                type="primary" if es_actual else "secondary",
-            )
+            clave = f"confirmar_conversacion_{session_id}"
+            if st.session_state.get(clave):
+                st.caption(f"¿Borrar «{_shorten(sesion['title'], 40)}»?")
+                col_si, col_no = st.columns(2)
+                with col_si:
+                    if st.button("Borrar", key=f"siborrar_conv_{session_id}",
+                                 use_container_width=True):
+                        st.session_state.pop(clave, None)
+                        _borrar_conversacion(session_id, email)
+                with col_no:
+                    if st.button("Cancelar", key=f"noborrar_conv_{session_id}",
+                                 use_container_width=True):
+                        st.session_state.pop(clave, None)
+                        st.rerun()
+                continue
+            col_titulo, col_menu = st.columns([6, 1], vertical_alignment="center")
+            with col_titulo:
+                pulsado = st.button(
+                    _shorten(sesion["title"], 80),
+                    key=f"conv_{session_id}",
+                    use_container_width=True,
+                    type="primary" if es_actual else "secondary",
+                )
+            # Renombrar y borrar van en un menú: dos iconos por fila no caben
+            # junto al título en el ancho de la barra lateral.
+            # El contenido solo se pinta con el menú abierto: son hasta
+            # HISTORY_LIMIT filas y no hace falta un formulario oculto en cada una.
+            with col_menu:
+                menu = st.popover("", icon=":material/more_vert:",
+                                  key=f"menuconv_{session_id}", on_change="rerun")
+            if menu.open:
+                with menu:
+                    # Formulario para que Intro guarde el nombre.
+                    with st.form(f"nombreconv_{session_id}", border=False):
+                        st.text_input(
+                            "Nombre de la conversación",
+                            value=sesion["title"] if sesion.get("renamed") else "",
+                            placeholder=_shorten(sesion["title"], 60),
+                            max_chars=TITLE_MAX_CHARS,
+                            key=f"nombre_{session_id}",
+                        )
+                        st.caption("Déjalo vacío para volver a la primera pregunta.")
+                        st.form_submit_button(
+                            "Guardar nombre", type="primary",
+                            key=f"guardarnombre_{session_id}",
+                            use_container_width=True,
+                            on_click=_renombrar_conversacion,
+                            args=(session_id, email),
+                        )
+                    st.button("Borrar conversación", key=f"borrarconv_{session_id}",
+                              icon=":material/delete:", use_container_width=True,
+                              on_click=_pedir_borrar_conversacion,
+                              args=(session_id,))
             if pulsado and not es_actual:
                 _load_conversation(session_id, email)
 
@@ -1082,9 +1217,15 @@ a:focus-visible,
    conversaciones no quede una caja medio vacía. El selector no depende de
    st.container(key=...), que exige una versión de Streamlit más alta que la
    que declara requirements.txt: basta con el bloque que contiene las
-   entradas. */
+   entradas. Cada entrada es una fila de dos columnas (título y papelera), así
+   que la lista es el bloque cuyos hijos directos son esas filas; con y sin el
+   envoltorio stLayoutWrapper, que depende de la versión de Streamlit. */
 [data-testid="stSidebar"] [data-testid="stVerticalBlock"]:has(
-    > [class*="st-key-conv_"]
+    > [data-testid="stLayoutWrapper"] > [data-testid="stHorizontalBlock"]
+      [class*="st-key-conv_"]
+),
+[data-testid="stSidebar"] [data-testid="stVerticalBlock"]:has(
+    > [data-testid="stHorizontalBlock"] [class*="st-key-conv_"]
 ) {
     max-height: 42vh;
     overflow-y: auto;
@@ -1096,6 +1237,78 @@ a:focus-visible,
        ::-webkit-scrollbar, que Chrome ignora en cuanto hay scrollbar-width. */
     scrollbar-width: thin;
     scrollbar-color: var(--abv-accent-light) var(--abv-surface-alt);
+}
+
+/* Papeleras de consulta y de conversación: discretas, sin caja; se tiñen de
+   rojo solo al pasar por encima, que es cuando se va a usar. El color se
+   fuerza porque el tema puede venir oscuro (ver pulgares del feedback). */
+[class*="st-key-borrarconsulta_"] button,
+[class*="st-key-borrarconv_"] button {
+    background-color: transparent !important;
+    border: none !important;
+    color: var(--abv-ink-soft) !important;
+    min-height: 2rem !important;
+    padding: 0.2rem 0.4rem !important;
+    opacity: 0.7;
+}
+
+[class*="st-key-borrarconsulta_"] button *,
+[class*="st-key-borrarconv_"] button * {
+    color: inherit !important;
+}
+
+[class*="st-key-borrarconsulta_"] button:hover,
+[class*="st-key-borrarconv_"] button:hover {
+    background-color: #FBECEA !important;
+    color: #B3261E !important;
+    opacity: 1;
+}
+
+/* Menú ⋮ de cada conversación: un icono sin caja, como la papelera que
+   sustituye; el chevron que añade Streamlit sobra en un botón tan estrecho. */
+[class*="st-key-menuconv_"] button {
+    background-color: transparent !important;
+    border: none !important;
+    color: var(--abv-ink-soft) !important;
+    min-height: 2rem !important;
+    padding: 0.2rem 0.4rem !important;
+}
+
+[class*="st-key-menuconv_"] button:hover,
+[class*="st-key-menuconv_"] button[aria-expanded="true"] {
+    background-color: var(--abv-accent-wash) !important;
+    color: var(--abv-ink) !important;
+}
+
+[class*="st-key-menuconv_"] button > div > div[aria-hidden="true"] {
+    display: none !important;
+}
+
+/* El menú se abre fuera de la barra lateral, así que el botón de guardar
+   no hereda su estilo: texto blanco forzado sobre el azul de marca. */
+[class*="st-key-guardarnombre_"] button,
+[class*="st-key-guardarnombre_"] button p {
+    color: #FFFFFF !important;
+}
+
+/* Confirmar un borrado es la acción destructiva: rojo con texto blanco
+   (6,5:1). La etiqueta vive en un stMarkdownContainer que arriba se fuerza
+   a tinta, así que hay que forzarla también aquí. */
+[class*="st-key-siborrar_"] button {
+    background-color: #B3261E !important;
+    border-color: #B3261E !important;
+    color: #FFFFFF !important;
+    font-weight: 600 !important;
+}
+
+[class*="st-key-siborrar_"] button:hover {
+    background-color: #8C1D18 !important;
+    border-color: #8C1D18 !important;
+}
+
+[class*="st-key-siborrar_"] button p,
+[class*="st-key-siborrar_"] button [data-testid="stMarkdownContainer"] {
+    color: #FFFFFF !important;
 }
 
 /* El histórico es una lista de navegación, no doscientas tarjetas: filas sin
@@ -1511,7 +1724,7 @@ def main() -> None:
         _render_welcome_empty_state(role)
 
     # Historial
-    _render_chat_history(st.session_state.messages)
+    _render_chat_history(st.session_state.messages, email)
 
     # Sugerencia clicada desde bienvenida
     if pending := st.session_state.pop("pending_prompt", None):
