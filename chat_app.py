@@ -71,25 +71,18 @@ WELCOME_MESSAGE = (
     "Elige una sugerencia para empezar o escribe tu pregunta abajo."
 )
 
+# Las dudas de estancia que Reservas atiende a diario; generales (sin nombrar
+# una villa) para que valgan también en la versión cliente.
+_SUGERENCIAS_ESTANCIA = [
+    "¿A qué hora es el check-in y el check-out?",
+    "¿Cómo funciona la fianza?",
+    "¿Qué villas admiten mascotas y en qué condiciones?",
+    "Villas en Moraira a menos de 500 m de la playa con parking",
+]
 SUGGESTIONS_BY_ROLE: dict[str, list[str]] = {
-    "cliente": [
-        "Villas con piscina privada para 8 personas en Moraira",
-        "¿Cuándo son las fiestas patronales de Calpe?",
-        "Villas bien valoradas en Altea con vistas al mar",
-        "¿Qué tiempo hace en la Costa Blanca esta semana?",
-    ],
-    "interno": [
-        "Villas disponibles en Jávea con 4 habitaciones",
-        "Reservas confirmadas en Moraira este mes",
-        "¿Cuándo son las fiestas de Altea este año?",
-        "Resumen de reservas por zona en 2026",
-    ],
-    "admin": [
-        "Catálogo de villas con piscina en Calpe",
-        "Reservas canceladas en los últimos 30 días",
-        "Villas mejor valoradas en Moraira",
-        "Resumen de facturación por zona este año",
-    ],
+    "cliente": _SUGERENCIAS_ESTANCIA,
+    "interno": _SUGERENCIAS_ESTANCIA,
+    "admin": _SUGERENCIAS_ESTANCIA,
 }
 
 FEEDBACK_TAG_OPTIONS = {
