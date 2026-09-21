@@ -166,5 +166,31 @@ class QuienPuedeVerLasReservasTest(unittest.TestCase):
             self.assertIn("titular", instruccion, rol)
 
 
+
+class OrdenarPorImporteTest(unittest.TestCase):
+    """"Las 3 reservas más caras" no tenía herramienta: el modelo escribía SQL,
+    se inventaba columnas y mezclaba presupuestos perdidos."""
+
+    def _buscar(self, **kwargs):
+        bq = _BQ()
+        with patch.object(agent, "_bq", bq):
+            agent.consultar_reservas(**kwargs)
+        return bq.consultas[-1][0]
+
+    def test_las_mas_caras_primero_y_solo_reservas_reales(self):
+        sql = self._buscar(ordenar_por="importe", fecha_desde="2026-01-01",
+                           fecha_hasta="2026-12-31", limite=3)
+        self.assertIn("ORDER BY r.importe_total DESC", sql)
+        self.assertIn("'PERDIDA'", sql)
+        self.assertIn("LIMIT 3", sql)
+
+    def test_por_defecto_sigue_por_fecha_de_entrada(self):
+        self.assertIn("ORDER BY r.fecha_entrada DESC", self._buscar())
+
+    def test_las_instrucciones_lo_explican(self):
+        for rol in ("interno", "admin"):
+            self.assertIn('ordenar_por="importe"', agent.AGENTS[rol].instruction, rol)
+
+
 if __name__ == "__main__":
     unittest.main()

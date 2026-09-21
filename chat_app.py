@@ -705,7 +705,7 @@ def _process_user_prompt(prompt: str, *, role: str, email: str) -> None:
                     response = "_(sin respuesta del agente)_"
             except Exception as exc:
                 error_msg = str(exc)
-                response = f"Error: {exc}"
+                response = _mensaje_error(exc)
         st.markdown(response)
         visuales = _preparar_visualizaciones(herramientas, role)
         lineas_filtros = _filtros_del_turno(herramientas)
@@ -736,6 +736,17 @@ def _process_user_prompt(prompt: str, *, role: str, email: str) -> None:
     # o recuento), así que la lista cacheada deja de valer.
     _invalidate_history_cache(email)
     st.rerun()
+
+
+def _mensaje_error(exc: Exception) -> str:
+    """Lo que ve el usuario si el agente falla. La saturación de Gemini llega
+    aquí solo tras agotar los reintentos: se explica en palabras, no con el
+    texto de Google. El error original se guarda igualmente en el historial."""
+    texto = str(exc)
+    if "RESOURCE_EXHAUSTED" in texto or "429" in texto.split(".")[0]:
+        return ("El servicio de IA está saturado en este momento y no ha podido "
+                "responder. Espera unos segundos y vuelve a intentarlo.")
+    return f"Error: {texto}"
 
 
 def _new_agent_session(email: str) -> str:

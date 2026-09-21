@@ -28,6 +28,7 @@ import requests
 from bs4 import BeautifulSoup
 from google import genai
 from google.adk.agents import Agent
+from google.adk.models import Gemini
 from google.cloud import bigquery
 from google.genai import types as genai_types
 
@@ -1334,6 +1335,20 @@ def buscar_pagina_web(consulta: str) -> dict[str, Any]:
     }
 
 
+# Gemini rechaza a veces una petición por falta de capacidad (429
+# RESOURCE_EXHAUSTED, dos veces en una semana) o por un fallo pasajero; casi
+# siempre basta con repetirla un par de segundos después. Tres intentos con
+# esperas de 1 y 2 s: en el caso raro se nota, y el resto no cambia.
+_REINTENTOS_GEMINI = genai_types.HttpRetryOptions(
+    attempts=3,
+    initial_delay=1.0,
+    max_delay=4.0,
+    exp_base=2.0,
+    http_status_codes=[429, 500, 502, 503, 504],
+)
+_MODELO_GEMINI = "gemini-2.5-flash"
+
+
 def buscar_internet(consulta: str) -> dict[str, Any]:
     """Busca información actual en internet via Google Search.
 
@@ -1349,9 +1364,10 @@ def buscar_internet(consulta: str) -> dict[str, Any]:
     """
     try:
         response = _get_genai_client().models.generate_content(
-            model="gemini-2.5-flash",
+            model=_MODELO_GEMINI,
             contents=consulta.strip(),
             config=genai_types.GenerateContentConfig(
+                http_options=genai_types.HttpOptions(retry_options=_REINTENTOS_GEMINI),
                 tools=[genai_types.Tool(google_search=genai_types.GoogleSearch())],
                 system_instruction=(
                     "Eres un asistente de búsqueda para Abahana Villas (Costa Blanca). "
@@ -2594,6 +2610,7 @@ def consultar_reservas(
     estado_reserva: str | None = None,
     estado_documento: str | None = None,
     excluir_canceladas: bool = True,
+    ordenar_por: str | None = None,
     limite: int = 20,
 ) -> dict[str, Any]:
     """Consulta reservas individuales con fechas, importes y datos del cliente.
@@ -2649,6 +2666,9 @@ def consultar_reservas(
         excluir_canceladas: Si True (defecto), excluye canceladas (CA),
             perdidas (PE) y anuladas (VO). No hace falta desactivarlo al pedir
             un estado_reserva concreto o filtrar por fecha de anulación.
+        ordenar_por: "importe" para las de mayor importe primero ("las 3
+            reservas más caras": ordenar_por="importe", limite=3). Sin él,
+            por fecha (de entrada, de salida o de anulación según el filtro).
         limite: Máximo de reservas a listar (defecto 20, máx. 50).
 
     Returns:
@@ -2748,7 +2768,9 @@ def consultar_reservas(
     limite = min(max(1, limite), 50)
     # Primero lo más relevante para la pregunta: las últimas anuladas, o las
     # salidas y ocupaciones por orden de fecha.
-    if anulada_desde or anulada_hasta:
+    if (ordenar_por or "").strip().lower() in ("importe", "importe_total", "precio"):
+        orden = "r.importe_total DESC, r.fecha_entrada DESC"
+    elif anulada_desde or anulada_hasta:
         orden = "r.fecha_anulacion DESC"
     elif salida_desde or salida_hasta:
         orden = "r.fecha_salida, r.villa_nombre"
@@ -3433,6 +3455,9 @@ _REGLAS_GESTION = """
   líneas facturadas solo existen para reservas hasta 2023: si faltan, no digas
   que la reserva no tiene conceptos. Del huésped (si no es el titular) no hay
   datos.
+- Para "las reservas más caras" o "las de mayor importe" usa
+  `consultar_reservas(ordenar_por="importe", limite=N)` con las fechas que
+  toquen; no escribas SQL para eso. Deja fuera perdidas y anuladas.
 - La ausencia de filas en `consultar_reservas` no demuestra disponibilidad.
 - `consultar_reservas` filtra por entrada, por salida (`salida_desde`,
   `salida_hasta`), por ocupación en una fecha (`activa_en`) y por fecha de
@@ -3660,7 +3685,7 @@ _CONFIG_MODELO = genai_types.GenerateContentConfig(
 
 agent_cliente = Agent(
     name="abahana_villas_agent_cliente",
-    model="gemini-2.5-flash",
+    model=Gemini(model=_MODELO_GEMINI, retry_options=_REINTENTOS_GEMINI),
     generate_content_config=_CONFIG_MODELO,
     before_model_callback=fecha_de_hoy,
     description=(
@@ -3686,7 +3711,7 @@ agent_cliente = Agent(
 
 agent_interno = Agent(
     name="abahana_villas_agent_interno",
-    model="gemini-2.5-flash",
+    model=Gemini(model=_MODELO_GEMINI, retry_options=_REINTENTOS_GEMINI),
     generate_content_config=_CONFIG_MODELO,
     before_model_callback=fecha_de_hoy,
     description=(
@@ -3724,7 +3749,7 @@ agent_interno = Agent(
 
 agent_admin = Agent(
     name="abahana_villas_agent_admin",
-    model="gemini-2.5-flash",
+    model=Gemini(model=_MODELO_GEMINI, retry_options=_REINTENTOS_GEMINI),
     generate_content_config=_CONFIG_MODELO,
     before_model_callback=fecha_de_hoy,
     description=(
