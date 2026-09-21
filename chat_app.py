@@ -25,6 +25,7 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
+import filtros
 import visualizaciones
 from agent import AGENTS, TABLA_VILLA, _bq
 from conversation_store import TITLE_MAX_CHARS, get_conversation_store
@@ -539,6 +540,21 @@ def _preparar_visualizaciones(
         return []
 
 
+def _filtros_del_turno(herramientas: list[tuple[str, dict, dict]]) -> list[str]:
+    """Lo que filtró el agente; nunca rompe la respuesta de texto."""
+    try:
+        return filtros.describir(herramientas)
+    except Exception:
+        log.warning("No se pudieron describir los filtros", exc_info=True)
+        return []
+
+
+def _render_filtros(msg: dict) -> None:
+    lineas = msg.get("filtros") or []
+    if lineas:
+        st.caption("  \n".join(f":material/filter_alt: {linea}" for linea in lineas))
+
+
 def _render_visualizaciones(msg: dict) -> None:
     for v in msg.get("visualizaciones") or []:
         try:
@@ -552,6 +568,8 @@ def _render_chat_history(messages: list[dict], email: str = "") -> None:
     for i, msg in enumerate(messages):
         if msg["role"] == "assistant":
             with st.chat_message("assistant", avatar=avatar):
+                # Antes de la respuesta: es lo primero que hay que comprobar.
+                _render_filtros(msg)
                 st.markdown(msg["content"])
                 _render_visualizaciones(msg)
                 _render_assistant_feedback(msg, i)
@@ -567,28 +585,51 @@ def _render_borrar_consulta(msg: dict, email: str) -> None:
     turn_id = msg.get("turn_id")
     if not turn_id:
         return   # no llegó a guardarse: no hay nada que borrar en el store
-    clave = f"confirmar_consulta_{turn_id}"
-    if st.session_state.get(clave):
-        col_texto, col_si, col_no = st.columns([2.2, 1, 1], vertical_alignment="center")
-        with col_texto:
-            st.caption("¿Borrar esta consulta?")
-        with col_si:
-            if st.button("Borrar", key=f"siborrar_consulta_{turn_id}",
-                         use_container_width=True):
-                st.session_state.pop(clave, None)
-                _borrar_consulta(turn_id, email)
-        with col_no:
-            if st.button("Cancelar", key=f"noborrar_consulta_{turn_id}",
-                         use_container_width=True):
-                st.session_state.pop(clave, None)
-                st.rerun()
-        return
     _, col_papelera = st.columns([12, 1])
     with col_papelera:
-        if st.button("", key=f"borrarconsulta_{turn_id}",
-                     icon=":material/delete:"):
-            st.session_state[clave] = True
+        st.button("", key=f"borrarconsulta_{turn_id}", icon=":material/delete:",
+                  on_click=_pedir_borrado, args=("consulta", turn_id, ""))
+
+
+def _pedir_borrado(tipo: str, ident: str, titulo: str) -> None:
+    """La papelera solo anota qué borrar: el aviso se abre desde el cuerpo de
+    la página (_abrir_aviso_borrado), no desde la barra lateral."""
+    st.session_state["borrado_pendiente"] = (tipo, ident, titulo)
+
+
+@st.dialog("Eliminar conversación")
+def _aviso_borrar_conversacion(session_id: str, titulo: str, email: str) -> None:
+    st.markdown(f"¿Seguro que quieres eliminar **«{_shorten(titulo, 60)}»**? "
+                "Se borran todas sus consultas y no se puede deshacer.")
+    _botones_aviso(lambda: _borrar_conversacion(session_id, email))
+
+
+@st.dialog("Eliminar consulta")
+def _aviso_borrar_consulta(turn_id: str, email: str) -> None:
+    st.markdown("¿Seguro que quieres eliminar esta consulta (la pregunta y su "
+                "respuesta)? No se puede deshacer.")
+    _botones_aviso(lambda: _borrar_consulta(turn_id, email))
+
+
+def _botones_aviso(borrar) -> None:
+    col_no, col_si = st.columns(2)
+    with col_no:
+        if st.button("Cancelar", key="noborrar_aviso", use_container_width=True):
             st.rerun()
+    with col_si:
+        if st.button("Eliminar", key="siborrar_aviso", use_container_width=True):
+            borrar()   # recarga la página al terminar y el aviso se cierra
+
+
+def _abrir_aviso_borrado(email: str) -> None:
+    pendiente = st.session_state.pop("borrado_pendiente", None)
+    if not pendiente:
+        return
+    tipo, ident, titulo = pendiente
+    if tipo == "conversacion":
+        _aviso_borrar_conversacion(ident, titulo, email)
+    else:
+        _aviso_borrar_consulta(ident, email)
 
 
 def _olvidar_sesion_agente(email: str, session_id: str | None) -> None:
@@ -714,6 +755,7 @@ def _process_user_prompt(prompt: str, *, role: str, email: str) -> None:
                 response = f"Error: {exc}"
         st.markdown(response)
         visuales = _preparar_visualizaciones(herramientas, role)
+        lineas_filtros = _filtros_del_turno(herramientas)
 
     response_ms = int((time.perf_counter() - started) * 1000)
     turn_id = get_conversation_store().save_turn(
@@ -734,6 +776,8 @@ def _process_user_prompt(prompt: str, *, role: str, email: str) -> None:
         # Solo en la sesión: al reabrir la conversación desde el histórico
         # vuelve el texto, no el mapa ni los gráficos.
         "visualizaciones": visuales,
+        # Qué buscó el agente, para comprobar que entendió la pregunta.
+        "filtros": lineas_filtros,
     })
     # El turno recién guardado cambia el histórico (conversación nueva, título
     # o recuento), así que la lista cacheada deja de valer.
@@ -758,7 +802,7 @@ def _clear_conversation_widgets() -> None:
     """Descarta el estado de widgets atado a la conversación que se deja."""
     st.session_state.pop("pending_prompt", None)
     for key in list(st.session_state.keys()):
-        if key.startswith(("feedback_", "suggestion_", "confirmar_", "editar_")):
+        if key.startswith(("feedback_", "suggestion_", "editar_")):
             del st.session_state[key]
 
 
@@ -893,21 +937,6 @@ def _render_conversation_history(email: str) -> None:
         for sesion in sesiones:
             session_id = sesion["session_id"]
             es_actual = session_id == actual
-            clave = f"confirmar_conversacion_{session_id}"
-            if st.session_state.get(clave):
-                st.caption(f"¿Borrar «{_shorten(sesion['title'], 40)}»?")
-                col_si, col_no = st.columns(2)
-                with col_si:
-                    if st.button("Borrar", key=f"siborrar_conv_{session_id}",
-                                 use_container_width=True):
-                        st.session_state.pop(clave, None)
-                        _borrar_conversacion(session_id, email)
-                with col_no:
-                    if st.button("Cancelar", key=f"noborrar_conv_{session_id}",
-                                 use_container_width=True):
-                        st.session_state.pop(clave, None)
-                        st.rerun()
-                continue
             if st.session_state.get(f"editar_conversacion_{session_id}"):
                 # Se edita en la propia fila. Formulario para que Intro guarde;
                 # guardar va primero porque es el botón que dispara Intro.
@@ -953,10 +982,9 @@ def _render_conversation_history(email: str) -> None:
                     st.session_state[f"editar_conversacion_{session_id}"] = True
                     st.rerun()
             with col_papelera:
-                if st.button("", key=f"borrarconv_{session_id}",
-                             icon=":material/delete:"):
-                    st.session_state[clave] = True
-                    st.rerun()
+                st.button("", key=f"borrarconv_{session_id}",
+                          icon=":material/delete:", on_click=_pedir_borrado,
+                          args=("conversacion", session_id, sesion["title"]))
             if pulsado and not es_actual:
                 _load_conversation(session_id, email)
 
@@ -1305,6 +1333,12 @@ a:focus-visible,
     border: none !important;
 }
 
+/* "Press Enter to submit form": en un campo tan estrecho tapa el nombre, y
+   el ✓ de al lado ya dice cómo guardar. */
+[class*="st-key-nombre_"] [data-testid="InputInstructions"] {
+    display: none !important;
+}
+
 [data-testid="stSidebar"] [class*="st-key-nombre_"] [data-testid="stTextInputRootElement"] {
     background-color: var(--abv-surface) !important;
     border: 1px solid var(--abv-accent) !important;
@@ -1313,6 +1347,37 @@ a:focus-visible,
 [data-testid="stSidebar"] [class*="st-key-nombre_"] [data-baseweb="base-input"] {
     background-color: var(--abv-surface) !important;
     border-color: transparent !important;
+}
+
+/* Aviso de borrado: se pinta fuera de la app (en un portal), así que con el
+   tema oscuro de Streamlit saldría negro. Colores de marca forzados. */
+[data-testid="stDialog"] div:has(> [role="dialog"]),
+[data-testid="stDialog"] [role="dialog"] {
+    background-color: var(--abv-surface) !important;
+    color: var(--abv-ink) !important;
+}
+
+[data-testid="stDialog"] [role="dialog"] h2,
+[data-testid="stDialog"] [role="dialog"] p,
+[data-testid="stDialog"] [role="dialog"] strong,
+[data-testid="stDialog"] [role="dialog"] button[aria-label="Close"],
+[data-testid="stDialog"] [role="dialog"] button[aria-label="Close"] * {
+    color: var(--abv-ink) !important;
+}
+
+/* La regla de arriba pondría en tinta también la etiqueta de "Eliminar". */
+[data-testid="stDialog"] [class*="st-key-siborrar_"] button p {
+    color: #FFFFFF !important;
+}
+
+[class*="st-key-noborrar_"] button {
+    background-color: var(--abv-surface) !important;
+    border: 1px solid var(--abv-accent) !important;
+    color: var(--abv-ink) !important;
+}
+
+[class*="st-key-noborrar_"] button p {
+    color: var(--abv-ink) !important;
 }
 
 /* Confirmar un borrado es la acción destructiva: rojo con texto blanco
@@ -1776,6 +1841,10 @@ def main() -> None:
             st.session_state.clear()
             st.session_state["_logged_out"] = True
             st.rerun()
+
+    # Al final y fuera de la barra lateral: el aviso de borrado no ocupa un
+    # hueco en la página, así que no desplaza el historial al abrirse.
+    _abrir_aviso_borrado(email)
 
 
 if __name__ == "__main__":
