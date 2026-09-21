@@ -566,22 +566,9 @@ def _render_chat_history(messages: list[dict], email: str = "") -> None:
                 st.markdown(msg["content"])
                 _render_visualizaciones(msg)
                 _render_assistant_feedback(msg, i)
-                if email:
-                    _render_borrar_consulta(msg, email)
         else:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
-
-
-def _render_borrar_consulta(msg: dict, email: str) -> None:
-    """Papelera de una consulta, con confirmación antes de borrar."""
-    turn_id = msg.get("turn_id")
-    if not turn_id:
-        return   # no llegó a guardarse: no hay nada que borrar en el store
-    _, col_papelera = st.columns([12, 1])
-    with col_papelera:
-        st.button("", key=f"borrarconsulta_{turn_id}", icon=":material/delete:",
-                  on_click=_pedir_borrado, args=("consulta", turn_id, ""))
 
 
 def _pedir_borrado(tipo: str, ident: str, titulo: str) -> None:
@@ -595,13 +582,6 @@ def _aviso_borrar_conversacion(session_id: str, titulo: str, email: str) -> None
     st.markdown(f"¿Seguro que quieres eliminar **«{_shorten(titulo, 60)}»**? "
                 "Se borran todas sus consultas y no se puede deshacer.")
     _botones_aviso(lambda: _borrar_conversacion(session_id, email))
-
-
-@st.dialog("Eliminar consulta")
-def _aviso_borrar_consulta(turn_id: str, email: str) -> None:
-    st.markdown("¿Seguro que quieres eliminar esta consulta (la pregunta y su "
-                "respuesta)? No se puede deshacer.")
-    _botones_aviso(lambda: _borrar_consulta(turn_id, email))
 
 
 def _botones_aviso(borrar) -> None:
@@ -618,11 +598,8 @@ def _abrir_aviso_borrado(email: str) -> None:
     pendiente = st.session_state.pop("borrado_pendiente", None)
     if not pendiente:
         return
-    tipo, ident, titulo = pendiente
-    if tipo == "conversacion":
-        _aviso_borrar_conversacion(ident, titulo, email)
-    else:
-        _aviso_borrar_consulta(ident, email)
+    _, ident, titulo = pendiente
+    _aviso_borrar_conversacion(ident, titulo, email)
 
 
 def _olvidar_sesion_agente(email: str, session_id: str | None) -> None:
@@ -636,23 +613,6 @@ def _olvidar_sesion_agente(email: str, session_id: str | None) -> None:
         ))
     except Exception:
         log.warning("No se pudo descartar la sesión del agente", exc_info=True)
-
-
-def _borrar_consulta(turn_id: str, email: str) -> None:
-    if not get_conversation_store().delete_turn(turn_id, email):
-        st.error("No se pudo borrar la consulta. Inténtalo de nuevo.")
-        return
-    mensajes = st.session_state.messages
-    for i, msg in enumerate(mensajes):
-        if msg.get("role") == "assistant" and msg.get("turn_id") == turn_id:
-            # La pregunta va justo antes de su respuesta.
-            inicio = i - 1 if i > 0 and mensajes[i - 1].get("role") == "user" else i
-            del mensajes[inicio:i + 1]
-            break
-    # Si no se descarta, el agente seguiría "recordando" lo borrado.
-    _olvidar_sesion_agente(email, st.session_state.get("session_id"))
-    _invalidate_history_cache(email)
-    st.rerun()
 
 
 def _borrar_conversacion(session_id: str, email: str) -> None:
@@ -1270,10 +1230,9 @@ a:focus-visible,
     scrollbar-color: var(--abv-accent-light) var(--abv-surface-alt);
 }
 
-/* Papeleras de consulta y de conversación: discretas, sin caja; se tiñen de
+/* Papelera y lápiz de las conversaciones: discretos, sin caja; se tiñen de
    rojo solo al pasar por encima, que es cuando se va a usar. El color se
    fuerza porque el tema puede venir oscuro (ver pulgares del feedback). */
-[class*="st-key-borrarconsulta_"] button,
 [class*="st-key-borrarconv_"] button,
 [class*="st-key-editarconv_"] button,
 [class*="st-key-guardarnombre_"] button,
@@ -1286,7 +1245,6 @@ a:focus-visible,
     opacity: 0.7;
 }
 
-[class*="st-key-borrarconsulta_"] button *,
 [class*="st-key-borrarconv_"] button *,
 [class*="st-key-editarconv_"] button *,
 [class*="st-key-guardarnombre_"] button *,
@@ -1294,7 +1252,6 @@ a:focus-visible,
     color: inherit !important;
 }
 
-[class*="st-key-borrarconsulta_"] button:hover,
 [class*="st-key-borrarconv_"] button:hover {
     background-color: #FBECEA !important;
     color: #B3261E !important;
