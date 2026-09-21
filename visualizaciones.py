@@ -355,26 +355,6 @@ def _numero(valor: Any) -> str:
     return "—" if valor is None else f"{valor:,}".replace(",", ".")
 
 
-_ETIQUETAS = {
-    "nombre": "Villa", "pueblo_cercano": "Pueblo", "capacidad_pax": "Personas",
-    "numero_habitaciones": "Habitaciones", "tiene_piscina_privada": "Piscina privada",
-    "direccion": "Dirección", "lat": "Latitud", "lon": "Longitud",
-    "fecha": "Noche", "estado": "Estado", "precio_venta": "Venta (€)",
-    "precio_compra": "Compra (€)", "margen": "Margen (€)", "margen_pct": "Margen (%)",
-    "desde": "Desde", "hasta": "Hasta", "tipo_ocupacion": "Estado", "noches": "Noches",
-    "reserva_id": "Reserva", "estancia_minima_noches": "Estancia mínima",
-    "dimension": "Grupo", "total_reservas": "Reservas", "importe_total": "Importe total (€)",
-    "importe_medio": "Importe medio (€)", "noches_medias": "Noches medias",
-    "primera_entrada": "Primera entrada", "ultima_entrada": "Última entrada",
-    "monedas": "Monedas",
-}
-
-
-def tabla_legible(df: pd.DataFrame) -> pd.DataFrame:
-    """Columnas con etiquetas en español; las desconocidas se quedan como están."""
-    return df.rename(columns={c: _ETIQUETAS[c] for c in df.columns if c in _ETIQUETAS})
-
-
 def cifras_html(pares: Iterable[tuple[str, str]]) -> str:
     """Cifras resumen en una fila que salta de línea si no cabe.
 
@@ -391,13 +371,6 @@ def cifras_html(pares: Iterable[tuple[str, str]]) -> str:
     return f'<div class="abv-cifras">{celdas}</div>'
 
 
-def _tabla(df: pd.DataFrame) -> None:
-    import streamlit as st
-
-    with st.expander("Ver los datos"):
-        st.dataframe(tabla_legible(df), hide_index=True, use_container_width=True)
-
-
 def render(v: dict) -> None:
     import streamlit as st
 
@@ -409,9 +382,6 @@ def render(v: dict) -> None:
             else f"{len(villas)} {'villa' if len(villas) == 1 else 'villas'} en el mapa"
         )
         st.pydeck_chart(mapa_deck(v), use_container_width=True, height=320)
-        columnas = [c for c in ("nombre", "pueblo_cercano", "capacidad_pax",
-                                "numero_habitaciones", "direccion") if any(c in x for x in villas)]
-        _tabla(pd.DataFrame(villas)[columnas])
     elif tipo == "precios":
         resumen = v.get("resumen") or {}
         st.caption(f"Precio por noche · {v.get('villa') or ''}")
@@ -422,7 +392,6 @@ def render(v: dict) -> None:
             ("Margen medio", "—" if margen is None else f"{margen:.1f} %".replace(".", ",")),
         ]), unsafe_allow_html=True)
         st.altair_chart(grafico_precios(v), use_container_width=True, theme=None)
-        _tabla(pd.DataFrame(v["noches"]))
     elif tipo == "calendario":
         resumen = v.get("resumen") or {}
         st.caption(f"Calendario · {v.get('villa') or ''}")
@@ -434,8 +403,6 @@ def render(v: dict) -> None:
             ("Bloqueadas", _numero(resumen.get("noches_bloqueadas"))),
         ]), unsafe_allow_html=True)
         st.altair_chart(grafico_calendario(v), use_container_width=True, theme=None)
-        _tabla(pd.DataFrame(v["tramos"]))
     elif tipo == "resumen_reservas":
         st.caption(f"Reservas por {v['agrupar_por']}")
         st.altair_chart(grafico_resumen(v), use_container_width=True, theme=None)
-        _tabla(pd.DataFrame(v["filas"]))

@@ -179,15 +179,6 @@ class CifrasResumenTest(unittest.TestCase):
         self.assertIn("Margen &lt;b&gt;", html)
 
 
-class TablaLegibleTest(unittest.TestCase):
-
-    def test_las_columnas_llevan_etiquetas_en_espanol(self):
-        import pandas as pd
-        df = viz.tabla_legible(pd.DataFrame([{"nombre": "ADORA", "numero_habitaciones": 5,
-                                              "precio_venta": 400.0, "columna_rara": 1}]))
-        self.assertEqual(["Villa", "Habitaciones", "Venta (€)", "columna_rara"], list(df.columns))
-
-
 class ResumenReservasTest(unittest.TestCase):
 
     def test_por_mes_son_columnas_en_orden_temporal(self):
