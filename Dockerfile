@@ -23,5 +23,9 @@ ENV GOOGLE_CLOUD_PROJECT=abahanaweb \
     GOOGLE_CLOUD_LOCATION=europe-west1 \
     GOOGLE_GENAI_USE_VERTEXAI=true
 
-# Cloud Run injects $PORT; default 8080 for local docker run
-CMD ["sh", "-c", "streamlit run chat_app.py --server.port ${PORT:-8080} --server.address 0.0.0.0"]
+# Cloud Run injects $PORT; default 8080 for local docker run.
+# Sin estadísticas de uso Streamlit no intenta escribir su machine_id en
+# /root/.streamlit, que en Cloud Run es de solo lectura: fallaba en cada clic.
+# (El config.toml que ya lo desactiva no se lee: el volumen de secretos tapa
+# /app/.streamlit.)
+CMD ["sh", "-c", "streamlit run chat_app.py --server.port ${PORT:-8080} --server.address 0.0.0.0 --browser.gatherUsageStats false"]
