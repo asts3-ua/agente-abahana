@@ -28,7 +28,6 @@ import requests
 from bs4 import BeautifulSoup
 from google import genai
 from google.adk.agents import Agent
-from google.adk.models import Gemini
 from google.cloud import bigquery
 from google.genai import types as genai_types
 
@@ -3690,11 +3689,16 @@ def _texto_fecha_de_hoy(hoy: datetime.datetime) -> str:
 # herramientas son tres pasos del modelo, y cada uno pensaba antes.
 _CONFIG_MODELO = genai_types.GenerateContentConfig(
     thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
+    # Los reintentos van en cada petición (ver _REINTENTOS_GEMINI).
+    http_options=genai_types.HttpOptions(retry_options=_REINTENTOS_GEMINI),
 )
 
 agent_cliente = Agent(
     name="abahana_villas_agent_cliente",
-    model=Gemini(model=_MODELO_GEMINI, retry_options=_REINTENTOS_GEMINI),
+    # Por nombre, no con un objeto Gemini: ADK crea uno nuevo (con su conexión)
+    # en cada mensaje. Uno compartido reutilizaba la conexión del bucle de
+    # eventos del mensaje anterior, ya cerrado: "Event loop is closed".
+    model=_MODELO_GEMINI,
     generate_content_config=_CONFIG_MODELO,
     before_model_callback=fecha_de_hoy,
     description=(
@@ -3720,7 +3724,10 @@ agent_cliente = Agent(
 
 agent_interno = Agent(
     name="abahana_villas_agent_interno",
-    model=Gemini(model=_MODELO_GEMINI, retry_options=_REINTENTOS_GEMINI),
+    # Por nombre, no con un objeto Gemini: ADK crea uno nuevo (con su conexión)
+    # en cada mensaje. Uno compartido reutilizaba la conexión del bucle de
+    # eventos del mensaje anterior, ya cerrado: "Event loop is closed".
+    model=_MODELO_GEMINI,
     generate_content_config=_CONFIG_MODELO,
     before_model_callback=fecha_de_hoy,
     description=(
@@ -3758,7 +3765,10 @@ agent_interno = Agent(
 
 agent_admin = Agent(
     name="abahana_villas_agent_admin",
-    model=Gemini(model=_MODELO_GEMINI, retry_options=_REINTENTOS_GEMINI),
+    # Por nombre, no con un objeto Gemini: ADK crea uno nuevo (con su conexión)
+    # en cada mensaje. Uno compartido reutilizaba la conexión del bucle de
+    # eventos del mensaje anterior, ya cerrado: "Event loop is closed".
+    model=_MODELO_GEMINI,
     generate_content_config=_CONFIG_MODELO,
     before_model_callback=fecha_de_hoy,
     description=(

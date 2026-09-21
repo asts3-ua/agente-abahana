@@ -15,12 +15,17 @@ class ReintentosTest(unittest.TestCase):
 
     def test_los_tres_agentes_reintentan_ante_saturacion(self):
         for rol, ag in agent.AGENTS.items():
-            self.assertIsInstance(ag.model, Gemini, rol)
-            reintentos = ag.model.retry_options
-            self.assertIsNotNone(reintentos, rol)
+            reintentos = ag.generate_content_config.http_options.retry_options
             self.assertGreaterEqual(reintentos.attempts, 3, rol)
             self.assertIn(429, reintentos.http_status_codes, rol)
-            self.assertEqual("gemini-2.5-flash", ag.model.model, rol)
+
+    def test_el_modelo_no_se_comparte_entre_mensajes(self):
+        # Un objeto Gemini compartido guarda su conexión con Google, y la app
+        # abre y cierra un bucle de eventos por mensaje: al reutilizarla daba
+        # "Event loop is closed". Por nombre, ADK crea uno nuevo cada vez.
+        for rol, ag in agent.AGENTS.items():
+            self.assertNotIsInstance(ag.model, Gemini, rol)
+            self.assertEqual("gemini-2.5-flash", ag.model, rol)
 
     def test_la_busqueda_en_internet_tambien(self):
         cliente = Mock()
