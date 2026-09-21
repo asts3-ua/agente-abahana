@@ -45,6 +45,13 @@ _SI_NO = {
     "terraza": ("terraza", "sin terraza"),
 }
 
+_NOMBRES_EQUIPAMIENTO = {
+    "pingpong": "ping pong", "padel": "pádel", "tobogan": "tobogán",
+    "cama_elastica": "cama elástica", "jardin": "jardín", "cesped": "césped",
+    "solarium": "solárium", "ducha_exterior": "ducha exterior",
+    "futbolin": "futbolín",
+}
+
 _MINIMOS = {
     "capacidad_min": "{} personas",
     "habitaciones_min": "{} habitaciones",
@@ -64,6 +71,19 @@ _MESES = ("ene", "feb", "mar", "abr", "may", "jun",
 
 # Argumentos que no cambian qué se busca, solo cuánto se enseña.
 _IGNORADOS = {"limite", "query"}
+
+
+def _condicion_legible(condicion: Any) -> str:
+    """"tiene_pingpong" -> "ping pong", "num_mosquiteras >= 2" -> "num mosquiteras ≥ 2"."""
+    texto = str(condicion).strip()
+    for op, bonito in ((">=", " ≥ "), ("<=", " ≤ "), ("!=", " ≠ ")):
+        texto = texto.replace(op, bonito)
+    texto = " ".join(texto.split())
+    palabras = []
+    for palabra in texto.split(" "):
+        clave = palabra.lower().removeprefix("tiene_")
+        palabras.append(_NOMBRES_EQUIPAMIENTO.get(clave, clave.replace("_", " ")))
+    return " ".join(palabras)
 
 
 def _fecha(valor: Any) -> datetime.date | None:
@@ -152,6 +172,11 @@ def describir_llamada(nombre: str, args: dict | None) -> str | None:
         partes.append("incluye estancias del propietario")
     if args.get("agrupar_por"):
         partes.append(f"por {args['agrupar_por']}")
+    if args.get("caracteristicas"):
+        lista = args["caracteristicas"]
+        if not isinstance(lista, (list, tuple)):
+            lista = [lista]
+        partes += [_condicion_legible(c) for c in lista]
     if args.get("secciones"):
         secciones = args["secciones"]
         if isinstance(secciones, (list, tuple)):
@@ -166,7 +191,7 @@ def describir_llamada(nombre: str, args: dict | None) -> str | None:
                   "activa_en", "anulada_desde", "anulada_hasta", "rating_min",
                   "distancia_mar_max_m", "estado_reserva", "estado_documento",
                   "excluir_canceladas", "solo_en_firme", "incluir_propietario",
-                  "agrupar_por", "secciones", "texto"}
+                  "agrupar_por", "secciones", "texto", "caracteristicas"}
                  | set(_MINIMOS) | set(_SI_NO))
     for clave, valor in args.items():
         if clave not in conocidos:

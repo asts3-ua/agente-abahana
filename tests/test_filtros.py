@@ -54,6 +54,13 @@ class DescribirLlamadaTest(unittest.TestCase):
                          filtros.describir_llamada("buscar_propiedades", {
                              "ubicacion": "Calpe", "piscina": False, "jacuzzi": True}))
 
+    def test_las_condiciones_de_ficha_se_leen_bien(self):
+        self.assertEqual(
+            "Villas: Moraira · ping pong · sin ascensor · num mosquiteras ≥ 2",
+            filtros.describir_llamada("buscar_propiedades", {
+                "ubicacion": "Moraira",
+                "caracteristicas": ["tiene_pingpong", "sin ascensor", "num_mosquiteras>=2"]}))
+
     def test_villa_concreta_y_secciones(self):
         self.assertEqual(
             "Ficha: villa ATALAYA · secciones: piscina, vistas",

@@ -858,11 +858,15 @@ class CanceladasTest(_ConBigQueryFalso):
 class EquipamientoYDireccionTest(_ConBigQueryFalso):
     """Jacuzzi, billar, parking o una calle: datos que había y no se filtraban."""
 
-    def test_filtra_por_jacuzzi_billar_y_futbolin(self):
-        agent.buscar_propiedades(jacuzzi=True, billar=True, futbolin=True)
-        sql = self._sql()
-        for columna in ("tiene_jacuzzi", "tiene_billar", "tiene_futbolin"):
-            self.assertIn(f"v.{columna} = TRUE", sql)
+    def test_jacuzzi_billar_y_futbolin_van_por_caracteristicas(self):
+        # Con parámetros sueltos el modelo creía que la lista era completa y
+        # decía "no hay filtro para sauna": todo va por `caracteristicas`.
+        import inspect
+        for herramienta in (agent.buscar_propiedades, agent.consultar_disponibilidad):
+            parametros = inspect.signature(herramienta).parameters
+            self.assertIn("caracteristicas", parametros)
+            for suelto in ("jacuzzi", "billar", "futbolin", "garaje"):
+                self.assertNotIn(suelto, parametros)
 
     def test_parking_vale_cualquier_aparcamiento(self):
         agent.buscar_propiedades(parking=True)
@@ -891,12 +895,12 @@ class EquipamientoYDireccionTest(_ConBigQueryFalso):
     def test_la_disponibilidad_filtra_por_equipamiento_y_direccion(self):
         agent.consultar_disponibilidad(
             fecha_desde="2099-10-09", fecha_hasta="2099-10-12",
-            vista_mar=True, admite_animales=True, jacuzzi=True,
+            vista_mar=True, admite_animales=True, parking=True,
             direccion="Cumbre del Sol")
         sql = self._sql()
         self.assertIn("v.tiene_vista_mar = TRUE", sql)
         self.assertIn("v.admite_animales = TRUE", sql)
-        self.assertIn("v.tiene_jacuzzi = TRUE", sql)
+        self.assertIn("v.tiene_parking_calle", sql)
         self.assertIn("LOWER(v.direccion) LIKE @direccion_0", sql)
 
 
@@ -925,6 +929,85 @@ class FechaDeHoyTest(unittest.TestCase):
     def test_los_tres_agentes_la_reciben(self):
         for rol, ag in agent.AGENTS.items():
             self.assertIs(agent.fecha_de_hoy, ag.before_model_callback, rol)
+
+
+class FiltroPorCualquierDatoDeFichaTest(_ConBigQueryFalso):
+    """El usuario puede filtrar por cualquier dato de la ficha, no solo por los
+    que tienen parámetro propio."""
+
+    TIPOS = {
+        "tiene_pingpong": "BOOLEAN", "tiene_sauna": "BOOLEAN",
+        "tiene_ascensor": "BOOLEAN", "tiene_pista_tenis": "BOOLEAN",
+        "num_mosquiteras": "INTEGER", "distancia_supermercado_m": "INTEGER",
+        "tipo_cafetera_codigo": "STRING", "codigo_alarma_desactivacion": "STRING",
+        "fianza": "FLOAT",
+    }
+
+    def setUp(self):
+        super().setUp()
+        secciones = {
+            "ocio": ["tiene_pingpong", "tiene_sauna", "tiene_pista_tenis"],
+            "equipamiento": ["num_mosquiteras", "tiene_ascensor"],
+            "distancias": ["distancia_supermercado_m"],
+            "cocina": ["tipo_cafetera_codigo"],
+            "acceso_seguridad": ["codigo_alarma_desactivacion"],
+            "comercial": ["fianza"],
+        }
+        for nombre, valor in (("_SECCIONES_FICHA", secciones),
+                              ("_FICHA_BASICA", [])):
+            parche = patch.object(agent, nombre, valor)
+            parche.start()
+            self.addCleanup(parche.stop)
+        tipos = patch.object(agent, "_tipos_columnas_villa", return_value=self.TIPOS)
+        tipos.start()
+        self.addCleanup(tipos.stop)
+
+    def test_un_dato_si_no_escrito_de_cualquier_forma(self):
+        for escrito in ("pingpong", "ping pong", "Ping-Pong", "tiene_pingpong"):
+            agent.buscar_propiedades(caracteristicas=[escrito])
+            self.assertIn("v.tiene_pingpong = TRUE", self._sql(), escrito)
+
+    def test_negado(self):
+        agent.buscar_propiedades(caracteristicas=["sin ascensor"])
+        self.assertIn("COALESCE(v.tiene_ascensor, FALSE) = FALSE", self._sql())
+
+    def test_numeros_con_comparacion_como_parametro(self):
+        agent.buscar_propiedades(caracteristicas=["num_mosquiteras >= 2"])
+        self.assertIn("v.num_mosquiteras >= @ficha_0", self._sql())
+        self.assertEqual(2.0, self._params()["ficha_0"])
+
+    def test_una_distancia_cero_es_sin_dato(self):
+        agent.buscar_propiedades(caracteristicas=["distancia_supermercado_m <= 500"])
+        self.assertIn("v.distancia_supermercado_m > 0", self._sql())
+
+    def test_texto_por_parametro_y_sin_inyeccion(self):
+        agent.buscar_propiedades(caracteristicas=["tipo_cafetera_codigo = x' OR 1=1 --"])
+        sql = self._sql()
+        self.assertIn("LOWER(COALESCE(v.tipo_cafetera_codigo, '')) LIKE LOWER(@ficha_0)", sql)
+        self.assertNotIn("OR 1=1", sql)
+
+    def test_un_dato_que_no_existe_sugiere_los_parecidos_sin_consultar(self):
+        r = agent.buscar_propiedades(caracteristicas=["mosquitera"])
+        self.assertIn("num_mosquiteras", r["error"])
+        self.bq.query.assert_not_called()
+
+    def test_no_se_filtra_por_datos_de_acceso_ni_comerciales(self):
+        for dato in ("codigo_alarma_desactivacion = 1234", "fianza > 100"):
+            r = agent.buscar_propiedades(caracteristicas=[dato])
+            self.assertIn("error", r, dato)
+        self.bq.query.assert_not_called()
+
+    def test_tambien_en_disponibilidad(self):
+        agent.consultar_disponibilidad(fecha_desde="2099-10-03",
+                                       fecha_hasta="2099-10-10",
+                                       caracteristicas=["pingpong", "sauna"])
+        sql = self._sql()
+        self.assertIn("v.tiene_pingpong = TRUE", sql)
+        self.assertIn("v.tiene_sauna = TRUE", sql)
+
+    def test_una_villa_concreta_se_mira_en_su_ficha(self):
+        self.assertIn("No digas que no\n  tienes el dato sin haber mirado la ficha",
+                      agent.INSTRUCTION_INTERNO)
 
 
 class InstruccionesMapasTest(unittest.TestCase):

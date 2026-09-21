@@ -11,6 +11,7 @@ Roles disponibles:
 import asyncio
 import concurrent.futures
 import datetime
+import difflib
 import functools
 import logging
 import os
@@ -18,6 +19,7 @@ import re
 import time
 import types
 import typing
+import unicodedata
 from typing import Any
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
@@ -287,7 +289,6 @@ _EQUIPAMIENTO = {
     "terraza": "(v.tiene_terraza_cubierta OR v.tiene_terraza_descubierta)",
 }
 
-
 def _condiciones_equipamiento(**filtros: bool | None) -> list[str]:
     """Exigirlo compara contra TRUE; no exigirlo trata el dato ausente como
     ausencia, para no descartar las villas sin ficha."""
@@ -301,6 +302,126 @@ def _condiciones_equipamiento(**filtros: bool | None) -> list[str]:
             else f"COALESCE({expresion}, FALSE) = FALSE"
         )
     return condiciones
+
+
+# Cualquier dato de la ficha sirve como filtro con el parámetro `ficha`. Los
+# de acceso (códigos de alarma, wifi) y los comerciales (fianza, comisión) no:
+# no son criterios de búsqueda, y la versión cliente podría deducir su valor
+# filtrando por ellos.
+_SECCIONES_NO_FILTRABLES = {"acceso_seguridad", "comercial"}
+_SINONIMOS_FICHA = {
+    "ping_pong": "pingpong", "mesa_de_ping_pong": "pingpong",
+    "tenis": "pista_tenis", "pista_de_tenis": "pista_tenis",
+    "padel": "pista_padel", "pista_de_padel": "pista_padel",
+    "wifi": "internet", "aire": "aire_acondicionado",
+}
+_CONDICION_FICHA = re.compile(
+    r"^\s*(?P<neg>(?:sin|no)\s+|!)?(?P<campo>[^<>=!]+?)\s*"
+    r"(?:(?P<op>>=|<=|!=|=|>|<)\s*(?P<valor>.+?))?\s*$",
+    re.IGNORECASE,
+)
+
+
+@functools.lru_cache(maxsize=1)
+def _tipos_columnas_villa() -> dict[str, str]:
+    """Tipo de cada columna de la villa, leído del esquema (una vez por proceso)."""
+    tabla = _bq.get_table(TABLA_VILLA.strip("`"))
+    return {campo.name: campo.field_type for campo in tabla.schema}
+
+
+def _columnas_filtrables() -> dict[str, str]:
+    tipos = _tipos_columnas_villa()
+    nombres = set(_FICHA_BASICA) | {
+        columna
+        for seccion, columnas in _SECCIONES_FICHA.items()
+        if seccion not in _SECCIONES_NO_FILTRABLES
+        for columna in columnas
+    }
+    return {c: tipos[c] for c in nombres if c in tipos}
+
+
+def _clave_ficha(texto: str) -> str:
+    sin_tildes = unicodedata.normalize("NFKD", texto).encode("ascii", "ignore").decode()
+    return re.sub(r"[\s\-]+", "_", sin_tildes.strip().lower())
+
+
+def _resolver_campo_ficha(texto: str, columnas: dict[str, str]) -> str | None:
+    clave = _clave_ficha(texto)
+    clave = _SINONIMOS_FICHA.get(clave, clave)
+    for candidata in (clave, f"tiene_{clave}", f"num_{clave}"):
+        if candidata in columnas:
+            return candidata
+    return None
+
+
+def _condiciones_ficha(condiciones: list[str] | None,
+                       params: list) -> list[str] | str:
+    """SQL para cada condición sobre la ficha, o un error que el modelo entienda.
+
+    Solo admite columnas de la ficha (lista blanca del esquema real) y los
+    valores van siempre como parámetros: nada del texto llega al SQL tal cual.
+    """
+    if not condiciones:
+        return []
+    try:
+        columnas = _columnas_filtrables()
+    except Exception as e:
+        return f"No se pudo leer la ficha para filtrar: {e}"
+    sql: list[str] = []
+    for i, condicion in enumerate(condiciones):
+        m = _CONDICION_FICHA.match(str(condicion))
+        campo = _resolver_campo_ficha(m.group("campo"), columnas) if m else None
+        if campo is None:
+            parecidas = difflib.get_close_matches(
+                _clave_ficha(m.group("campo") if m else str(condicion)),
+                list(columnas), n=5, cutoff=0.5)
+            return (f"No hay ningún dato de la ficha llamado '{condicion}'."
+                    + (f" ¿Quizá: {', '.join(parecidas)}?" if parecidas else "")
+                    + " Usa el nombre de la columna, p. ej. 'tiene_sauna' o "
+                    "'num_mosquiteras >= 2'.")
+        negado, op, valor = bool(m.group("neg")), m.group("op"), m.group("valor")
+        tipo, col, nombre = columnas[campo], f"v.{campo}", f"ficha_{i}"
+        if tipo == "BOOLEAN":
+            if op in ("=", "!=") and valor:
+                verdad = _clave_ficha(valor) in ("true", "si", "1", "yes")
+                negado = negado ^ (not verdad) ^ (op == "!=")
+            elif op:
+                return f"'{campo}' es sí/no: úsalo solo ('{campo}') o con 'sin {campo}'."
+            sql.append(f"COALESCE({col}, FALSE) = FALSE" if negado else f"{col} = TRUE")
+        elif tipo in ("INTEGER", "FLOAT", "NUMERIC"):
+            if not op:
+                sql.append(f"COALESCE({col}, 0) = 0" if negado else f"{col} > 0")
+                continue
+            try:
+                numero = float(valor.replace(",", "."))
+            except ValueError:
+                return f"'{campo}' es un número y '{valor}' no lo es."
+            sql.append(f"{col} {'<>' if op == '!=' else op} @{nombre}")
+            params.append(bigquery.ScalarQueryParameter(nombre, "FLOAT64", numero))
+            # Como en distancia_mar_m: 0 es "sin registrar", no "al lado".
+            if campo.startswith("distancia_") and op in ("<", "<="):
+                sql.append(f"{col} > 0")
+        elif tipo == "DATE":
+            if not op:
+                return f"'{campo}' es una fecha: compárala, p. ej. '{campo} >= 2026-01-01'."
+            try:
+                fecha = datetime.date.fromisoformat(valor.strip())
+            except ValueError:
+                return f"'{valor}' no es una fecha AAAA-MM-DD."
+            sql.append(f"{col} {'<>' if op == '!=' else op} @{nombre}")
+            params.append(bigquery.ScalarQueryParameter(nombre, "DATE", fecha))
+        else:  # STRING y códigos
+            if not op:
+                sql.append(f"NULLIF(TRIM({col}), '') IS NULL" if negado
+                           else f"NULLIF(TRIM({col}), '') IS NOT NULL")
+            elif op in ("=", "!="):
+                comparacion = "NOT LIKE" if (op == "!=") ^ negado else "LIKE"
+                sql.append(f"LOWER(COALESCE({col}, '')) {comparacion} LOWER(@{nombre})")
+                params.append(bigquery.ScalarQueryParameter(
+                    nombre, "STRING", f"%{valor.strip()}%"))
+            else:
+                return f"'{campo}' es texto: usa '=' o '!='."
+    return sql
 
 
 # Lo que precede al nombre de la calle y cambia de una ficha a otra ("Calle",
@@ -353,12 +474,9 @@ def buscar_propiedades(
     zona_tranquila: bool | None = None,
     gimnasio: bool | None = None,
     accesible: bool | None = None,
-    jacuzzi: bool | None = None,
-    billar: bool | None = None,
-    futbolin: bool | None = None,
     parking: bool | None = None,
-    garaje: bool | None = None,
     terraza: bool | None = None,
+    caracteristicas: list[str] | None = None,
     direccion: str | None = None,
     texto: str | None = None,
 ) -> dict[str, Any]:
@@ -389,13 +507,19 @@ def buscar_propiedades(
         zona_tranquila: True para zonas tranquilas.
         gimnasio: True para villas con gimnasio.
         accesible: True para villas aptas para movilidad reducida.
-        jacuzzi: True para villas con jacuzzi.
-        billar: True para villas con mesa de billar.
-        futbolin: True para villas con futbolín.
         parking: True para villas con algún aparcamiento (garaje, plaza
             cubierta, descubierta o en la calle).
-        garaje: True para exigir garaje cerrado.
         terraza: True para villas con terraza (cubierta o descubierta).
+        caracteristicas: CUALQUIER otra característica de la villa, en
+            lista: sauna, ping pong, jardín, jacuzzi, billar, garaje,
+            mosquiteras, supermercado cerca, tipo de cafetera... Un
+            dato sí/no por su nombre ("pingpong", "tiene_sauna", "sin
+            ascensor"); un número o una fecha con comparación
+            ("num_mosquiteras >= 2", "distancia_supermercado_m <= 500",
+            "m2_parcela > 1000"); un texto o código con = ("tipo_cafetera_codigo
+            = nespresso"). Los nombres son las columnas de la ficha (las de
+            obtener_detalle_propiedad); si uno no existe, el error sugiere
+            los parecidos.
         direccion: Calle, número o urbanización ("Calle Kabul 7", "Cumbre del
             Sol", "La Fustera"). Sirve también para urbanizaciones y partidas
             que no son un pueblo ni una zona. No hay dato de barbacoa fiable
@@ -452,9 +576,13 @@ def buscar_propiedades(
         internet=internet, aire_acondicionado=aire_acondicionado,
         lavadora=lavadora, lavavajillas=lavavajillas, vista_mar=vista_mar,
         zona_tranquila=zona_tranquila, gimnasio=gimnasio, accesible=accesible,
-        jacuzzi=jacuzzi, billar=billar, futbolin=futbolin, parking=parking,
-        garaje=garaje, terraza=terraza,
+        parking=parking, terraza=terraza,
     )
+
+    extra = _condiciones_ficha(caracteristicas, params)
+    if isinstance(extra, str):
+        return {"matches": [], "count": 0, "total": 0, "error": extra}
+    conditions += extra
 
     if direccion:
         conditions += _condiciones_direccion(direccion, params)
@@ -1233,10 +1361,8 @@ def consultar_disponibilidad(
     piscina: bool | None = None,
     admite_animales: bool | None = None,
     vista_mar: bool | None = None,
-    jacuzzi: bool | None = None,
-    billar: bool | None = None,
-    futbolin: bool | None = None,
     parking: bool | None = None,
+    caracteristicas: list[str] | None = None,
     direccion: str | None = None,
     limite: int = 20,
 ) -> dict[str, Any]:
@@ -1261,8 +1387,10 @@ def consultar_disponibilidad(
         piscina: True para exigir piscina privada.
         admite_animales: True para villas que admiten mascotas.
         vista_mar: True para exigir vista al mar.
-        jacuzzi, billar, futbolin: True para exigir ese equipamiento.
         parking: True para villas con algún aparcamiento.
+        caracteristicas: CUALQUIER otra característica de la villa (sauna,
+            ping pong, jardín, jacuzzi, mosquiteras...; ver
+            buscar_propiedades), p. ej. ["pingpong", "num_mosquiteras >= 2"].
         direccion: Calle o urbanización (ver buscar_propiedades).
         limite: Máximo de villas a mostrar (el total siempre es exacto).
 
@@ -1353,9 +1481,13 @@ def consultar_disponibilidad(
             f"v.admite_animales = {'TRUE' if admite_animales else 'FALSE'}"
         )
     conditions += _condiciones_equipamiento(
-        vista_mar=vista_mar, jacuzzi=jacuzzi, billar=billar,
-        futbolin=futbolin, parking=parking,
+        vista_mar=vista_mar, parking=parking,
     )
+    extra = _condiciones_ficha(caracteristicas, params)
+    if isinstance(extra, str):
+        return {"available": False, "total_disponibles": 0, "matches": [],
+                "error": extra}
+    conditions += extra
     if direccion:
         conditions += _condiciones_direccion(direccion, params)
 
@@ -2431,11 +2563,11 @@ en la Costa Blanca (España). Ayudas con villas Y con información turística lo
   "duerme a 8 en camas" es `camas_min=8`. Una habitación puede tener varias camas.
 - Muestra el rating_medio cuando uses buscar_por_valoracion.
 - Puedes combinar varios filtros en una sola llamada.
-- En una pregunta de seguimiento ("¿y cuáles tienen jacuzzi?", "¿y para 8?")
-  MANTÉN los filtros de la búsqueda anterior (fechas, pueblo, personas,
-  mascotas...) y añade el nuevo, con la misma herramienta: si antes buscabas
-  disponibilidad, sigue con `consultar_disponibilidad`. Solo quita un filtro
-  si el usuario lo pide.
+- En una pregunta de seguimiento sobre una LISTA de villas ("¿y cuáles tienen
+  jacuzzi?", "¿y para 8?") MANTÉN los filtros de la búsqueda anterior (fechas,
+  pueblo, personas, mascotas...) y añade el nuevo, con la misma herramienta:
+  si antes buscabas disponibilidad, sigue con `consultar_disponibilidad`.
+  Solo quita un filtro si el usuario lo pide.
 - Nunca inventes datos. Si no hay resultados en BigQuery, sugiere alternativas.
 - Muestra los datos de forma clara: nombre, ubicación, capacidad, amenidades.
 - Para decir CUÁNTOS resultados hay usa el `total` (o `total_disponibles`) que
@@ -2456,9 +2588,13 @@ en la Costa Blanca (España). Ayudas con villas Y con información turística lo
   ni tablas para copiar a una hoja de cálculo en su lugar.
 
 ## Búsquedas por equipamiento y dirección
-- `buscar_propiedades` y `consultar_disponibilidad` filtran por jacuzzi,
-  billar, futbolín, parking, vistas al mar y mascotas, y `buscar_propiedades`
-  además por garaje y terraza. Úsalos en vez de decir que no hay filtro.
+- `buscar_propiedades` y `consultar_disponibilidad` filtran por CUALQUIER
+  característica de la ficha con `caracteristicas=[...]`: sauna, ping pong,
+  jardín, jacuzzi, billar, garaje, mosquiteras ("num_mosquiteras >= 2"),
+  distancias ("distancia_supermercado_m <= 500"), "sin ascensor"... Si el
+  usuario pide "villas con X", pon X en `caracteristicas` y deja que la
+  herramienta diga si existe. NUNCA digas que no hay filtro para algo sin
+  haberlo intentado.
 - Para una calle, un número o una urbanización ("Calle Kabul 7", "Cumbre del
   Sol", "La Fustera", "El Portet") usa el parámetro `direccion`.
 - No hay dato fiable de barbacoa, parcela vallada ni balcón: dilo claramente.
@@ -2554,6 +2690,10 @@ _HERRAMIENTAS_COMUNES = """
 
 _REGLAS_GESTION = """
 ## Cuánta información dar de una villa
+- Si preguntan si UNA villa concreta tiene algo ("¿Alessia tiene ping
+  pong?"), no es una búsqueda: mira su ficha con `obtener_detalle_propiedad`
+  y la sección que toque (ocio, exterior, piscina, parking...). No digas que no
+  tienes el dato sin haber mirado la ficha.
 - Si preguntan por una villa en general ("háblame de", "situación de", "info
   de"), responde lo BÁSICO: ubicación, capacidad, habitaciones, camas, baños,
   piscina, metros y precio. Nada más. Llama a la vez a
