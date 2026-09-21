@@ -2431,6 +2431,11 @@ en la Costa Blanca (España). Ayudas con villas Y con información turística lo
   "duerme a 8 en camas" es `camas_min=8`. Una habitación puede tener varias camas.
 - Muestra el rating_medio cuando uses buscar_por_valoracion.
 - Puedes combinar varios filtros en una sola llamada.
+- En una pregunta de seguimiento ("¿y cuáles tienen jacuzzi?", "¿y para 8?")
+  MANTÉN los filtros de la búsqueda anterior (fechas, pueblo, personas,
+  mascotas...) y añade el nuevo, con la misma herramienta: si antes buscabas
+  disponibilidad, sigue con `consultar_disponibilidad`. Solo quita un filtro
+  si el usuario lo pide.
 - Nunca inventes datos. Si no hay resultados en BigQuery, sugiere alternativas.
 - Muestra los datos de forma clara: nombre, ubicación, capacidad, amenidades.
 - Para decir CUÁNTOS resultados hay usa el `total` (o `total_disponibles`) que
@@ -2737,6 +2742,29 @@ def error_de_herramienta(tool, args: dict[str, Any], tool_context,
     )}
 
 
+_DIAS = ("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo")
+_MESES_LARGOS = ("enero", "febrero", "marzo", "abril", "mayo", "junio", "julio",
+                 "agosto", "septiembre", "octubre", "noviembre", "diciembre")
+
+
+def fecha_de_hoy(callback_context, llm_request) -> None:
+    """Pone la fecha de hoy en las instrucciones de cada llamada al modelo.
+
+    Sin razonamiento previo, el modelo ya no llamaba a obtener_fecha_hora_actual
+    antes de interpretar "del 3 al 10 de octubre" y ponía 2024 por su cuenta:
+    "no puedo consultar fechas pasadas". Con la fecha delante no hace falta
+    esa llamada, y además es un paso del modelo menos.
+    """
+    hoy = _ahora_local()
+    llm_request.append_instructions([
+        f"## Hoy\nHoy es {_DIAS[hoy.weekday()]} {hoy.day} de "
+        f"{_MESES_LARGOS[hoy.month - 1]} de {hoy.year} ({hoy.date().isoformat()}), "
+        f"{hoy:%H:%M} en Europe/Madrid. Una fecha sin año (\"del 3 al 10 de "
+        "octubre\") es la próxima vez que llega ese día, nunca un año pasado."
+    ])
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Agentes por rol
 # ---------------------------------------------------------------------------
@@ -2754,6 +2782,7 @@ agent_cliente = Agent(
     name="abahana_villas_agent_cliente",
     model="gemini-2.5-flash",
     generate_content_config=_CONFIG_MODELO,
+    before_model_callback=fecha_de_hoy,
     description=(
         "Asistente de Abahana Villas: villas vacacionales, web corporativa "
         "e información turística local (fiestas, eventos, clima)."
@@ -2779,6 +2808,7 @@ agent_interno = Agent(
     name="abahana_villas_agent_interno",
     model="gemini-2.5-flash",
     generate_content_config=_CONFIG_MODELO,
+    before_model_callback=fecha_de_hoy,
     description=(
         "Asistente interno de Abahana Villas: villas, fichas completas, reservas, "
         "web corporativa e información turística local (fiestas, eventos, clima)."
@@ -2813,6 +2843,7 @@ agent_admin = Agent(
     name="abahana_villas_agent_admin",
     model="gemini-2.5-flash",
     generate_content_config=_CONFIG_MODELO,
+    before_model_callback=fecha_de_hoy,
     description=(
         "Asistente de administración de Abahana Villas: villas, fichas completas, "
         "reservas, web corporativa e información turística local (fiestas, eventos, clima)."

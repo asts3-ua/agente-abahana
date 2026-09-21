@@ -908,6 +908,25 @@ class SinRazonamientoTest(unittest.TestCase):
                 0, ag.generate_content_config.thinking_config.thinking_budget, rol)
 
 
+class FechaDeHoyTest(unittest.TestCase):
+    """Sin razonamiento, "del 3 al 10 de octubre" salía como octubre de 2024."""
+
+    def test_la_fecha_de_hoy_va_en_las_instrucciones(self):
+        import datetime
+        from google.adk.models import LlmRequest
+        peticion = LlmRequest()
+        ahora = datetime.datetime(2026, 9, 21, 10, 30, tzinfo=agent._TIMEZONE)
+        with patch.object(agent, "_ahora_local", return_value=ahora):
+            self.assertIsNone(agent.fecha_de_hoy(None, peticion))
+        texto = str(peticion.config.system_instruction)
+        self.assertIn("lunes 21 de septiembre de 2026 (2026-09-21)", texto)
+        self.assertIn("nunca un año pasado", texto)
+
+    def test_los_tres_agentes_la_reciben(self):
+        for rol, ag in agent.AGENTS.items():
+            self.assertIs(agent.fecha_de_hoy, ag.before_model_callback, rol)
+
+
 class InstruccionesMapasTest(unittest.TestCase):
 
     def test_el_agente_sabe_que_la_app_pinta_mapas_y_graficos(self):
