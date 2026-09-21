@@ -875,7 +875,8 @@ class EquipamientoYDireccionTest(_ConBigQueryFalso):
                         "tiene_parking_cubierto", "tiene_parking_descubierto"):
             self.assertIn(f"v.{columna}", sql)
 
-    def test_sin_filtro_de_barbacoa_mientras_el_dato_no_sea_fiable(self):
+    def test_la_barbacoa_va_por_caracteristicas(self):
+        # Como jacuzzi o billar: sin parámetro suelto.
         self.assertNotIn("barbacoa", agent._EQUIPAMIENTO)
 
     def test_la_direccion_ignora_el_tipo_de_via(self):
@@ -939,6 +940,62 @@ class FechaDeHoyTest(unittest.TestCase):
     def test_los_tres_agentes_la_reciben(self):
         for rol, ag in agent.AGENTS.items():
             self.assertIs(agent.fecha_de_hoy, ag.before_model_callback, rol)
+
+
+class BarbacoaDesdeExteriorTest(_ConBigQueryFalso):
+    """La barbacoa sale de OV_Exterior (obra, portátil, tipo, gas, plancha);
+    los códigos de la ficha, que discrepaban en 88 villas, ya no se usan."""
+
+    TIPOS = {
+        "tiene_barbacoa": "BOOLEAN", "tiene_barbacoa_obra": "BOOLEAN",
+        "tiene_barbacoa_portatil": "BOOLEAN", "tipo_barbacoa_portatil": "STRING",
+        "gas_barbacoa": "STRING", "barbacoa_plancha": "STRING",
+    }
+
+    def setUp(self):
+        super().setUp()
+        tipos = patch.object(agent, "_tipos_columnas_villa", return_value=self.TIPOS)
+        tipos.start()
+        self.addCleanup(tipos.stop)
+
+    def test_la_ficha_muestra_los_datos_de_exterior(self):
+        exterior = agent._SECCIONES_FICHA["exterior"]
+        for columna in self.TIPOS:
+            self.assertIn(columna, exterior, columna)
+
+    def test_ya_no_usa_los_codigos_de_la_ficha(self):
+        todas = {c for cols in agent._SECCIONES_FICHA.values() for c in cols}
+        self.assertNotIn("tipo_barbacoa_codigo", todas)
+        self.assertNotIn("barbacoa_portatil_codigo", todas)
+
+    def test_con_barbacoa_escrito_de_varias_formas(self):
+        for escrito in ("barbacoa", "Barbacoa", "bbq", "tiene_barbacoa"):
+            agent.buscar_propiedades(caracteristicas=[escrito])
+            self.assertIn("v.tiene_barbacoa = TRUE", self._sql(), escrito)
+
+    def test_de_obra_o_portatil(self):
+        agent.buscar_propiedades(caracteristicas=["barbacoa de obra"])
+        self.assertIn("v.tiene_barbacoa_obra = TRUE", self._sql())
+        agent.buscar_propiedades(caracteristicas=["barbacoa portátil"])
+        self.assertIn("v.tiene_barbacoa_portatil = TRUE", self._sql())
+
+    def test_portatil_de_gas_por_su_tipo(self):
+        agent.buscar_propiedades(caracteristicas=["tipo_barbacoa_portatil = gas"])
+        self.assertIn("LOWER(COALESCE(v.tipo_barbacoa_portatil, '')) LIKE", self._sql())
+        self.assertEqual("%gas%", self._params()["ficha_0_0"])
+
+    def test_la_disponibilidad_tambien_filtra_por_barbacoa(self):
+        agent.consultar_disponibilidad(fecha_desde="2099-08-10", fecha_hasta="2099-08-17",
+                                       caracteristicas=["barbacoa"])
+        self.assertIn("v.tiene_barbacoa = TRUE", self._sql())
+
+    def test_ya_no_dice_que_el_dato_no_es_fiable(self):
+        import re
+        aviso = re.compile(r"barbacoa fiable|fiable de barbacoa")
+        for herramienta in (agent.buscar_propiedades, agent.consultar_disponibilidad):
+            self.assertIsNone(aviso.search(herramienta.__doc__ or ""), herramienta.__name__)
+        for rol in ("interno", "admin", "cliente"):
+            self.assertIsNone(aviso.search(agent.AGENTS[rol].instruction), rol)
 
 
 class FiltroPorCualquierDatoDeFichaTest(_ConBigQueryFalso):

@@ -269,8 +269,7 @@ def listar_propiedades() -> dict[str, Any]:
 
 
 # Equipamiento de la ficha por el que se puede filtrar: parámetro -> expresión.
-# La barbacoa falta a propósito: el dato de la ficha no es fiable (discrepa en
-# 88 de 209 villas) y el bueno, el de OV_Exterior, aún no llega a esta tabla.
+# La barbacoa, como el jacuzzi o el billar, va por `caracteristicas`.
 _EQUIPAMIENTO = {
     "internet": "v.tiene_internet",
     "aire_acondicionado": "v.tiene_aire_acondicionado",
@@ -314,6 +313,7 @@ _SINONIMOS_FICHA = {
     "tenis": "pista_tenis", "pista_de_tenis": "pista_tenis",
     "padel": "pista_padel", "pista_de_padel": "pista_padel",
     "wifi": "internet", "aire": "aire_acondicionado",
+    "bbq": "barbacoa", "barbacoa_de_obra": "barbacoa_obra",
 }
 _CONDICION_FICHA = re.compile(
     r"^\s*(?P<neg>(?:sin|no)\s+|!)?(?P<campo>[^<>=!]+?)\s*"
@@ -540,8 +540,8 @@ def buscar_propiedades(
             los parecidos.
         direccion: Calle, número o urbanización ("Calle Kabul 7", "Cumbre del
             Sol", "La Fustera"). Sirve también para urbanizaciones y partidas
-            que no son un pueblo ni una zona. No hay dato de barbacoa fiable
-            ni de parcela vallada o balcón: dilo si lo piden.
+            que no son un pueblo ni una zona. No hay dato de parcela vallada
+            ni de balcón: dilo si lo piden.
         texto: Busca en nombre y tipo de villa.
 
     Returns:
@@ -798,8 +798,11 @@ _SECCIONES_FICHA: dict[str, list[str]] = {
     ],
     "exterior": [
         "tiene_terraza_cubierta", "tiene_terraza_descubierta",
-        "tiene_ducha_exterior", "tiene_barbacoa", "tipo_barbacoa_codigo",
-        "barbacoa_portatil_codigo", "tiene_cesped", "tiene_arbolado",
+        "tiene_ducha_exterior",
+        # Barbacoa de OV_Exterior: tiene_barbacoa es "de obra o portátil".
+        "tiene_barbacoa", "tiene_barbacoa_obra", "tiene_barbacoa_portatil",
+        "tipo_barbacoa_portatil", "gas_barbacoa", "barbacoa_plancha",
+        "tiene_cesped", "tiene_arbolado",
         "tiene_solarium", "tiene_jardin",
     ],
     "ocio": [
@@ -3076,7 +3079,12 @@ en la Costa Blanca (España). Ayudas con villas Y con información turística lo
   haberlo intentado.
 - Para una calle, un número o una urbanización ("Calle Kabul 7", "Cumbre del
   Sol", "La Fustera", "El Portet") usa el parámetro `direccion`.
-- No hay dato fiable de barbacoa, parcela vallada ni balcón: dilo claramente.
+- Barbacoa: "barbacoa" (de obra o portátil), "barbacoa de obra", "barbacoa
+  portátil" y el tipo de la portátil ("tipo_barbacoa_portatil = gas", carbón,
+  piedra, eléctrica...). En la ficha también salen el gas (bombonas, tanque) y
+  la plancha. De las barbacoas de obra no consta si son de carbón, gas o
+  eléctricas: si lo preguntan, dilo.
+- No hay dato de parcela vallada ni de balcón: dilo claramente.
 
 ## Fecha, hora y disponibilidad
 - La zona horaria del negocio y del agente es `Europe/Madrid`.
