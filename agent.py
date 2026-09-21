@@ -116,6 +116,14 @@ _RATING_MEDIO = """
 # Proyección corta a propósito: todo lo que devuelve una herramienta entra en
 # el contexto del modelo. La ficha completa de una villa concreta se pide con
 # obtener_detalle_propiedad.
+# Toda lista de villas trae las dos distancias: sin ellas, tras unas
+# alternativas el modelo llegó a inventar una ("WATERFRONT, a 400 m", y estaba
+# a 2,3 km). El mar y la playa de arena no son lo mismo (LOVELY: 600 m y 2 km).
+# El 0 es "sin registrar", no "al lado".
+_COLUMNAS_DISTANCIA = """
+            NULLIF(v.distancia_mar_m, 0) AS distancia_mar_m,
+            NULLIF(v.distancia_playa_arena_m, 0) AS distancia_playa_arena_m"""
+
 _COLUMNAS_RESUMEN = f"""
             v.nombre, v.tipovilla_nombre_comercial,
             v.capacidad_pax, v.numero_banos, v.m2_habitables,
@@ -123,7 +131,7 @@ _COLUMNAS_RESUMEN = f"""
             v.tiene_piscina_privada, v.admite_animales,
             v.tiene_internet, v.tiene_aire_acondicionado,
             v.tiene_lavadora, v.tiene_lavavajillas,
-            v.tiene_vista_mar, NULLIF(v.distancia_mar_m, 0) AS distancia_mar_m,
+            v.tiene_vista_mar,{_COLUMNAS_DISTANCIA},
             v.zona_tranquila,
             v.pueblo_cercano, v.zona,{_RATING_MEDIO},
             COUNT(*) OVER () AS total_resultados"""
@@ -1577,7 +1585,7 @@ def consultar_disponibilidad(
                 v.{_columna_habitaciones()} AS numero_habitaciones,
                 v.numero_banos,
                 v.tiene_piscina_privada,
-                v.admite_animales
+                v.admite_animales,{_COLUMNAS_DISTANCIA}
             FROM villa_dedup v
             LEFT JOIN camas c ON c.villa_id = v.villa_id
             WHERE {where}
@@ -1714,7 +1722,7 @@ def _consultar_ofertas(desde, hasta, conditions: list[str], params: list,
                 v.capacidad_pax,
                 v.{_columna_habitaciones()} AS numero_habitaciones,
                 v.numero_banos, v.tiene_piscina_privada, v.admite_animales,
-                v.tiene_vista_mar
+                v.tiene_vista_mar,{_COLUMNAS_DISTANCIA}
             FROM villa_dedup v
             LEFT JOIN camas c ON c.villa_id = v.villa_id
             WHERE {where}
@@ -3223,6 +3231,11 @@ en la Costa Blanca (España). Ayudas con villas Y con información turística lo
   si antes buscabas disponibilidad, sigue con `consultar_disponibilidad`.
   Solo quita un filtro si el usuario lo pide.
 - Nunca inventes datos. Si no hay resultados en BigQuery, sugiere alternativas.
+- Distancias: `distancia_mar_m` es hasta la costa (puede ser una zona de
+  rocas) y `distancia_playa_arena_m` hasta la playa de arena más cercana; si
+  preguntan por "la playa", da las dos. Las listas de villas traen ambas; si
+  una villa no la tiene, di que no consta. Una distancia solo vale si viene en
+  el resultado de una herramienta.
 - Muestra los datos de forma clara: nombre, ubicación, capacidad, amenidades.
 - Para decir CUÁNTOS resultados hay usa el `total` (o `total_disponibles`) que
   devuelve la herramienta, nunca el número de filas que te ha enseñado.
@@ -3355,6 +3368,12 @@ _REGLAS_GESTION = """
   pong?"), no es una búsqueda: mira su ficha con `obtener_detalle_propiedad`
   y la sección que toque (ocio, exterior, piscina, parking...). No digas que no
   tienes el dato sin haber mirado la ficha.
+- Si preguntan por un dato de villas que ya has mostrado y ese dato no viene
+  en lo que devolvió la herramienta (una distancia, un equipamiento...),
+  consúltalo en la ficha de cada una con `obtener_detalle_propiedad` (para
+  distancias, `secciones=["distancias"]`) y compáralas con esos datos. Nunca lo
+  estimes, ni lo deduzcas de otra villa, ni digas que no lo tienes sin haber
+  mirado la ficha.
 - Si preguntan por una villa en general ("háblame de", "situación de", "info
   de"), responde lo BÁSICO: ubicación, capacidad, habitaciones, camas, baños,
   piscina, metros y precio. Nada más. Llama a la vez a
