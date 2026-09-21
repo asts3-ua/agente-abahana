@@ -19,6 +19,8 @@ _HERRAMIENTAS = {
     "buscar_por_valoracion": "Valoraciones",
     "obtener_detalle_propiedad": "Ficha",
     "consultar_disponibilidad": "Disponibilidad",
+    "buscar_ofertas": "Ofertas",
+    "alternativas_villa": "Alternativas",
     "consultar_reservas": "Reservas",
     "resumen_reservas": "Resumen de reservas",
     "consultar_precios": "Precios",
@@ -78,7 +80,7 @@ def _condicion_legible(condicion: Any) -> str:
     texto = str(condicion).strip()
     for op, bonito in ((">=", " ≥ "), ("<=", " ≤ "), ("!=", " ≠ ")):
         texto = texto.replace(op, bonito)
-    texto = " ".join(texto.split())
+    texto = " ".join(texto.replace("|", " o ").split())
     palabras = []
     for palabra in texto.split(" "):
         clave = palabra.lower().removeprefix("tiene_")
@@ -120,7 +122,7 @@ def _fechas(nombre: str, args: dict) -> list[str]:
     partes = []
     desde, hasta = args.get("fecha_desde"), args.get("fecha_hasta")
     if desde or hasta:
-        if nombre == "consultar_disponibilidad" and desde and not hasta:
+        if nombre in ("consultar_disponibilidad", "buscar_ofertas") and desde and not hasta:
             partes.append(f"noche del {_dia(_fecha(desde))}" if _fecha(desde) else str(desde))
         else:
             prefijo = {"consultar_reservas": "entrada ",
@@ -153,6 +155,14 @@ def describir_llamada(nombre: str, args: dict | None) -> str | None:
     for clave, plantilla in _MINIMOS.items():
         if args.get(clave) is not None:
             partes.append(plantilla.format(f"{args[clave]}+"))
+    if args.get("presupuesto_max") is not None:
+        try:
+            importe = f"{float(args['presupuesto_max']):,.0f}".replace(",", ".")
+        except (TypeError, ValueError):
+            importe = str(args["presupuesto_max"])
+        partes.append(f"hasta {importe} €")
+    if args.get("orden") and args["orden"] != "precio":
+        partes.append(f"orden: {args['orden']}")
     if args.get("rating_min") is not None:
         partes.append(f"valoración ≥ {args['rating_min']}")
     if args.get("distancia_mar_max_m") is not None:
@@ -191,7 +201,8 @@ def describir_llamada(nombre: str, args: dict | None) -> str | None:
                   "activa_en", "anulada_desde", "anulada_hasta", "rating_min",
                   "distancia_mar_max_m", "estado_reserva", "estado_documento",
                   "excluir_canceladas", "solo_en_firme", "incluir_propietario",
-                  "agrupar_por", "secciones", "texto", "caracteristicas"}
+                  "agrupar_por", "secciones", "texto", "caracteristicas",
+                  "presupuesto_max", "orden"}
                  | set(_MINIMOS) | set(_SI_NO))
     for clave, valor in args.items():
         if clave not in conocidos:

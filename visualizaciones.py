@@ -31,6 +31,7 @@ FUENTE = "Montserrat, system-ui, -apple-system, 'Segoe UI', sans-serif"
 _HERRAMIENTAS_CON_VILLAS = {
     "buscar_propiedades", "listar_propiedades", "buscar_por_valoracion",
     "consultar_disponibilidad", "obtener_detalle_propiedad",
+    "buscar_ofertas", "alternativas_villa",
 }
 _CAMPOS_VILLA = ("nombre", "pueblo_cercano", "capacidad_pax",
                  "numero_habitaciones", "tiene_piscina_privada")

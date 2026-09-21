@@ -61,6 +61,18 @@ class DescribirLlamadaTest(unittest.TestCase):
                 "ubicacion": "Moraira",
                 "caracteristicas": ["tiene_pingpong", "sin ascensor", "num_mosquiteras>=2"]}))
 
+    def test_ofertas_con_presupuesto_y_orden(self):
+        self.assertEqual(
+            "Ofertas: Moraira · del 3 al 10 oct 2026 · 6+ personas · hasta 4.000 € · orden: margen",
+            filtros.describir_llamada("buscar_ofertas", {
+                "ubicacion": "Moraira", "fecha_desde": "2026-10-03",
+                "fecha_hasta": "2026-10-10", "capacidad_min": 6,
+                "presupuesto_max": 4000, "orden": "margen", "limite": 10}))
+
+    def test_una_o_entre_caracteristicas_se_lee_como_o(self):
+        self.assertEqual("Villas: sauna o jacuzzi", filtros.describir_llamada(
+            "buscar_propiedades", {"caracteristicas": ["tiene_sauna | tiene_jacuzzi"]}))
+
     def test_villa_concreta_y_secciones(self):
         self.assertEqual(
             "Ficha: villa ATALAYA · secciones: piscina, vistas",

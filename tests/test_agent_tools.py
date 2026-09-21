@@ -924,7 +924,17 @@ class FechaDeHoyTest(unittest.TestCase):
             self.assertIsNone(agent.fecha_de_hoy(None, peticion))
         texto = str(peticion.config.system_instruction)
         self.assertIn("lunes 21 de septiembre de 2026 (2026-09-21)", texto)
-        self.assertIn("nunca un año pasado", texto)
+        self.assertIn("septiembre (desde hoy) a diciembre son de 2026", texto)
+        self.assertIn("enero a agosto, de 2027", texto)
+        self.assertIn('"del 3 al 10 de octubre" es del 2026-10-03 al 2026-10-10', texto)
+        self.assertIn("Un día de septiembre anterior a hoy es de 2027", texto)
+
+    def test_en_diciembre_el_ejemplo_es_de_enero_del_ano_siguiente(self):
+        import datetime
+        texto = agent._texto_fecha_de_hoy(
+            datetime.datetime(2026, 12, 5, 9, 0, tzinfo=agent._TIMEZONE))
+        self.assertIn("diciembre (desde hoy) es de 2026", texto)
+        self.assertIn('"del 3 al 10 de enero" es del 2027-01-03 al 2027-01-10', texto)
 
     def test_los_tres_agentes_la_reciben(self):
         for rol, ag in agent.AGENTS.items():
@@ -973,8 +983,8 @@ class FiltroPorCualquierDatoDeFichaTest(_ConBigQueryFalso):
 
     def test_numeros_con_comparacion_como_parametro(self):
         agent.buscar_propiedades(caracteristicas=["num_mosquiteras >= 2"])
-        self.assertIn("v.num_mosquiteras >= @ficha_0", self._sql())
-        self.assertEqual(2.0, self._params()["ficha_0"])
+        self.assertIn("v.num_mosquiteras >= @ficha_0_0", self._sql())
+        self.assertEqual(2.0, self._params()["ficha_0_0"])
 
     def test_una_distancia_cero_es_sin_dato(self):
         agent.buscar_propiedades(caracteristicas=["distancia_supermercado_m <= 500"])
@@ -983,8 +993,15 @@ class FiltroPorCualquierDatoDeFichaTest(_ConBigQueryFalso):
     def test_texto_por_parametro_y_sin_inyeccion(self):
         agent.buscar_propiedades(caracteristicas=["tipo_cafetera_codigo = x' OR 1=1 --"])
         sql = self._sql()
-        self.assertIn("LOWER(COALESCE(v.tipo_cafetera_codigo, '')) LIKE LOWER(@ficha_0)", sql)
+        self.assertIn("LOWER(COALESCE(v.tipo_cafetera_codigo, '')) LIKE LOWER(@ficha_0_0)", sql)
         self.assertNotIn("OR 1=1", sql)
+
+    def test_una_o_entre_caracteristicas(self):
+        for escrito in ("sauna | pingpong", "sauna o ping pong"):
+            agent.buscar_propiedades(caracteristicas=[escrito, "num_mosquiteras >= 1"])
+            sql = self._sql()
+            self.assertIn("(v.tiene_sauna = TRUE OR v.tiene_pingpong = TRUE)", sql, escrito)
+            self.assertIn("v.num_mosquiteras >= @ficha_1_0", sql, escrito)
 
     def test_un_dato_que_no_existe_sugiere_los_parecidos_sin_consultar(self):
         r = agent.buscar_propiedades(caracteristicas=["mosquitera"])
@@ -1008,6 +1025,138 @@ class FiltroPorCualquierDatoDeFichaTest(_ConBigQueryFalso):
     def test_una_villa_concreta_se_mira_en_su_ficha(self):
         self.assertIn("No digas que no\n  tienes el dato sin haber mirado la ficha",
                       agent.INSTRUCTION_INTERNO)
+
+
+class BuscarOfertasTest(_ConBigQueryFalso):
+    """Disponibilidad + precio + características en una sola llamada."""
+
+    def _ofertas(self, **kw):
+        base = dict(fecha_desde="2099-10-03", fecha_hasta="2099-10-10")
+        return agent.buscar_ofertas(**{**base, **kw})
+
+    def test_misma_regla_de_libre_que_la_disponibilidad(self):
+        self._ofertas()
+        ofertas = self._sql()
+        agent.consultar_disponibilidad(fecha_desde="2099-10-03", fecha_hasta="2099-10-10")
+        disponibilidad = self._sql()
+        self.assertIn(agent._sql_villa_libre().strip(), ofertas)
+        self.assertIn(agent._sql_villa_libre().strip(), disponibilidad)
+
+    def test_suma_la_tarifa_de_venta_de_cada_noche_sin_la_de_salida(self):
+        self._ofertas()
+        sql = self._sql()
+        self.assertIn("t.nombre = 'PrecioVilla'", sql)
+        self.assertIn("o.fecha < @fecha_hasta", sql)
+        self.assertEqual(7, self._params()["noches"])
+
+    def test_la_larga_estancia_solo_si_llega_a_su_minimo(self):
+        self._ofertas()
+        self.assertIn("t.noches_larga = @noches AND @noches >= t.minimo_larga", self._sql())
+
+    def test_sin_compra_de_todas_las_noches_no_hay_margen(self):
+        self._ofertas()
+        self.assertIn("t.noches_con_compra = @noches", self._sql())
+
+    def test_el_presupuesto_exige_precio_de_todas_las_noches(self):
+        self._ofertas(presupuesto_max=4000)
+        primera = self.bq.query.call_args_list[0]
+        self.assertIn("precio_completo AND precio_total <= @presupuesto_max", primera[0][0])
+        valores = {p.name: p.value for p in primera[1]["job_config"].query_parameters}
+        self.assertEqual(4000.0, valores["presupuesto_max"])
+
+    def test_si_nada_entra_en_el_presupuesto_ofrece_las_mas_baratas(self):
+        romeo = _Fila(nombre="ROMEO", precio_total=5432.0, margen_total=None,
+                      precio_completo=True, larga_estancia=False,
+                      total_resultados=1, total_libres=1)
+        self.bq.query.return_value.result.side_effect = [[], [romeo]]
+        r = self._ofertas(presupuesto_max=4000)
+        self.assertEqual(0, r["total"])
+        self.assertEqual("ROMEO", r["fuera_de_presupuesto"][0]["nombre"])
+        self.assertIn("ROMEO por 5432.0 €", r["aviso"])
+        self.assertIn("4.000 €", r["aviso"])
+        sin_presupuesto = self.bq.query.call_args_list[1][0][0]
+        self.assertNotIn("@presupuesto_max", sin_presupuesto)
+
+    def test_ordena_por_precio_o_por_margen(self):
+        self._ofertas()
+        self.assertIn("ORDER BY precio_total IS NULL, precio_total, nombre", self._sql())
+        self._ofertas(orden="margen")
+        self.assertIn("ORDER BY margen_total IS NULL, margen_total DESC", self._sql())
+
+    def test_un_orden_desconocido_es_error_sin_consultar(self):
+        r = self._ofertas(orden="barato")
+        self.assertIn("error", r)
+        self.bq.query.assert_not_called()
+
+    def test_fechas_pasadas_o_al_reves_son_error_sin_consultar(self):
+        self.assertIn("pasada", agent.buscar_ofertas("2000-01-01", "2000-01-08")["error"])
+        self.assertIn("posterior", self._ofertas(fecha_hasta="2099-10-01")["error"])
+        self.bq.query.assert_not_called()
+
+    def test_filtra_como_la_busqueda(self):
+        self._ofertas(ubicacion="Moraira", capacidad_min=6, admite_animales=True,
+                      direccion="Cumbre del Sol")
+        sql = self._sql()
+        self.assertIn("LOWER(v.pueblo_cercano) LIKE LOWER(@ubicacion)", sql)
+        self.assertIn("v.capacidad_pax >= @capacidad_min", sql)
+        self.assertIn("v.admite_animales = TRUE", sql)
+        self.assertIn("LOWER(v.direccion) LIKE @direccion_0", sql)
+
+    def test_devuelve_totales_y_periodo(self):
+        self.bq.query.return_value.result.return_value = [_Fila(
+            nombre="WATERFRONT", precio_total=1287.0, margen_total=454.0,
+            precio_completo=True, larga_estancia=False, total_resultados=3,
+            total_libres=5)]
+        r = self._ofertas()
+        self.assertEqual(3, r["total"])
+        self.assertEqual(5, r["total_libres"])
+        self.assertEqual({"entrada": "2099-10-03", "salida": "2099-10-10", "noches": 7},
+                         r["periodo"])
+        self.assertNotIn("total_resultados", r["matches"][0])
+
+
+class AlternativasVillaTest(_ConBigQueryFalso):
+    """Villa pedida, otras fechas de la misma villa y villas parecidas."""
+
+    def test_nombre_ambiguo_pide_cual(self):
+        self.bq.query.return_value.result.return_value = [
+            _Fila(villa_id="1", villa_nombre="ADORA"),
+            _Fila(villa_id="2", villa_nombre="ADORABLE")]
+        r = agent.alternativas_villa("ADO", "2099-10-03", "2099-10-10")
+        self.assertEqual(["ADORA", "ADORABLE"], r["villas_coincidentes"])
+
+    def test_villa_que_no_existe(self):
+        r = agent.alternativas_villa("NOEXISTE", "2099-10-03", "2099-10-10")
+        self.assertIn("No hay ninguna villa", r["error"])
+
+    def test_consultas_de_la_villa_parecidas_y_otras_fechas(self):
+        villa = _Fila(villa_id="v1", villa_nombre="ATALAYA", zona="Moraira",
+                      pueblo_cercano="Moraira", capacidad_pax=8,
+                      tiene_piscina_privada=True)
+        self.bq.query.return_value.result.side_effect = (
+            lambda *a, **k: [villa] if self.bq.query.call_count == 1 else [])
+        r = agent.alternativas_villa("Atalaya", "2099-10-03", "2099-10-10")
+        self.assertIsNone(r.get("error"))
+        self.assertFalse(r["villa_pedida"]["libre"])
+        consultas = [c[0][0] for c in self.bq.query.call_args_list]
+        parecidas = next(q for q in consultas if "v.villa_id != @villa_id" in q)
+        self.assertIn("v.capacidad_pax >= @capacidad_min", parecidas)
+        self.assertIn("LOWER(v.zona) = LOWER(@zona_ref)", parecidas)
+        self.assertIn("v.tiene_piscina_privada = TRUE", parecidas)
+        self.assertIn("ABS(precio_total - COALESCE(", parecidas)
+        otras = next(q for q in consultas if "GENERATE_DATE_ARRAY" in q)
+        self.assertIn(agent._sql_villa_libre("c.entrada", "c.salida").strip(), otras)
+
+
+class OfertasSoloParaGestionTest(unittest.TestCase):
+
+    def test_el_cliente_no_ve_precios_de_compra_ni_margenes(self):
+        nombres = {t.__name__ for t in agent.agent_cliente.tools}
+        self.assertNotIn("buscar_ofertas", nombres)
+        self.assertNotIn("alternativas_villa", nombres)
+        for rol in ("interno", "admin"):
+            nombres = {t.__name__ for t in agent.AGENTS[rol].tools}
+            self.assertTrue({"buscar_ofertas", "alternativas_villa"} <= nombres, rol)
 
 
 class InstruccionesMapasTest(unittest.TestCase):

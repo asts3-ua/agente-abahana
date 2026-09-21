@@ -360,6 +360,8 @@ def _condiciones_ficha(condiciones: list[str] | None,
 
     Solo admite columnas de la ficha (lista blanca del esquema real) y los
     valores van siempre como parámetros: nada del texto llega al SQL tal cual.
+    Un elemento con alternativas ("sauna | jacuzzi", "sauna o jacuzzi") se
+    cumple con cualquiera de ellas.
     """
     if not condiciones:
         return []
@@ -369,59 +371,71 @@ def _condiciones_ficha(condiciones: list[str] | None,
         return f"No se pudo leer la ficha para filtrar: {e}"
     sql: list[str] = []
     for i, condicion in enumerate(condiciones):
-        m = _CONDICION_FICHA.match(str(condicion))
-        campo = _resolver_campo_ficha(m.group("campo"), columnas) if m else None
-        if campo is None:
-            parecidas = difflib.get_close_matches(
-                _clave_ficha(m.group("campo") if m else str(condicion)),
-                list(columnas), n=5, cutoff=0.5)
-            return (f"No hay ningún dato de la ficha llamado '{condicion}'."
-                    + (f" ¿Quizá: {', '.join(parecidas)}?" if parecidas else "")
-                    + " Usa el nombre de la columna, p. ej. 'tiene_sauna' o "
-                    "'num_mosquiteras >= 2'.")
-        negado, op, valor = bool(m.group("neg")), m.group("op"), m.group("valor")
-        tipo, col, nombre = columnas[campo], f"v.{campo}", f"ficha_{i}"
-        if tipo == "BOOLEAN":
-            if op in ("=", "!=") and valor:
-                verdad = _clave_ficha(valor) in ("true", "si", "1", "yes")
-                negado = negado ^ (not verdad) ^ (op == "!=")
-            elif op:
-                return f"'{campo}' es sí/no: úsalo solo ('{campo}') o con 'sin {campo}'."
-            sql.append(f"COALESCE({col}, FALSE) = FALSE" if negado else f"{col} = TRUE")
-        elif tipo in ("INTEGER", "FLOAT", "NUMERIC"):
-            if not op:
-                sql.append(f"COALESCE({col}, 0) = 0" if negado else f"{col} > 0")
-                continue
-            try:
-                numero = float(valor.replace(",", "."))
-            except ValueError:
-                return f"'{campo}' es un número y '{valor}' no lo es."
-            sql.append(f"{col} {'<>' if op == '!=' else op} @{nombre}")
-            params.append(bigquery.ScalarQueryParameter(nombre, "FLOAT64", numero))
-            # Como en distancia_mar_m: 0 es "sin registrar", no "al lado".
-            if campo.startswith("distancia_") and op in ("<", "<="):
-                sql.append(f"{col} > 0")
-        elif tipo == "DATE":
-            if not op:
-                return f"'{campo}' es una fecha: compárala, p. ej. '{campo} >= 2026-01-01'."
-            try:
-                fecha = datetime.date.fromisoformat(valor.strip())
-            except ValueError:
-                return f"'{valor}' no es una fecha AAAA-MM-DD."
-            sql.append(f"{col} {'<>' if op == '!=' else op} @{nombre}")
-            params.append(bigquery.ScalarQueryParameter(nombre, "DATE", fecha))
-        else:  # STRING y códigos
-            if not op:
-                sql.append(f"NULLIF(TRIM({col}), '') IS NULL" if negado
-                           else f"NULLIF(TRIM({col}), '') IS NOT NULL")
-            elif op in ("=", "!="):
-                comparacion = "NOT LIKE" if (op == "!=") ^ negado else "LIKE"
-                sql.append(f"LOWER(COALESCE({col}, '')) {comparacion} LOWER(@{nombre})")
-                params.append(bigquery.ScalarQueryParameter(
-                    nombre, "STRING", f"%{valor.strip()}%"))
-            else:
-                return f"'{campo}' es texto: usa '=' o '!='."
+        alternativas = [a for a in re.split(r"\s*\|\s*|\s+o\s+", str(condicion)) if a]
+        partes = []
+        for j, alternativa in enumerate(alternativas):
+            parte = _condicion_ficha(alternativa, f"ficha_{i}_{j}", columnas, params)
+            if parte.startswith("ERROR:"):
+                return parte.removeprefix("ERROR:")
+            partes.append(parte)
+        sql.append(partes[0] if len(partes) == 1 else f"({' OR '.join(partes)})")
     return sql
+
+
+def _condicion_ficha(condicion: str, nombre: str, columnas: dict[str, str],
+                     params: list) -> str:
+    """SQL de una condición suelta; un error empieza por "ERROR:"."""
+    m = _CONDICION_FICHA.match(condicion)
+    campo = _resolver_campo_ficha(m.group("campo"), columnas) if m else None
+    if campo is None:
+        parecidas = difflib.get_close_matches(
+            _clave_ficha(m.group("campo") if m else condicion),
+            list(columnas), n=5, cutoff=0.5)
+        return ("ERROR:"
+                f"No hay ningún dato de la ficha llamado '{condicion}'."
+                + (f" ¿Quizá: {', '.join(parecidas)}?" if parecidas else "")
+                + " Usa el nombre de la columna, p. ej. 'tiene_sauna' o "
+                "'num_mosquiteras >= 2'.")
+    negado, op, valor = bool(m.group("neg")), m.group("op"), m.group("valor")
+    tipo, col = columnas[campo], f"v.{campo}"
+    if tipo == "BOOLEAN":
+        if op in ("=", "!=") and valor:
+            verdad = _clave_ficha(valor) in ("true", "si", "1", "yes")
+            negado = negado ^ (not verdad) ^ (op == "!=")
+        elif op:
+            return f"ERROR:'{campo}' es sí/no: úsalo solo ('{campo}') o con 'sin {campo}'."
+        return f"COALESCE({col}, FALSE) = FALSE" if negado else f"{col} = TRUE"
+    if tipo in ("INTEGER", "FLOAT", "NUMERIC"):
+        if not op:
+            return f"COALESCE({col}, 0) = 0" if negado else f"{col} > 0"
+        try:
+            numero = float(valor.replace(",", "."))
+        except ValueError:
+            return f"ERROR:'{campo}' es un número y '{valor}' no lo es."
+        params.append(bigquery.ScalarQueryParameter(nombre, "FLOAT64", numero))
+        sql = f"{col} {'<>' if op == '!=' else op} @{nombre}"
+        # Como en distancia_mar_m: 0 es "sin registrar", no "al lado".
+        if campo.startswith("distancia_") and op in ("<", "<="):
+            sql = f"({sql} AND {col} > 0)"
+        return sql
+    if tipo == "DATE":
+        if not op:
+            return f"ERROR:'{campo}' es una fecha: compárala, p. ej. '{campo} >= 2026-01-01'."
+        try:
+            fecha = datetime.date.fromisoformat(valor.strip())
+        except ValueError:
+            return f"ERROR:'{valor}' no es una fecha AAAA-MM-DD."
+        params.append(bigquery.ScalarQueryParameter(nombre, "DATE", fecha))
+        return f"{col} {'<>' if op == '!=' else op} @{nombre}"
+    # STRING y códigos
+    if not op:
+        return (f"NULLIF(TRIM({col}), '') IS NULL" if negado
+                else f"NULLIF(TRIM({col}), '') IS NOT NULL")
+    if op in ("=", "!="):
+        comparacion = "NOT LIKE" if (op == "!=") ^ negado else "LIKE"
+        params.append(bigquery.ScalarQueryParameter(nombre, "STRING", f"%{valor.strip()}%"))
+        return f"LOWER(COALESCE({col}, '')) {comparacion} LOWER(@{nombre})"
+    return f"ERROR:'{campo}' es texto: usa '=' o '!='."
 
 
 # Lo que precede al nombre de la calle y cambia de una ficha a otra ("Calle",
@@ -497,6 +511,8 @@ def buscar_propiedades(
         metros_habitables_min: Metros habitables mínimos.
         piscina: True para exigir piscina privada.
         admite_animales: True para propiedades que admiten mascotas.
+            Si NO llevan mascotas, omítelo: False dejaría fuera las
+            villas que sí las admiten, que también les sirven.
         internet: True para exigir wifi/internet.
         aire_acondicionado: True para exigir aire acondicionado (dato registrado
             a nivel de salón, puede no cubrir el resto de la villa).
@@ -517,7 +533,9 @@ def buscar_propiedades(
             ascensor"); un número o una fecha con comparación
             ("num_mosquiteras >= 2", "distancia_supermercado_m <= 500",
             "m2_parcela > 1000"); un texto o código con = ("tipo_cafetera_codigo
-            = nespresso"). Los nombres son las columnas de la ficha (las de
+            = nespresso"). Para "X o Y" pon un solo elemento "X | Y"
+            (cada elemento de la lista se exige a la vez). Los nombres son
+            las columnas de la ficha (las de
             obtener_detalle_propiedad); si uno no existe, el error sugiere
             los parecidos.
         direccion: Calle, número o urbanización ("Calle Kabul 7", "Cumbre del
@@ -1349,6 +1367,51 @@ def buscar_internet(consulta: str) -> dict[str, Any]:
     return {"respuesta": texto, "fuentes": fuentes}
 
 
+# Una villa está libre entre @fecha_desde (entrada) y @fecha_hasta (salida)
+# para @noches noches si ninguna reserva la ocupa y el calendario no la
+# bloquea. La comparten disponibilidad, ofertas y alternativas: si cambia la
+# regla, cambia en las tres.
+_SQL_VILLA_LIBRE = f"""
+  AND NOT EXISTS (
+      SELECT 1
+      FROM {TABLA_RESERVAS} r
+      WHERE r.villa_id = v.villa_id
+        AND COALESCE(r.es_activo, TRUE) = TRUE
+        -- Ni una cancelada ni una perdida (presupuesto que no se
+        -- cerró) ocupan la villa.
+        AND UPPER(COALESCE(r.estado_reserva, '')) NOT IN (
+            'CA', 'CANCELACION', 'CANCELADA', 'PE', 'PERDIDA'
+        )
+        AND UPPER(COALESCE(r.estado_documento, '')) NOT IN (
+            'VO', 'ANULADA', 'ANULADO'
+        )
+        AND r.fecha_entrada < @fecha_hasta
+        -- Sin fecha de salida se asume que ocupa al menos la noche
+        -- de entrada: dar por libre una villa ocupada es peor error.
+        AND (r.fecha_salida > @fecha_desde
+             OR (r.fecha_salida IS NULL
+                 AND r.fecha_entrada >= @fecha_desde))
+  )
+  -- El calendario también bloquea: uso del propietario, cierres y
+  -- ocupaciones que no están en Reserva. Un día sin estado conocido
+  -- cuenta como no libre. La estancia mínima la marca el día de
+  -- entrada.
+  AND NOT EXISTS (
+      SELECT 1
+      FROM {TABLA_OCUPACION} o
+      WHERE o.villa_id = v.villa_id
+        AND o.es_activo = TRUE
+        AND o.fecha >= @fecha_desde
+        AND o.fecha < @fecha_hasta
+        AND (
+            UPPER(COALESCE(o.tipo_ocupacion, '')) != 'LIBRE'
+            OR (o.fecha = @fecha_desde
+                AND COALESCE(o.estancia_minima_noches, 0) > @noches)
+        )
+  )
+"""
+
+
 def consultar_disponibilidad(
     fecha_desde: str,
     fecha_hasta: str | None = None,
@@ -1386,6 +1449,8 @@ def consultar_disponibilidad(
             habitaciones_min: una habitación puede tener varias camas.
         piscina: True para exigir piscina privada.
         admite_animales: True para villas que admiten mascotas.
+            Si NO llevan mascotas, omítelo: False dejaría fuera las
+            villas que sí las admiten, que también les sirven.
         vista_mar: True para exigir vista al mar.
         parking: True para villas con algún aparcamiento.
         caracteristicas: CUALQUIER otra característica de la villa (sauna,
@@ -1509,43 +1574,7 @@ def consultar_disponibilidad(
             FROM villa_dedup v
             LEFT JOIN camas c ON c.villa_id = v.villa_id
             WHERE {where}
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM {TABLA_RESERVAS} r
-                  WHERE r.villa_id = v.villa_id
-                    AND COALESCE(r.es_activo, TRUE) = TRUE
-                    -- Ni una cancelada ni una perdida (presupuesto que no se
-                    -- cerró) ocupan la villa.
-                    AND UPPER(COALESCE(r.estado_reserva, '')) NOT IN (
-                        'CA', 'CANCELACION', 'CANCELADA', 'PE', 'PERDIDA'
-                    )
-                    AND UPPER(COALESCE(r.estado_documento, '')) NOT IN (
-                        'VO', 'ANULADA', 'ANULADO'
-                    )
-                    AND r.fecha_entrada < @fecha_hasta
-                    -- Sin fecha de salida se asume que ocupa al menos la noche
-                    -- de entrada: dar por libre una villa ocupada es peor error.
-                    AND (r.fecha_salida > @fecha_desde
-                         OR (r.fecha_salida IS NULL
-                             AND r.fecha_entrada >= @fecha_desde))
-              )
-              -- El calendario también bloquea: uso del propietario, cierres y
-              -- ocupaciones que no están en Reserva. Un día sin estado conocido
-              -- cuenta como no libre. La estancia mínima la marca el día de
-              -- entrada.
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM {TABLA_OCUPACION} o
-                  WHERE o.villa_id = v.villa_id
-                    AND o.es_activo = TRUE
-                    AND o.fecha >= @fecha_desde
-                    AND o.fecha < @fecha_hasta
-                    AND (
-                        UPPER(COALESCE(o.tipo_ocupacion, '')) != 'LIBRE'
-                        OR (o.fecha = @fecha_desde
-                            AND COALESCE(o.estancia_minima_noches, 0) > @noches)
-                    )
-              )
+              {_sql_villa_libre()}
         )
         SELECT *, COUNT(*) OVER() AS total_disponibles
         FROM disponibles
@@ -1587,6 +1616,451 @@ def consultar_disponibilidad(
             "salida": hasta.isoformat(),
             "zona_horaria": "Europe/Madrid",
         },
+    }
+
+
+def _sql_villa_libre(desde: str = "@fecha_desde", hasta: str = "@fecha_hasta",
+                     noches: str = "@noches") -> str:
+    """_SQL_VILLA_LIBRE con otras fechas: parámetros o columnas de la consulta."""
+    return (_SQL_VILLA_LIBRE.replace("@fecha_desde", desde)
+            .replace("@fecha_hasta", hasta).replace("@noches", noches))
+
+
+def _estancia(fecha_desde: str, fecha_hasta: str | None):
+    """(entrada, salida, error) de una estancia futura; salida exclusiva."""
+    hoy = _ahora_local().date()
+    try:
+        desde = _parse_iso_date(fecha_desde, "fecha_desde")
+        hasta = (_parse_iso_date(fecha_hasta, "fecha_hasta") if fecha_hasta
+                 else desde + datetime.timedelta(days=1))
+    except ValueError as exc:
+        return None, None, str(exc)
+    if desde < hoy:
+        return None, None, (
+            "No se puede consultar una fecha pasada. La fecha actual en "
+            f"Europe/Madrid es {hoy.isoformat()}.")
+    if hasta <= desde:
+        return None, None, "fecha_hasta (salida) debe ser posterior a fecha_desde."
+    return desde, hasta, None
+
+
+# Precio de la estancia a partir de la tarifa diaria: la estándar noche a
+# noche, o la de larga estancia si la estancia llega a su mínimo. La compra
+# se suma igual para dar el margen (solo interno y admin tienen estas
+# herramientas).
+_SQL_TARIFA_ESTANCIA = f"""
+    SELECT
+        o.villa_id,
+        COUNTIF(t.tipo != 'lt' AND t.es_venta) AS noches_con_precio,
+        SUM(IF(t.tipo != 'lt' AND t.es_venta, t.precio_final, 0)) AS venta_std,
+        SUM(IF(t.tipo != 'lt' AND NOT t.es_venta, t.precio_final, 0)) AS compra_std,
+        COUNTIF(t.tipo != 'lt' AND NOT t.es_venta) AS noches_con_compra,
+        COUNTIF(t.tipo = 'lt' AND t.es_venta) AS noches_larga,
+        SUM(IF(t.tipo = 'lt' AND t.es_venta, t.precio_final, 0)) AS venta_larga,
+        SUM(IF(t.tipo = 'lt' AND NOT t.es_venta, t.precio_final, 0)) AS compra_larga,
+        COUNTIF(t.tipo = 'lt' AND NOT t.es_venta) AS noches_con_compra_larga,
+        MAX(IF(t.tipo = 'lt', t.estancia_minima_noches, NULL)) AS minimo_larga
+    FROM {TABLA_OCUPACION} o
+    JOIN {TABLA_TARIFA_DIA} t ON t.ocupacion_id = o.id
+    WHERE o.es_activo = TRUE
+      AND t.es_activo = TRUE
+      AND t.nombre = '{_CONCEPTO_VILLA}'
+      AND t.es_venta IS NOT NULL
+      AND t.precio_final IS NOT NULL
+      AND o.fecha >= @fecha_desde
+      AND o.fecha < @fecha_hasta
+"""
+
+_ORDEN_OFERTAS = {
+    "precio": "precio_total IS NULL, precio_total, nombre",
+    "precio_desc": "precio_total IS NULL, precio_total DESC, nombre",
+    "margen": "margen_total IS NULL, margen_total DESC, nombre",
+    "capacidad": "capacidad_pax DESC, precio_total IS NULL, precio_total",
+}
+
+
+def _consultar_ofertas(desde, hasta, conditions: list[str], params: list,
+                       orden_sql: str, limite: int,
+                       presupuesto_max: float | None = None) -> dict[str, Any]:
+    """Villas libres en la estancia, con su precio total; lanza si falla BigQuery."""
+    noches = (hasta - desde).days
+    params = [
+        *params,
+        bigquery.ScalarQueryParameter("fecha_desde", "DATE", desde),
+        bigquery.ScalarQueryParameter("fecha_hasta", "DATE", hasta),
+        bigquery.ScalarQueryParameter("noches", "INT64", noches),
+    ]
+    filtro_presupuesto = ""
+    if presupuesto_max is not None:
+        # Solo las que tienen precio todas las noches: sin él no se puede
+        # prometer que entren en el presupuesto.
+        filtro_presupuesto = ("WHERE precio_completo AND precio_total <= "
+                              "@presupuesto_max")
+        params.append(bigquery.ScalarQueryParameter(
+            "presupuesto_max", "FLOAT64", float(presupuesto_max)))
+    where = " AND ".join(conditions) if conditions else "TRUE"
+    query = f"""
+        WITH{_CTE_VILLAS_VIGENTES},{_CTE_CAMAS},
+        libres AS (
+            SELECT
+                v.villa_id, v.nombre, v.pueblo_cercano, v.zona,
+                v.capacidad_pax,
+                v.{_columna_habitaciones()} AS numero_habitaciones,
+                v.numero_banos, v.tiene_piscina_privada, v.admite_animales,
+                v.tiene_vista_mar
+            FROM villa_dedup v
+            LEFT JOIN camas c ON c.villa_id = v.villa_id
+            WHERE {where}
+              {_sql_villa_libre()}
+        ),
+        tarifas AS ({_SQL_TARIFA_ESTANCIA}
+              AND o.villa_id IN (SELECT villa_id FROM libres)
+            GROUP BY o.villa_id
+        ),
+        ofertas AS (
+            SELECT
+                l.*,
+                COALESCE(t.noches_con_precio, 0) = @noches AS precio_completo,
+                (t.noches_larga = @noches AND @noches >= t.minimo_larga)
+                    AS larga_estancia,
+                t.minimo_larga,
+                IF(t.noches_larga = @noches AND @noches >= t.minimo_larga,
+                   t.venta_larga, NULLIF(t.venta_std, 0)) AS precio_total,
+                -- Sin la compra de todas las noches no hay margen: saldría
+                -- igual al precio de venta.
+                IF(t.noches_larga = @noches AND @noches >= t.minimo_larga,
+                   IF(t.noches_con_compra_larga = @noches,
+                      t.venta_larga - t.compra_larga, NULL),
+                   IF(t.noches_con_compra = @noches AND t.noches_con_precio = @noches,
+                      t.venta_std - t.compra_std, NULL)) AS margen_total
+            FROM libres l
+            LEFT JOIN tarifas t USING (villa_id)
+        )
+        SELECT
+            * EXCEPT (villa_id),
+            ROUND(SAFE_DIVIDE(precio_total, @noches), 2) AS precio_medio_noche,
+            ROUND(SAFE_DIVIDE(margen_total, precio_total) * 100, 1) AS margen_pct,
+            COUNT(*) OVER () AS total_resultados,
+            (SELECT COUNT(*) FROM ofertas) AS total_libres
+        FROM ofertas
+        {filtro_presupuesto}
+        ORDER BY {orden_sql}
+        LIMIT {min(max(1, limite), 50)}
+    """
+    rows = [_row_to_dict(r) for r in _bq.query(
+        query,
+        job_config=bigquery.QueryJobConfig(
+            query_parameters=params,
+            # Cruza reservas, calendario y tarifa diaria.
+            maximum_bytes_billed=_BILLING_CAP_DIARIO,
+        ),
+    ).result()]
+    total = int(rows[0]["total_resultados"]) if rows else 0
+    total_libres = int(rows[0]["total_libres"]) if rows else None
+    for fila in rows:
+        fila.pop("total_resultados", None)
+        fila.pop("total_libres", None)
+        for campo in ("precio_total", "margen_total"):
+            fila[campo] = _redondear(fila.get(campo))
+    return {"matches": rows, "total": total, "total_libres": total_libres,
+            "periodo": {"entrada": desde.isoformat(), "salida": hasta.isoformat(),
+                        "noches": (hasta - desde).days}}
+
+
+def buscar_ofertas(
+    fecha_desde: str,
+    fecha_hasta: str,
+    ubicacion: str | None = None,
+    zona: str | None = None,
+    capacidad_min: int | None = None,
+    habitaciones_min: int | None = None,
+    piscina: bool | None = None,
+    admite_animales: bool | None = None,
+    vista_mar: bool | None = None,
+    parking: bool | None = None,
+    caracteristicas: list[str] | None = None,
+    direccion: str | None = None,
+    presupuesto_max: float | None = None,
+    orden: str = "precio",
+    limite: int = 10,
+) -> dict[str, Any]:
+    """Villas LIBRES en unas fechas CON el precio total de la estancia.
+
+    Es la herramienta para Reservas y venta: responde en una sola llamada
+    "qué tengo en Moraira del 3 al 10 de octubre para 6, con mascotas, por
+    menos de 4.000 €". Úsala siempre que pregunten disponibilidad junto con
+    precio, presupuesto o "qué opciones hay"; no encadenes
+    consultar_disponibilidad + consultar_precios villa a villa.
+
+    La disponibilidad sigue las mismas reglas que consultar_disponibilidad
+    (reservas, bloqueos del calendario y estancia mínima). El precio es la
+    suma de la tarifa de venta de cada noche, o la de larga estancia si la
+    estancia llega a su mínimo; no incluye extras (energía, aire).
+
+    Args:
+        fecha_desde: Día de entrada (YYYY-MM-DD).
+        fecha_hasta: Día de salida (YYYY-MM-DD, no se cobra esa noche).
+        ubicacion: Pueblo cercano.
+        zona: Zona geográfica.
+        capacidad_min: Personas mínimas.
+        habitaciones_min: Habitaciones mínimas.
+        piscina: True para exigir piscina privada.
+        admite_animales: True si viajan con mascotas.
+            Si NO llevan mascotas, omítelo: False dejaría fuera las
+            villas que sí las admiten, que también les sirven.
+        vista_mar: True para exigir vistas al mar.
+        parking: True para exigir algún aparcamiento.
+        caracteristicas: Cualquier otra característica de la ficha, como en
+            buscar_propiedades ("sauna", "jardín", "num_mosquiteras >= 2").
+        direccion: Calle o urbanización.
+        presupuesto_max: Precio TOTAL máximo de la estancia en euros. Deja
+            fuera las villas sin precio para todas las noches.
+        orden: 'precio' (defecto, más barata primero), 'precio_desc',
+            'margen' (más margen primero) o 'capacidad'.
+        limite: Cuántas ofertas mostrar (defecto 10, máx. 50).
+
+    Returns:
+        'matches' (villas con precio_total, precio_medio_noche,
+        larga_estancia, margen_total, margen_pct, precio_completo y sus
+        datos), 'total' (las que cumplen todo), 'total_libres' (libres antes
+        del presupuesto) y 'periodo'. Si ninguna entra en el presupuesto pero
+        hay libres, trae 'fuera_de_presupuesto' (las 3 más baratas) y un
+        'aviso'. Si 'total' es 0, usa alternativas_villa o relaja un filtro
+        y dilo.
+    """
+    desde, hasta, error = _estancia(fecha_desde, fecha_hasta)
+    if error:
+        return {"matches": [], "total": 0, "error": error}
+    conditions: list[str] = []
+    params: list[bigquery.ScalarQueryParameter] = []
+    for nombre, valor, sql in (
+        ("ubicacion", ubicacion, "LOWER(v.pueblo_cercano) LIKE LOWER(@ubicacion)"),
+        ("zona", zona, "LOWER(v.zona) LIKE LOWER(@zona)"),
+    ):
+        if valor:
+            conditions.append(sql)
+            params.append(bigquery.ScalarQueryParameter(
+                nombre, "STRING", f"%{valor.strip()}%"))
+    if capacidad_min is not None:
+        conditions.append("v.capacidad_pax >= @capacidad_min")
+        params.append(bigquery.ScalarQueryParameter("capacidad_min", "INT64", capacidad_min))
+    if habitaciones_min is not None:
+        conditions.append(f"v.{_columna_habitaciones()} >= @habitaciones_min")
+        params.append(bigquery.ScalarQueryParameter(
+            "habitaciones_min", "INT64", habitaciones_min))
+    if piscina is not None:
+        conditions.append(f"v.tiene_piscina_privada = {'TRUE' if piscina else 'FALSE'}")
+    if admite_animales is not None:
+        conditions.append(f"v.admite_animales = {'TRUE' if admite_animales else 'FALSE'}")
+    conditions += _condiciones_equipamiento(vista_mar=vista_mar, parking=parking)
+    extra = _condiciones_ficha(caracteristicas, params)
+    if isinstance(extra, str):
+        return {"matches": [], "total": 0, "error": extra}
+    conditions += extra
+    if direccion:
+        conditions += _condiciones_direccion(direccion, params)
+    if orden not in _ORDEN_OFERTAS:
+        return {"matches": [], "total": 0, "error": (
+            f"orden '{orden}' no válido: usa {', '.join(_ORDEN_OFERTAS)}.")}
+    try:
+        resultado = _consultar_ofertas(desde, hasta, conditions, list(params),
+                                       _ORDEN_OFERTAS[orden], limite, presupuesto_max)
+        if presupuesto_max is not None and not resultado["total"]:
+            # Nada entra en el presupuesto: lo que un vendedor necesita saber
+            # es si hay algo libre por poco más, no solo "no hay".
+            fuera = _consultar_ofertas(desde, hasta, conditions, list(params),
+                                       _ORDEN_OFERTAS["precio"], 3)
+            if fuera["matches"]:
+                resultado["fuera_de_presupuesto"] = fuera["matches"]
+                barata = fuera["matches"][0]
+                resultado["aviso"] = (
+                    f"Ninguna entra en {presupuesto_max:,.0f} €, pero hay "
+                    f"{fuera['total']} libre(s) que cumplen el resto; la más "
+                    f"barata es {barata['nombre']} por {barata.get('precio_total')} €. "
+                    "Ofrécelas diciendo que superan el presupuesto."
+                ).replace(",", ".")
+        return resultado
+    except Exception as e:
+        log.exception("buscar_ofertas: error en BigQuery")
+        return {"matches": [], "total": 0, "error": str(e)}
+
+
+# Cuántos días antes y después de la entrada pedida se buscan otras fechas
+# libres de la misma villa, y cuántas se proponen.
+_DIAS_OTRAS_FECHAS = 14
+_MAX_OTRAS_FECHAS = 5
+
+
+def alternativas_villa(
+    villa_nombre: str,
+    fecha_desde: str,
+    fecha_hasta: str,
+    capacidad_min: int | None = None,
+    limite: int = 5,
+) -> dict[str, Any]:
+    """Si una villa está libre y, si no, qué ofrecer en su lugar.
+
+    Úsala cuando el cliente pide una villa concreta para unas fechas
+    ("¿está libre Atalaya del 3 al 10 de octubre?") o cuando una búsqueda no
+    da nada y hay que proponer alternativas. Devuelve en una sola llamada:
+    - villa_pedida: si está libre esas fechas y su precio total.
+    - otras_fechas: estancias de la misma duración de esa villa que están
+      libres, empezando hasta 14 días antes o después, con su precio.
+    - matches: villas parecidas libres en esas mismas fechas (misma zona,
+      capacidad suficiente y piscina si la pedida la tiene), de precio más
+      parecido primero.
+
+    Args:
+        villa_nombre: Villa que pide el cliente.
+        fecha_desde: Día de entrada (YYYY-MM-DD).
+        fecha_hasta: Día de salida (YYYY-MM-DD).
+        capacidad_min: Personas del grupo; si se omite, la capacidad de la
+            villa pedida.
+        limite: Cuántas villas parecidas proponer (defecto 5).
+    """
+    desde, hasta, error = _estancia(fecha_desde, fecha_hasta)
+    if error:
+        return {"matches": [], "error": error}
+    noches = (hasta - desde).days
+    try:
+        filas = [_row_to_dict(r) for r in _bq.query(
+            f"""
+            WITH{_CTE_VILLAS_VIGENTES}
+            SELECT v.villa_id, v.nombre AS villa_nombre, v.zona,
+                   v.pueblo_cercano, v.capacidad_pax, v.tiene_piscina_privada
+            FROM villa_dedup v
+            WHERE LOWER(v.nombre) LIKE LOWER(@villa_nombre)
+            """,
+            job_config=bigquery.QueryJobConfig(
+                query_parameters=[bigquery.ScalarQueryParameter(
+                    "villa_nombre", "STRING", f"%{villa_nombre.strip()}%")],
+                maximum_bytes_billed=_BILLING_CAP,
+            ),
+        ).result()]
+        filas, nombre, candidatas = _una_sola_villa(filas, villa_nombre)
+        if candidatas:
+            return {"matches": [], **_error_villa_ambigua(villa_nombre, candidatas)}
+        if not filas:
+            return {"matches": [], "error": f"No hay ninguna villa llamada '{villa_nombre}'."}
+        villa = filas[0]
+        villa_id = villa["villa_id"]
+        id_villa = bigquery.ScalarQueryParameter("villa_id", "STRING", villa_id)
+
+        # Precio de la villa pedida en esas noches aunque no esté libre: es la
+        # mejor referencia de lo que el cliente quiere pagar.
+        referencia_sql = (
+            f"(SELECT NULLIF(venta_std, 0) FROM ({_SQL_TARIFA_ESTANCIA} "
+            "AND o.villa_id = @villa_id GROUP BY o.villa_id))")
+
+        def _pedida():
+            return _consultar_ofertas(desde, hasta, ["v.villa_id = @villa_id"],
+                                      [id_villa], _ORDEN_OFERTAS["precio"], 1)
+
+        def _referencia():
+            filas_ref = _bq.query(
+                f"SELECT {referencia_sql} AS ref",
+                job_config=bigquery.QueryJobConfig(
+                    query_parameters=[
+                        id_villa,
+                        bigquery.ScalarQueryParameter("fecha_desde", "DATE", desde),
+                        bigquery.ScalarQueryParameter("fecha_hasta", "DATE", hasta),
+                    ],
+                    maximum_bytes_billed=_BILLING_CAP_DIARIO,
+                ),
+            ).result()
+            return next((fila.ref for fila in filas_ref), None)
+
+        def _otras_fechas():
+            return [_row_to_dict(r) for r in _bq.query(
+                f"""
+                WITH{_CTE_VILLAS_VIGENTES},
+                candidatas AS (
+                    SELECT d AS entrada, DATE_ADD(d, INTERVAL @noches DAY) AS salida
+                    FROM UNNEST(GENERATE_DATE_ARRAY(@ini, @fin)) AS d
+                    WHERE d != @fecha_desde
+                ),
+                precio_dia AS (
+                    SELECT o.fecha,
+                           MAX(IF(t.tipo != 'lt' AND t.es_venta, t.precio_final, NULL)) AS venta
+                    FROM {TABLA_OCUPACION} o
+                    JOIN {TABLA_TARIFA_DIA} t ON t.ocupacion_id = o.id
+                    WHERE o.villa_id = @villa_id AND o.es_activo = TRUE
+                      AND t.es_activo = TRUE AND t.nombre = '{_CONCEPTO_VILLA}'
+                      AND o.fecha >= @ini
+                      AND o.fecha < DATE_ADD(@fin, INTERVAL @noches DAY)
+                    GROUP BY o.fecha
+                )
+                SELECT c.entrada, c.salida,
+                       (SELECT ROUND(SUM(p.venta), 2) FROM precio_dia p
+                        WHERE p.fecha >= c.entrada AND p.fecha < c.salida) AS precio_total,
+                       (SELECT COUNT(p.venta) FROM precio_dia p
+                        WHERE p.fecha >= c.entrada AND p.fecha < c.salida) = @noches
+                           AS precio_completo
+                FROM candidatas c
+                JOIN villa_dedup v ON v.villa_id = @villa_id
+                WHERE TRUE
+                  {_sql_villa_libre("c.entrada", "c.salida")}
+                ORDER BY ABS(DATE_DIFF(c.entrada, @fecha_desde, DAY)), c.entrada
+                LIMIT {_MAX_OTRAS_FECHAS}
+                """,
+                job_config=bigquery.QueryJobConfig(
+                    query_parameters=[
+                        id_villa,
+                        bigquery.ScalarQueryParameter("fecha_desde", "DATE", desde),
+                        bigquery.ScalarQueryParameter("noches", "INT64", noches),
+                        bigquery.ScalarQueryParameter("ini", "DATE", max(
+                            _ahora_local().date(),
+                            desde - datetime.timedelta(days=_DIAS_OTRAS_FECHAS))),
+                        bigquery.ScalarQueryParameter(
+                            "fin", "DATE", desde + datetime.timedelta(days=_DIAS_OTRAS_FECHAS)),
+                    ],
+                    maximum_bytes_billed=_BILLING_CAP_DIARIO,
+                ),
+            ).result()]
+
+        def _similares():
+            conditions = ["v.villa_id != @villa_id", "v.capacidad_pax >= @capacidad_min"]
+            params = [id_villa, bigquery.ScalarQueryParameter(
+                "capacidad_min", "INT64", capacidad_min or villa.get("capacidad_pax") or 1)]
+            if villa.get("zona"):
+                conditions.append("LOWER(v.zona) = LOWER(@zona_ref)")
+                params.append(bigquery.ScalarQueryParameter("zona_ref", "STRING", villa["zona"]))
+            if villa.get("tiene_piscina_privada"):
+                conditions.append("v.tiene_piscina_privada = TRUE")
+            # Precio más parecido primero; sin referencia, más barata primero.
+            orden_sql = (f"precio_total IS NULL, ABS(precio_total - COALESCE("
+                         f"{referencia_sql}, 0)), nombre")
+            return _consultar_ofertas(desde, hasta, conditions, params, orden_sql, limite)
+
+        # Son independientes: en paralelo tarda lo que la más lenta, no la suma.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            f_pedida, f_ref = pool.submit(_pedida), pool.submit(_referencia)
+            f_otras, f_similares = pool.submit(_otras_fechas), pool.submit(_similares)
+            pedida, referencia = f_pedida.result(), f_ref.result()
+            otras, similares = f_otras.result(), f_similares.result()
+
+        libre = bool(pedida["matches"])
+        villa_pedida = {
+            "nombre": nombre, "zona": villa.get("zona"),
+            "pueblo_cercano": villa.get("pueblo_cercano"),
+            "capacidad_pax": villa.get("capacidad_pax"),
+            "libre": libre,
+            **({k: pedida["matches"][0].get(k) for k in (
+                "precio_total", "precio_medio_noche", "larga_estancia",
+                "margen_total", "margen_pct", "precio_completo")} if libre else {}),
+        }
+        otras = sorted(otras, key=lambda f: str(f.get("entrada")))
+    except Exception as e:
+        log.exception("alternativas_villa: error en BigQuery")
+        return {"matches": [], "error": str(e)}
+
+    return {
+        "villa_pedida": villa_pedida,
+        "precio_referencia": _redondear(referencia) if referencia else None,
+        "otras_fechas": otras,
+        "matches": similares["matches"],
+        "total_similares": similares["total"],
+        "periodo": similares["periodo"],
     }
 
 
@@ -2563,6 +3037,9 @@ en la Costa Blanca (España). Ayudas con villas Y con información turística lo
   "duerme a 8 en camas" es `camas_min=8`. Una habitación puede tener varias camas.
 - Muestra el rating_medio cuando uses buscar_por_valoracion.
 - Puedes combinar varios filtros en una sola llamada.
+- Un filtro negativo solo si el usuario EXCLUYE algo ("que no admita
+  mascotas"). "No llevan mascotas" o "no necesitan piscina" quitan el filtro,
+  no lo invierten.
 - En una pregunta de seguimiento sobre una LISTA de villas ("¿y cuáles tienen
   jacuzzi?", "¿y para 8?") MANTÉN los filtros de la búsqueda anterior (fechas,
   pueblo, personas, mascotas...) y añade el nuevo, con la misma herramienta:
@@ -2591,7 +3068,9 @@ en la Costa Blanca (España). Ayudas con villas Y con información turística lo
 - `buscar_propiedades` y `consultar_disponibilidad` filtran por CUALQUIER
   característica de la ficha con `caracteristicas=[...]`: sauna, ping pong,
   jardín, jacuzzi, billar, garaje, mosquiteras ("num_mosquiteras >= 2"),
-  distancias ("distancia_supermercado_m <= 500"), "sin ascensor"... Si el
+  distancias ("distancia_supermercado_m <= 500"), "sin ascensor"... Cada
+  elemento se exige a la vez; para "sauna o jacuzzi" usa un solo elemento
+  "sauna | jacuzzi". Si el
   usuario pide "villas con X", pon X en `caracteristicas` y deja que la
   herramienta diga si existe. NUNCA digas que no hay filtro para algo sin
   haberlo intentado.
@@ -2725,6 +3204,22 @@ _REGLAS_GESTION = """
   los códigos van dentro de las instrucciones de activación y desactivación.
 - No saques estos datos si no te los piden.
 
+## Reservas y venta: ofertas y alternativas
+- Si preguntan qué hay libre en unas fechas CON precio, presupuesto u "opciones"
+  ("qué tengo en Moraira del 3 al 10 para 6 con mascotas, hasta 4.000 €"),
+  usa `buscar_ofertas`: da en una sola llamada las villas libres con el precio
+  total de la estancia, el precio medio por noche y el margen. No encadenes
+  `consultar_disponibilidad` y `consultar_precios` villa a villa.
+- Si piden una villa concreta para unas fechas ("¿está libre Atalaya del 3 al
+  10?"), usa `alternativas_villa`: dice si está libre y su precio, y si no, qué
+  fechas cercanas tiene libres y qué villas parecidas lo están.
+- Si una búsqueda no da nada, no te quedes en "no hay": propón alternativas
+  (`alternativas_villa`, o repite `buscar_ofertas` relajando un filtro y di
+  cuál).
+- Al presentar ofertas da siempre el precio total de la estancia y por noche;
+  si `larga_estancia` es true, di que se aplica la tarifa de larga estancia, y
+  si `precio_completo` es false, que faltan precios de alguna noche.
+
 ## Reservas y facturación
 - La ausencia de filas en `consultar_reservas` no demuestra disponibilidad.
 - `consultar_reservas` filtra por entrada, por salida (`salida_desde`,
@@ -2751,6 +3246,13 @@ _HERRAMIENTAS_GESTION = """
   amenidades (internet, aire acondicionado, lavadora, lavavajillas) y desglose
   real de los baños (bañera, ducha, jacuzzi, bidé, en-suite). Úsala cuando el
   usuario pregunte por una villa concreta o pida más detalles.
+- `buscar_ofertas(fecha_desde, fecha_hasta, ...)`: villas libres con el precio
+  total de la estancia y el margen, filtradas por zona, personas,
+  características y presupuesto (`presupuesto_max`), ordenadas por precio o
+  por margen. Es la herramienta principal para vender.
+- `alternativas_villa(villa_nombre, fecha_desde, fecha_hasta)`: si una villa
+  está libre y su precio; si no, fechas cercanas libres de esa villa y villas
+  parecidas libres, de precio más parecido primero.
 - `consultar_precios(villa_nombre, ...)`: precio de venta, precio de compra y
   margen noche a noche, tarifa de larga estancia y extras.
 - `calendario_villa(villa_nombre, fecha_desde, ...)`: calendario de ocupación de
@@ -2895,14 +3397,36 @@ def fecha_de_hoy(callback_context, llm_request) -> None:
     "no puedo consultar fechas pasadas". Con la fecha delante no hace falta
     esa llamada, y además es un paso del modelo menos.
     """
-    hoy = _ahora_local()
-    llm_request.append_instructions([
-        f"## Hoy\nHoy es {_DIAS[hoy.weekday()]} {hoy.day} de "
-        f"{_MESES_LARGOS[hoy.month - 1]} de {hoy.year} ({hoy.date().isoformat()}), "
-        f"{hoy:%H:%M} en Europe/Madrid. Una fecha sin año (\"del 3 al 10 de "
-        "octubre\") es la próxima vez que llega ese día, nunca un año pasado."
-    ])
+    llm_request.append_instructions([_texto_fecha_de_hoy(_ahora_local())])
     return None
+
+
+def _texto_fecha_de_hoy(hoy: datetime.datetime) -> str:
+    """La fecha de hoy y a qué año pertenece cada mes si no lo dicen.
+
+    "La próxima vez que llega ese día" no bastó: el modelo seguía poniendo
+    2024 o 2027 a "del 3 al 10 de octubre". Con el año de cada mes escrito
+    no tiene que deducir nada.
+    """
+    este, siguiente = hoy.year, hoy.year + 1
+    meses_este = _MESES_LARGOS[hoy.month - 1:]
+    meses_siguiente = _MESES_LARGOS[:hoy.month - 1]
+    anios = (f"{meses_este[0]} (desde hoy) es de {este}" if len(meses_este) == 1
+             else f"{meses_este[0]} (desde hoy) a {meses_este[-1]} son de {este}")
+    if meses_siguiente:
+        anios += f"; {meses_siguiente[0]} a {meses_siguiente[-1]}, de {siguiente}"
+    ejemplo_mes = _MESES_LARGOS[hoy.month % 12]
+    ejemplo_anio = este if hoy.month < 12 else siguiente
+    return (
+        f"## Hoy\nHoy es {_DIAS[hoy.weekday()]} {hoy.day} de "
+        f"{_MESES_LARGOS[hoy.month - 1]} de {este} ({hoy.date().isoformat()}), "
+        f"{hoy:%H:%M} en Europe/Madrid.\n"
+        f"Si el usuario no dice el año: {anios}. Por ejemplo, \"del 3 al 10 "
+        f"de {ejemplo_mes}\" es del {ejemplo_anio}-{hoy.month % 12 + 1:02d}-03 al "
+        f"{ejemplo_anio}-{hoy.month % 12 + 1:02d}-10. Un día de "
+        f"{_MESES_LARGOS[hoy.month - 1]} anterior a hoy es de {siguiente}. "
+        "Nunca uses una fecha pasada."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2963,6 +3487,8 @@ agent_interno = Agent(
         buscar_por_valoracion,
         obtener_detalle_propiedad,
         consultar_disponibilidad,
+        buscar_ofertas,
+        alternativas_villa,
         consultar_reservas,
         resumen_reservas,
         # Solo interno y admin: consultar_precios expone precio de compra y
@@ -2998,6 +3524,8 @@ agent_admin = Agent(
         buscar_por_valoracion,
         obtener_detalle_propiedad,
         consultar_disponibilidad,
+        buscar_ofertas,
+        alternativas_villa,
         consultar_reservas,
         resumen_reservas,
         # Solo interno y admin: consultar_precios expone precio de compra y
