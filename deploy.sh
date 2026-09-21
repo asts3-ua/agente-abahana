@@ -13,6 +13,7 @@ REGION="europe-west1"
 SERVICE="abahana-agent"
 SA_NAME="abahana-agent-sa"
 SA_EMAIL="${SA_NAME}@${PROJECT}.iam.gserviceaccount.com"
+STREAMLIT_SECRET="streamlit-secrets"   # secrets.toml de Streamlit en Secret Manager
 CONV_DATASET="agent_analytics"   # conversaciones del asistente (chat_turns)
 CONV_LOCATION="EU"               # misma ubicación que bronze_raw/silver_clean/gold_bi
 
@@ -114,8 +115,15 @@ rm -f "$ACL_TMP"
 
 # ── 3. Build + deploy en Cloud Run ───────────────────────────────────────────
 echo "Desplegando en Cloud Run (puede tardar)..."
+# Los secretos de Streamlit (OAuth) vienen de Secret Manager y se montan en
+# ~/.streamlit, NO en /app/.streamlit: un volumen sustituye el directorio
+# entero, y ahí vive el config.toml que copia el Dockerfile. Montado en
+# /app/.streamlit, el tema desaparecía y la app heredaba el del navegador.
+# --set-secrets sustituye además los montajes que hubiera, incluidos los dos
+# duplicados que se añadieron a mano desde la consola.
 gcloud run deploy "$SERVICE" \
     --source . \
+    --set-secrets="/root/.streamlit/secrets.toml=${STREAMLIT_SECRET}:latest" \
     --project="$PROJECT" \
     --region="$REGION" \
     --service-account="$SA_EMAIL" \
