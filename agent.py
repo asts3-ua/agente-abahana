@@ -1845,6 +1845,7 @@ def consultar_reservas(
 
 def resumen_reservas(
     agrupar_por: str = "villa",
+    villa_nombre: str | None = None,
     ubicacion: str | None = None,
     zona: str | None = None,
     fecha_desde: str | None = None,
@@ -1856,10 +1857,13 @@ def resumen_reservas(
     """Estadísticas agregadas de reservas: conteos, importes y noches medias.
 
     Usa para preguntas analíticas: cuántas reservas tiene cada villa,
-    qué zona factura más, qué meses tienen más actividad, evolución anual.
+    cuánto factura, qué zona factura más, qué meses tienen más actividad,
+    evolución anual. Para la facturación de una villa concreta pasa
+    villa_nombre (con agrupar_por='mes' o 'ano' sale su evolución).
 
     Args:
         agrupar_por: Dimensión: 'villa' (defecto), 'zona', 'mes', 'ano'.
+        villa_nombre: Nombre o parte del nombre de una villa concreta.
         ubicacion: Filtra por pueblo cercano (Altea, Calpe, Moraira…).
         zona: Filtra por zona geográfica.
         fecha_desde: Fecha de entrada desde (YYYY-MM-DD).
@@ -1878,7 +1882,8 @@ def resumen_reservas(
 
     Returns:
         Diccionario con 'resumen' (lista con dimension, total_reservas,
-        importe_total, importe_medio, noches_medias, monedas), 'count',
+        importe_total, importe_medio, noches_medias, noches_totales,
+        importe_por_noche, monedas), 'count',
         'total_grupos' (si es mayor que count, hay grupos que no se muestran)
         y, si los importes mezclan monedas, 'aviso_monedas'.
     """
@@ -1893,6 +1898,12 @@ def resumen_reservas(
 
     conditions: list[str] = ["r.fecha_entrada IS NOT NULL"]
     params: list[bigquery.ScalarQueryParameter] = []
+
+    if villa_nombre:
+        conditions.append("LOWER(r.villa_nombre) LIKE LOWER(@villa_nombre)")
+        params.append(bigquery.ScalarQueryParameter(
+            "villa_nombre", "STRING", f"%{villa_nombre.strip()}%"
+        ))
 
     if ubicacion:
         conditions.append("LOWER(v.pueblo_cercano) LIKE LOWER(@ubicacion)")
@@ -1954,6 +1965,14 @@ def resumen_reservas(
             ROUND(SUM(r.importe_total), 2) AS importe_total,
             ROUND(AVG(r.importe_total), 2) AS importe_medio,
             ROUND(AVG(DATE_DIFF(r.fecha_salida, r.fecha_entrada, DAY)), 1) AS noches_medias,
+            -- Hay reservas con la salida igual o anterior a la entrada: sin
+            -- acotar a 0 restarían noches y dispararían el ingreso por noche.
+            SUM(GREATEST(DATE_DIFF(r.fecha_salida, r.fecha_entrada, DAY), 0))
+                AS noches_totales,
+            ROUND(SAFE_DIVIDE(
+                SUM(r.importe_total),
+                SUM(GREATEST(DATE_DIFF(r.fecha_salida, r.fecha_entrada, DAY), 0))
+            ), 2) AS importe_por_noche,
             MIN(r.fecha_entrada) AS primera_entrada,
             MAX(r.fecha_entrada) AS ultima_entrada,
             ARRAY_AGG(DISTINCT r.moneda_id IGNORE NULLS) AS monedas,

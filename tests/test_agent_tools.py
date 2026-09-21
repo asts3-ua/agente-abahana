@@ -736,6 +736,41 @@ class FiltrosDeFichaEnBusquedaTest(unittest.TestCase):
         self.assertIn("COALESCE(v.tiene_vista_mar, FALSE) = FALSE", sql)
 
 
+class IngresosPorVillaTest(unittest.TestCase):
+    """resumen_reservas ya daba la facturación por villa; le faltaba poder
+    centrarse en una villa y el ingreso por noche."""
+
+    def setUp(self):
+        self.bq = Mock()
+        self.bq.query.return_value.result.return_value = []
+        patcher = patch.object(agent, "_bq", self.bq)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _params(self):
+        return {p.name: p.value for p in
+                self.bq.query.call_args[1]["job_config"].query_parameters}
+
+    def test_filtra_por_una_villa(self):
+        agent.resumen_reservas(villa_nombre="ADORA")
+        self.assertIn("LOWER(r.villa_nombre) LIKE LOWER(@villa_nombre)",
+                      _consulta_ejecutada(self.bq))
+        self.assertEqual("%ADORA%", self._params()["villa_nombre"])
+
+    def test_devuelve_noches_totales_e_ingreso_por_noche(self):
+        agent.resumen_reservas()
+        sql = _consulta_ejecutada(self.bq)
+        self.assertIn("AS noches_totales", sql)
+        self.assertIn("AS importe_por_noche", sql)
+
+    def test_las_fechas_incoherentes_no_restan_noches(self):
+        # Hay reservas con salida anterior o igual a la entrada: sin acotar,
+        # restarían noches y dispararían el ingreso por noche.
+        agent.resumen_reservas()
+        self.assertIn("GREATEST(DATE_DIFF(r.fecha_salida, r.fecha_entrada, DAY), 0)",
+                      _consulta_ejecutada(self.bq))
+
+
 class EtiquetasYRolesTest(unittest.TestCase):
     def test_cada_codigo_acepta_sus_grafias(self):
         self.assertIn("BLOQUEADA", agent._ESTADOS_RESERVA["BO"])
