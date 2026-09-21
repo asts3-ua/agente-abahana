@@ -789,5 +789,237 @@ class EtiquetasYRolesTest(unittest.TestCase):
             self.assertIn("consultar_feedback_negativo", nombres)
 
 
+
+class _ConBigQueryFalso(unittest.TestCase):
+
+    def setUp(self):
+        self.bq = Mock()
+        self.bq.query.return_value.result.return_value = []
+        patcher = patch.object(agent, "_bq", self.bq)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        col = patch.object(agent, "_columna_habitaciones",
+                           return_value="numero_habitaciones")
+        col.start()
+        self.addCleanup(col.stop)
+
+    def _sql(self):
+        return _consulta_ejecutada(self.bq)
+
+    def _params(self):
+        return {p.name: p.value for p in
+                self.bq.query.call_args[1]["job_config"].query_parameters}
+
+
+class ReservasPorSalidaYOcupacionTest(_ConBigQueryFalso):
+    """"¿Qué sale hoy?", "¿qué está ocupado?": antes solo había fecha de entrada."""
+
+    def test_filtra_por_fecha_de_salida(self):
+        agent.consultar_reservas(salida_desde="2026-09-21", salida_hasta="2026-09-21")
+        sql = self._sql()
+        self.assertIn("r.fecha_salida >= @salida_desde", sql)
+        self.assertIn("r.fecha_salida <= @salida_hasta", sql)
+        self.assertNotIn("r.fecha_entrada >= @fecha_desde", sql)
+        self.assertIn("ORDER BY r.fecha_salida", sql)
+
+    def test_ocupada_en_una_fecha_no_cuenta_la_noche_de_salida(self):
+        agent.consultar_reservas(activa_en="2026-09-21")
+        self.assertIn("r.fecha_entrada <= @activa_en AND r.fecha_salida > @activa_en",
+                      self._sql())
+
+    def test_por_defecto_una_perdida_no_es_una_reserva(self):
+        agent.consultar_reservas(activa_en="2026-09-21")
+        self.assertIn("'PE', 'PERDIDA'", self._sql())
+
+    def test_devuelve_anulacion_y_estado_de_limpieza(self):
+        agent.consultar_reservas()
+        sql = self._sql()
+        self.assertIn("r.fecha_anulacion", sql)
+        self.assertIn("r.estado_limpieza", sql)
+
+
+class CanceladasTest(_ConBigQueryFalso):
+    """"Canceladas en los últimos 30 días" daba 6 o ninguna según la llamada."""
+
+    def test_filtra_por_fecha_de_anulacion_y_no_las_excluye(self):
+        agent.consultar_reservas(anulada_desde="2026-08-22", estado_reserva="CA")
+        sql = self._sql()
+        self.assertIn("r.fecha_anulacion >= @anulada_desde", sql)
+        self.assertNotIn("NOT IN ('CA', 'CANCELACION', 'CANCELADA'", sql)
+        self.assertIn("ORDER BY r.fecha_anulacion DESC", sql)
+
+    def test_pedir_un_estado_no_queda_anulado_por_el_filtro_por_defecto(self):
+        agent.consultar_reservas(estado_reserva="CA")
+        sql = self._sql()
+        self.assertIn("UPPER(r.estado_reserva) IN", sql)
+        self.assertNotIn("NOT IN ('CA', 'CANCELACION', 'CANCELADA'", sql)
+
+
+class EquipamientoYDireccionTest(_ConBigQueryFalso):
+    """Jacuzzi, billar, parking o una calle: datos que había y no se filtraban."""
+
+    def test_filtra_por_jacuzzi_billar_y_futbolin(self):
+        agent.buscar_propiedades(jacuzzi=True, billar=True, futbolin=True)
+        sql = self._sql()
+        for columna in ("tiene_jacuzzi", "tiene_billar", "tiene_futbolin"):
+            self.assertIn(f"v.{columna} = TRUE", sql)
+
+    def test_parking_vale_cualquier_aparcamiento(self):
+        agent.buscar_propiedades(parking=True)
+        sql = self._sql()
+        for columna in ("tiene_garaje", "tiene_parking_calle",
+                        "tiene_parking_cubierto", "tiene_parking_descubierto"):
+            self.assertIn(f"v.{columna}", sql)
+
+    def test_sin_filtro_de_barbacoa_mientras_el_dato_no_sea_fiable(self):
+        self.assertNotIn("barbacoa", agent._EQUIPAMIENTO)
+
+    def test_la_direccion_ignora_el_tipo_de_via(self):
+        agent.buscar_propiedades(direccion="Calle Kabul 7")
+        valores = self._params()
+        self.assertEqual("%kabul%", valores["direccion_0"])
+        self.assertNotIn("%calle%", valores.values())
+
+    def test_el_numero_de_la_calle_no_encaja_en_otro_numero(self):
+        agent.buscar_propiedades(direccion="Cabo de Palos 4")
+        numero = [v for v in self._params().values() if "4" in v][0]
+        import re
+        self.assertRegex("Calle Cabo de Palos 4 - 03724", numero)
+        self.assertIsNone(re.search(numero, "Calle Cabo de Palos 14 - 03710"))
+        self.assertIn("REGEXP_CONTAINS(v.direccion", self._sql())
+
+    def test_la_disponibilidad_filtra_por_equipamiento_y_direccion(self):
+        agent.consultar_disponibilidad(
+            fecha_desde="2099-10-09", fecha_hasta="2099-10-12",
+            vista_mar=True, admite_animales=True, jacuzzi=True,
+            direccion="Cumbre del Sol")
+        sql = self._sql()
+        self.assertIn("v.tiene_vista_mar = TRUE", sql)
+        self.assertIn("v.admite_animales = TRUE", sql)
+        self.assertIn("v.tiene_jacuzzi = TRUE", sql)
+        self.assertIn("LOWER(v.direccion) LIKE @direccion_0", sql)
+
+
+class SinRazonamientoTest(unittest.TestCase):
+
+    def test_los_tres_agentes_responden_sin_razonamiento_previo(self):
+        for rol, ag in agent.AGENTS.items():
+            self.assertEqual(
+                0, ag.generate_content_config.thinking_config.thinking_budget, rol)
+
+
+class InstruccionesMapasTest(unittest.TestCase):
+
+    def test_el_agente_sabe_que_la_app_pinta_mapas_y_graficos(self):
+        for instruccion in (agent.INSTRUCTION_CLIENTE, agent.INSTRUCTION_INTERNO,
+                            agent.INSTRUCTION_ADMIN):
+            self.assertIn("NUNCA digas que no puedes hacer\n  mapas o gráficos", instruccion)
+
+
+class ArgumentosDelModeloTest(unittest.TestCase):
+    """El modelo a veces manda una lista donde la herramienta espera texto."""
+
+    def setUp(self):
+        from google.adk.tools import FunctionTool
+        self.detalle = FunctionTool(agent.obtener_detalle_propiedad)
+
+    def test_una_lista_de_un_elemento_se_convierte_en_texto(self):
+        args = {"nombre": ["Villa Atalaya"]}
+        self.assertIsNone(agent.normalizar_argumentos(self.detalle, args, None))
+        self.assertEqual("Atalaya", args["nombre"])
+
+    def test_varios_valores_piden_una_llamada_por_cada_uno(self):
+        args = {"nombre": ["ATALAYA", "ROMEO"]}
+        respuesta = agent.normalizar_argumentos(self.detalle, args, None)
+        self.assertIn("una vez por cada uno", respuesta["error"])
+        self.assertIn("ATALAYA, ROMEO", respuesta["error"])
+
+    def test_los_parametros_que_si_son_listas_no_se_tocan(self):
+        args = {"nombre": "ATALAYA", "secciones": ["piscina", "vistas"]}
+        self.assertIsNone(agent.normalizar_argumentos(self.detalle, args, None))
+        self.assertEqual(["piscina", "vistas"], args["secciones"])
+
+    def test_un_numero_en_un_parametro_de_texto_pasa_a_texto(self):
+        args = {"nombre": 25}
+        agent.normalizar_argumentos(self.detalle, args, None)
+        self.assertEqual("25", args["nombre"])
+
+    def test_quita_villa_delante_del_nombre(self):
+        from google.adk.tools import FunctionTool
+        args = {"villa_nombre": "Villa Atalaya"}
+        agent.normalizar_argumentos(FunctionTool(agent.consultar_precios), args, None)
+        self.assertEqual("Atalaya", args["villa_nombre"])
+
+    def test_un_nombre_que_solo_es_villa_no_se_vacia(self):
+        from google.adk.tools import FunctionTool
+        args = {"villa_nombre": "Villa"}
+        agent.normalizar_argumentos(FunctionTool(agent.consultar_precios), args, None)
+        self.assertEqual("Villa", args["villa_nombre"])
+
+    def test_todos_los_agentes_llevan_las_salvaguardas(self):
+        for rol, ag in agent.AGENTS.items():
+            self.assertIs(agent.normalizar_argumentos, ag.before_tool_callback, rol)
+            self.assertIs(agent.error_de_herramienta, ag.on_tool_error_callback, rol)
+
+
+class ErrorDeHerramientaTest(unittest.TestCase):
+    """Un fallo dentro de una herramienta no debe tumbar la respuesta."""
+
+    def test_el_error_vuelve_al_modelo_como_dato(self):
+        tool = Mock()
+        tool.name = "consultar_reservas"
+        respuesta = agent.error_de_herramienta(
+            tool, {}, None, AttributeError("'list' object has no attribute 'strip'"))
+        self.assertIn("consultar_reservas", respuesta["error"])
+        self.assertIn("AttributeError", respuesta["error"])
+
+    def test_el_turno_sigue_con_una_lista_en_un_parametro_de_texto(self):
+        """De punta a punta con ADK: la llamada que antes fallaba ya no corta."""
+        import asyncio
+        from google.adk.models import BaseLlm, LlmResponse
+        from google.adk.runners import Runner
+        from google.adk.sessions import InMemorySessionService
+        from google.genai import types
+
+        recibido = {}
+
+        def ficha(nombre: str) -> dict:
+            recibido["nombre"] = nombre
+            return {"matches": [{"nombre": nombre.strip()}], "count": 1}
+
+        class ModeloFalso(BaseLlm):
+            async def generate_content_async(self, llm_request, stream=False):
+                ya_llamo = any(
+                    p.function_response for c in llm_request.contents for p in c.parts or [])
+                if ya_llamo:
+                    parte = types.Part(text="Villa Atalaya está en Jávea.")
+                else:
+                    parte = types.Part(function_call=types.FunctionCall(
+                        name="ficha", args={"nombre": ["Villa Atalaya"]}))
+                yield LlmResponse(content=types.Content(role="model", parts=[parte]))
+
+        prueba = agent.Agent(
+            name="prueba", model=ModeloFalso(model="falso"), instruction="",
+            tools=[ficha],
+            before_tool_callback=agent.normalizar_argumentos,
+            on_tool_error_callback=agent.error_de_herramienta,
+        )
+
+        async def conversar():
+            sesiones = InMemorySessionService()
+            await sesiones.create_session(app_name="t", user_id="u", session_id="s")
+            runner = Runner(agent=prueba, app_name="t", session_service=sesiones)
+            textos = []
+            async for evento in runner.run_async(
+                user_id="u", session_id="s",
+                new_message=types.Content(role="user", parts=[types.Part(text="hola")]),
+            ):
+                if evento.is_final_response() and evento.content:
+                    textos += [p.text for p in evento.content.parts if p.text]
+            return "".join(textos)
+
+        self.assertEqual("Villa Atalaya está en Jávea.", asyncio.run(conversar()))
+        self.assertEqual("Atalaya", recibido["nombre"])
+
 if __name__ == "__main__":
     unittest.main()

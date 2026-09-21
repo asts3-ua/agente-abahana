@@ -16,6 +16,8 @@ import logging
 import os
 import re
 import time
+import types
+import typing
 from typing import Any
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
@@ -264,6 +266,74 @@ def listar_propiedades() -> dict[str, Any]:
     return buscar_propiedades()
 
 
+# Equipamiento de la ficha por el que se puede filtrar: parámetro -> expresión.
+# La barbacoa falta a propósito: el dato de la ficha no es fiable (discrepa en
+# 88 de 209 villas) y el bueno, el de OV_Exterior, aún no llega a esta tabla.
+_EQUIPAMIENTO = {
+    "internet": "v.tiene_internet",
+    "aire_acondicionado": "v.tiene_aire_acondicionado",
+    "lavadora": "v.tiene_lavadora",
+    "lavavajillas": "v.tiene_lavavajillas",
+    "vista_mar": "v.tiene_vista_mar",
+    "zona_tranquila": "v.zona_tranquila",
+    "gimnasio": "v.tiene_gimnasio",
+    "accesible": "v.apto_movilidad_reducida",
+    "jacuzzi": "v.tiene_jacuzzi",
+    "billar": "v.tiene_billar",
+    "futbolin": "v.tiene_futbolin",
+    "garaje": "v.tiene_garaje",
+    "parking": ("(v.tiene_garaje OR v.tiene_parking_calle "
+                "OR v.tiene_parking_cubierto OR v.tiene_parking_descubierto)"),
+    "terraza": "(v.tiene_terraza_cubierta OR v.tiene_terraza_descubierta)",
+}
+
+
+def _condiciones_equipamiento(**filtros: bool | None) -> list[str]:
+    """Exigirlo compara contra TRUE; no exigirlo trata el dato ausente como
+    ausencia, para no descartar las villas sin ficha."""
+    condiciones = []
+    for nombre, valor in filtros.items():
+        if valor is None:
+            continue
+        expresion = _EQUIPAMIENTO[nombre]
+        condiciones.append(
+            f"{expresion} = TRUE" if valor
+            else f"COALESCE({expresion}, FALSE) = FALSE"
+        )
+    return condiciones
+
+
+# Lo que precede al nombre de la calle y cambia de una ficha a otra ("Calle",
+# "Carrer", "C/", "Urb."): se ignora para que "Calle Kabul 7" encuentre
+# "Carrer Kabul, 7".
+_PREFIJOS_DIRECCION = {
+    "calle", "carrer", "c", "cl", "avenida", "avinguda", "avda", "av",
+    "urbanizacion", "urbanización", "urb", "partida", "pda", "pdta", "cami",
+    "camí", "camino", "de", "del", "la", "el", "los", "las", "en", "n", "nº",
+}
+
+
+def _condiciones_direccion(direccion: str, params: list) -> list[str]:
+    """Cada palabra de la dirección pedida tiene que aparecer en la de la villa."""
+    palabras = [
+        p for p in re.findall(r"[^\W\d_]+|\d+", direccion.lower())
+        if p not in _PREFIJOS_DIRECCION and (len(p) > 1 or p.isdigit())
+    ]
+    condiciones = []
+    for i, palabra in enumerate(palabras[:6]):
+        if palabra.isdigit():
+            # Número entero: el 4 no puede encajar en el 14 ni en el 03724.
+            condiciones.append(
+                f"REGEXP_CONTAINS(v.direccion, @direccion_{i})")
+            valor = rf"(^|[^0-9]){palabra}([^0-9]|$)"
+        else:
+            condiciones.append(f"LOWER(v.direccion) LIKE @direccion_{i}")
+            valor = f"%{palabra}%"
+        params.append(bigquery.ScalarQueryParameter(
+            f"direccion_{i}", "STRING", valor))
+    return condiciones
+
+
 def buscar_propiedades(
     ubicacion: str | None = None,
     zona: str | None = None,
@@ -283,6 +353,13 @@ def buscar_propiedades(
     zona_tranquila: bool | None = None,
     gimnasio: bool | None = None,
     accesible: bool | None = None,
+    jacuzzi: bool | None = None,
+    billar: bool | None = None,
+    futbolin: bool | None = None,
+    parking: bool | None = None,
+    garaje: bool | None = None,
+    terraza: bool | None = None,
+    direccion: str | None = None,
     texto: str | None = None,
 ) -> dict[str, Any]:
     """Busca propiedades aplicando cualquier combinación de filtros.
@@ -312,6 +389,17 @@ def buscar_propiedades(
         zona_tranquila: True para zonas tranquilas.
         gimnasio: True para villas con gimnasio.
         accesible: True para villas aptas para movilidad reducida.
+        jacuzzi: True para villas con jacuzzi.
+        billar: True para villas con mesa de billar.
+        futbolin: True para villas con futbolín.
+        parking: True para villas con algún aparcamiento (garaje, plaza
+            cubierta, descubierta o en la calle).
+        garaje: True para exigir garaje cerrado.
+        terraza: True para villas con terraza (cubierta o descubierta).
+        direccion: Calle, número o urbanización ("Calle Kabul 7", "Cumbre del
+            Sol", "La Fustera"). Sirve también para urbanizaciones y partidas
+            que no son un pueblo ni una zona. No hay dato de barbacoa fiable
+            ni de parcela vallada o balcón: dilo si lo piden.
         texto: Busca en nombre y tipo de villa.
 
     Returns:
@@ -360,23 +448,16 @@ def buscar_propiedades(
         conditions.append(f"v.admite_animales = {'TRUE' if admite_animales else 'FALSE'}")
 
     # Las amenidades vienen de la ficha técnica, integrada en la villa.
-    # Exigirla compara contra TRUE; no exigirla trata el dato ausente como
-    # ausencia, para no descartar las villas sin ficha.
-    for parametro, columna in (
-        (internet, "tiene_internet"),
-        (aire_acondicionado, "tiene_aire_acondicionado"),
-        (lavadora, "tiene_lavadora"),
-        (lavavajillas, "tiene_lavavajillas"),
-        (vista_mar, "tiene_vista_mar"),
-        (zona_tranquila, "zona_tranquila"),
-        (gimnasio, "tiene_gimnasio"),
-        (accesible, "apto_movilidad_reducida"),
-    ):
-        if parametro is not None:
-            conditions.append(
-                f"v.{columna} = TRUE" if parametro
-                else f"COALESCE(v.{columna}, FALSE) = FALSE"
-            )
+    conditions += _condiciones_equipamiento(
+        internet=internet, aire_acondicionado=aire_acondicionado,
+        lavadora=lavadora, lavavajillas=lavavajillas, vista_mar=vista_mar,
+        zona_tranquila=zona_tranquila, gimnasio=gimnasio, accesible=accesible,
+        jacuzzi=jacuzzi, billar=billar, futbolin=futbolin, parking=parking,
+        garaje=garaje, terraza=terraza,
+    )
+
+    if direccion:
+        conditions += _condiciones_direccion(direccion, params)
 
     if distancia_mar_max_m is not None:
         # Sin COALESCE a propósito: si no sabemos la distancia no podemos
@@ -1150,6 +1231,13 @@ def consultar_disponibilidad(
     habitaciones_min: int | None = None,
     camas_min: int | None = None,
     piscina: bool | None = None,
+    admite_animales: bool | None = None,
+    vista_mar: bool | None = None,
+    jacuzzi: bool | None = None,
+    billar: bool | None = None,
+    futbolin: bool | None = None,
+    parking: bool | None = None,
+    direccion: str | None = None,
     limite: int = 20,
 ) -> dict[str, Any]:
     """Busca villas libres en un periodo futuro y devuelve el total exacto.
@@ -1171,6 +1259,11 @@ def consultar_disponibilidad(
         camas_min: Número mínimo de camas reales. No es lo mismo que
             habitaciones_min: una habitación puede tener varias camas.
         piscina: True para exigir piscina privada.
+        admite_animales: True para villas que admiten mascotas.
+        vista_mar: True para exigir vista al mar.
+        jacuzzi, billar, futbolin: True para exigir ese equipamiento.
+        parking: True para villas con algún aparcamiento.
+        direccion: Calle o urbanización (ver buscar_propiedades).
         limite: Máximo de villas a mostrar (el total siempre es exacto).
 
     Returns:
@@ -1255,6 +1348,16 @@ def consultar_disponibilidad(
         conditions.append(
             f"v.tiene_piscina_privada = {'TRUE' if piscina else 'FALSE'}"
         )
+    if admite_animales is not None:
+        conditions.append(
+            f"v.admite_animales = {'TRUE' if admite_animales else 'FALSE'}"
+        )
+    conditions += _condiciones_equipamiento(
+        vista_mar=vista_mar, jacuzzi=jacuzzi, billar=billar,
+        futbolin=futbolin, parking=parking,
+    )
+    if direccion:
+        conditions += _condiciones_direccion(direccion, params)
 
     limite = min(max(1, limite), 50)
     where = " AND ".join(conditions) if conditions else "TRUE"
@@ -1710,6 +1813,11 @@ def consultar_reservas(
     piscina: bool | None = None,
     fecha_desde: str | None = None,
     fecha_hasta: str | None = None,
+    salida_desde: str | None = None,
+    salida_hasta: str | None = None,
+    activa_en: str | None = None,
+    anulada_desde: str | None = None,
+    anulada_hasta: str | None = None,
     estado_reserva: str | None = None,
     estado_documento: str | None = None,
     excluir_canceladas: bool = True,
@@ -1722,23 +1830,52 @@ def consultar_reservas(
     disponibilidad; para ello usa consultar_disponibilidad.
     Permite cruzar con ubicación y datos de la villa.
 
+    Cada tipo de pregunta tiene su filtro de fecha:
+    - Entradas (llegadas) de un día o periodo: fecha_desde / fecha_hasta.
+    - Salidas de un día o periodo: salida_desde / salida_hasta.
+    Para UN día concreto ("hoy", "mañana") pon esa fecha en los dos extremos
+    (desde y hasta); con uno solo salen todas las anteriores o posteriores.
+    - Villas ocupadas en una fecha ("ahora mismo", "esta noche"): activa_en.
+      Cuenta la reserva si esa noche la villa está ocupada (entrada <= fecha
+      < salida); la noche del día de salida ya no. Incluye las estancias del
+      propietario (subtipo_reserva 'Reserva Propietario', a veces de meses):
+      al responder, sepáralas de las de clientes.
+    - Villas con entrada y salida el mismo día (cambio de cliente): llama una
+      vez con salida ese día y otra con entrada ese día, y cruza las villas.
+    - Cancelaciones de un periodo ("canceladas en los últimos 30 días"):
+      anulada_desde / anulada_hasta con estado_reserva='CA'. Filtran por la
+      fecha en que se anuló, no por la de entrada. Sin estado_reserva salen
+      también los presupuestos perdidos ('PE'), que son la mayoría de las
+      anulaciones y no son reservas canceladas.
+
     Args:
         villa_nombre: Nombre o parte del nombre de la villa (ej. "NASSAU").
         ubicacion: Pueblo cercano (Altea, Calpe, Moraira…).
         zona: Zona geográfica (Benissa Costa, Moraira…).
         piscina: True para filtrar villas con piscina privada.
-        fecha_desde: Fecha de entrada desde (YYYY-MM-DD).
-        fecha_hasta: Fecha de entrada hasta (YYYY-MM-DD).
+        fecha_desde: Fecha de ENTRADA desde (YYYY-MM-DD).
+        fecha_hasta: Fecha de ENTRADA hasta (YYYY-MM-DD).
+        salida_desde: Fecha de SALIDA desde (YYYY-MM-DD).
+        salida_hasta: Fecha de SALIDA hasta (YYYY-MM-DD).
+        activa_en: Fecha (YYYY-MM-DD) en la que la villa está ocupada.
+        anulada_desde: Fecha de anulación desde (YYYY-MM-DD).
+        anulada_hasta: Fecha de anulación hasta (YYYY-MM-DD).
         estado_reserva: 'RE'=reserva, 'PE'=perdida, 'CA'=cancelación,
                         'NS'=no show, 'PR'=prereserva, 'BO'=bloqueada.
         estado_documento: 'CO'=confirmado, 'DR'=borrador, 'CL'=cerrado, 'VO'=anulado.
-        excluir_canceladas: Si True (defecto), excluye canceladas (CA) y anuladas (VO).
+        excluir_canceladas: Si True (defecto), excluye canceladas (CA),
+            perdidas (PE) y anuladas (VO). No hace falta desactivarlo al pedir
+            un estado_reserva concreto o filtrar por fecha de anulación.
         limite: Máximo de reservas a listar (defecto 20, máx. 50).
 
     Returns:
         Diccionario con 'reservas' (como mucho `limite`), 'count' (las
         listadas) y 'total' (todas las que cumplen los filtros). Para decir
-        cuántas reservas hay usa SIEMPRE 'total', nunca 'count'.
+        cuántas reservas hay usa SIEMPRE 'total', nunca 'count'. Cada reserva
+        trae también `fecha_anulacion` y `estado_limpieza` (el estado de
+        limpieza de la villa para esa reserva: Lista, Disponible, Limpieza
+        Finalizada, Limpieza en Curso, Asignar Limpieza, Repaso Limpieza,
+        Estancia, No disponible).
     """
     conditions: list[str] = []
     params: list[bigquery.ScalarQueryParameter] = []
@@ -1766,6 +1903,32 @@ def consultar_reservas(
         conditions.append("r.fecha_entrada <= @fecha_hasta")
         params.append(bigquery.ScalarQueryParameter("fecha_hasta", "DATE", fecha_hasta))
 
+    if salida_desde:
+        conditions.append("r.fecha_salida >= @salida_desde")
+        params.append(bigquery.ScalarQueryParameter("salida_desde", "DATE", salida_desde))
+
+    if salida_hasta:
+        conditions.append("r.fecha_salida <= @salida_hasta")
+        params.append(bigquery.ScalarQueryParameter("salida_hasta", "DATE", salida_hasta))
+
+    if activa_en:
+        conditions.append("r.fecha_entrada <= @activa_en AND r.fecha_salida > @activa_en")
+        params.append(bigquery.ScalarQueryParameter("activa_en", "DATE", activa_en))
+
+    if anulada_desde:
+        conditions.append("r.fecha_anulacion >= @anulada_desde")
+        params.append(bigquery.ScalarQueryParameter("anulada_desde", "DATE", anulada_desde))
+
+    if anulada_hasta:
+        conditions.append("r.fecha_anulacion <= @anulada_hasta")
+        params.append(bigquery.ScalarQueryParameter("anulada_hasta", "DATE", anulada_hasta))
+
+    # Preguntar por anulaciones o por un estado concreto y a la vez excluir
+    # las canceladas daba "no se encontraron" o 6 según recordara el modelo
+    # desactivarlo: lo que se pide explícitamente manda.
+    if anulada_desde or anulada_hasta or estado_reserva:
+        excluir_canceladas = False
+
     if estado_reserva:
         conditions.append(
             _filtro_estado("r.estado_reserva", "estado_reserva",
@@ -1779,9 +1942,11 @@ def consultar_reservas(
         )
 
     if excluir_canceladas:
+        # Una perdida es un presupuesto que no se cerró: no ocupa la villa ni
+        # es una llegada o una salida real (son un tercio de la tabla).
         conditions.append(
             "UPPER(COALESCE(r.estado_reserva, '')) NOT IN "
-            "('CA', 'CANCELACION', 'CANCELADA')"
+            "('CA', 'CANCELACION', 'CANCELADA', 'PE', 'PERDIDA')"
         )
         conditions.append(
             "UPPER(COALESCE(r.estado_documento, '')) NOT IN "
@@ -1790,6 +1955,16 @@ def consultar_reservas(
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     limite = min(max(1, limite), 50)
+    # Primero lo más relevante para la pregunta: las últimas anuladas, o las
+    # salidas y ocupaciones por orden de fecha.
+    if anulada_desde or anulada_hasta:
+        orden = "r.fecha_anulacion DESC"
+    elif salida_desde or salida_hasta:
+        orden = "r.fecha_salida, r.villa_nombre"
+    elif activa_en:
+        orden = "r.villa_nombre"
+    else:
+        orden = "r.fecha_entrada DESC"
 
     query = f"""
         WITH villa_dedup AS (
@@ -1809,6 +1984,8 @@ def consultar_reservas(
             r.num_mascotas,
             r.estado_reserva,
             r.estado_documento,
+            r.fecha_anulacion,
+            r.estado_limpieza,
             -- Reserva, Reserva Agencia, Reserva TTOO o Reserva Propietario.
             r.subtipo_reserva,
             r.importe_total,
@@ -1823,7 +2000,7 @@ def consultar_reservas(
         FROM {TABLA_RESERVAS} r
         LEFT JOIN villa_dedup v ON r.villa_id = v.villa_id
         {where}
-        ORDER BY r.fecha_entrada DESC
+        ORDER BY {orden}
         LIMIT {limite}
     """
 
@@ -2265,6 +2442,22 @@ en la Costa Blanca (España). Ayudas con villas Y con información turística lo
 - NUNCA digas que solo puedes ayudar con villas si la pregunta es sobre turismo,
   fiestas, eventos o clima: usa `buscar_internet` primero.
 
+## Mapas y gráficos
+- La aplicación pinta sola un mapa con las villas que devuelvan las búsquedas
+  y fichas, y gráficos con los precios, el calendario y los resúmenes de
+  reservas que consultes. NUNCA digas que no puedes hacer
+  mapas o gráficos: si los piden, llama a la herramienta que corresponda y di
+  que el mapa o el gráfico aparece bajo la respuesta. No escribas coordenadas
+  ni tablas para copiar a una hoja de cálculo en su lugar.
+
+## Búsquedas por equipamiento y dirección
+- `buscar_propiedades` y `consultar_disponibilidad` filtran por jacuzzi,
+  billar, futbolín, parking, vistas al mar y mascotas, y `buscar_propiedades`
+  además por garaje y terraza. Úsalos en vez de decir que no hay filtro.
+- Para una calle, un número o una urbanización ("Calle Kabul 7", "Cumbre del
+  Sol", "La Fustera", "El Portet") usa el parámetro `direccion`.
+- No hay dato fiable de barbacoa, parcela vallada ni balcón: dilo claramente.
+
 ## Fecha, hora y disponibilidad
 - La zona horaria del negocio y del agente es `Europe/Madrid`.
 - Para cualquier referencia relativa ("hoy", "mañana", "este fin de semana",
@@ -2356,8 +2549,11 @@ _HERRAMIENTAS_COMUNES = """
 
 _REGLAS_GESTION = """
 ## Cuánta información dar de una villa
-- Si preguntan por una villa en general, responde lo BÁSICO: ubicación,
-  capacidad, habitaciones, camas, baños, piscina, metros y precio. Nada más.
+- Si preguntan por una villa en general ("háblame de", "situación de", "info
+  de"), responde lo BÁSICO: ubicación, capacidad, habitaciones, camas, baños,
+  piscina, metros y precio. Nada más. Llama a la vez a
+  `obtener_detalle_propiedad` y a `consultar_precios`: sin el precio la
+  respuesta está incompleta.
 - La ficha tiene más de 150 datos repartidos en secciones (equipamiento como
   mosquiteras o lavadoras, vistas, distancias, piscina, cocina, ocio,
   accesibilidad, licencia, comercial...). Pide una
@@ -2386,11 +2582,20 @@ _REGLAS_GESTION = """
 
 ## Reservas y facturación
 - La ausencia de filas en `consultar_reservas` no demuestra disponibilidad.
+- `consultar_reservas` filtra por entrada, por salida (`salida_desde`,
+  `salida_hasta`), por ocupación en una fecha (`activa_en`) y por fecha de
+  anulación. Para un briefing del día consulta entradas, salidas y ocupación;
+  no digas que solo puedes filtrar por fecha de entrada. Cada reserva trae su
+  `estado_limpieza`.
 - `resumen_reservas` cuenta por defecto solo reservas en firme (y no shows) y
   deja fuera las estancias del propietario. Si devuelve `aviso_monedas`,
   advierte de que los importes mezclan monedas.
 - En `consultar_reservas`, `subtipo_reserva` = 'Reserva Propietario' es el
   propietario usando su villa, no un cliente: no lo presentes como una venta.
+- No hay datos de incidencias ni de mantenimiento: la columna `incidencia` de
+  las líneas de reserva está vacía y no existe otra tabla con ellos. Si
+  preguntan por incidencias abiertas, dilo así en vez de deducirlas de
+  reservas, estados o fichas.
 - Usa `consultar_feedback_negativo()` si necesitas ver qué respuestas han fallado o
   quedado incompletas recientemente en otras conversaciones para no repetir errores.
 """.strip()
@@ -2461,12 +2666,94 @@ Eres la versión de administración. Tienes acceso completo a todos los datos di
 
 
 # ---------------------------------------------------------------------------
+# Salvaguardas comunes a todas las herramientas
+# ---------------------------------------------------------------------------
+
+def _admite_solo_texto(anotacion: Any) -> bool:
+    """True si el parámetro es `str` o `str | None`."""
+    if anotacion is str:
+        return True
+    if typing.get_origin(anotacion) in (typing.Union, types.UnionType):
+        return set(typing.get_args(anotacion)) == {str, type(None)}
+    return False
+
+
+def normalizar_argumentos(tool, args: dict[str, Any], tool_context) -> dict | None:
+    """Ajusta lo que el modelo pasa a un parámetro de texto antes de llamar.
+
+    Quita también el "Villa" delante del nombre de una villa.
+
+    El modelo a veces manda una lista donde va un texto (varias villas en
+    `nombre`, varios estados a la vez) o un número; la herramienta hacía
+    `.strip()` y la excepción tumbaba la respuesta entera ("'list' object
+    has no attribute 'strip'"). Una lista de un elemento se desenvuelve; con
+    varios se le pide que llame una vez por valor, que es lo que la
+    herramienta sabe hacer.
+    """
+    func = getattr(tool, "func", None)
+    if func is None:
+        return None
+    try:
+        tipos = typing.get_type_hints(func)
+    except Exception:
+        return None
+    for nombre, valor in list(args.items()):
+        if not _admite_solo_texto(tipos.get(nombre)):
+            continue
+        if isinstance(valor, (list, tuple)):
+            valores = [str(v) for v in valor if v not in (None, "")]
+            if len(valores) > 1:
+                return {"error": (
+                    f"El parámetro '{nombre}' de {tool.name} admite un solo valor "
+                    f"y has pasado {len(valores)}: {', '.join(valores)}. Llama a "
+                    f"{tool.name} una vez por cada uno."
+                )}
+            args[nombre] = valores[0] if valores else None
+        elif isinstance(valor, (int, float)) and not isinstance(valor, bool):
+            args[nombre] = str(valor)
+    # "Villa Atalaya" no encaja en '%Villa Atalaya%': en Etendo se llama
+    # ATALAYA, y consultar_precios devolvía 0 noches. Las dos que sí se llaman
+    # "VILLA ..." siguen encontrándose, porque la búsqueda es por subcadena.
+    for nombre in ("villa_nombre", "nombre"):
+        valor = args.get(nombre)
+        if isinstance(valor, str) and re.match(r"(?i)\s*villa\s+\S", valor):
+            args[nombre] = re.sub(r"(?i)^\s*villa\s+", "", valor)
+    return None
+
+
+def error_de_herramienta(tool, args: dict[str, Any], tool_context,
+                         error: Exception) -> dict:
+    """Un fallo de una herramienta llega al modelo como dato, no como excepción.
+
+    Sin esto, cualquier error dentro de una herramienta cortaba el turno y el
+    usuario solo veía "Error: ..." sin respuesta; así el modelo puede probar
+    otra vía o explicar qué dato no ha podido obtener.
+    """
+    log.warning("Falló la herramienta %s con %s", tool.name, args, exc_info=error)
+    return {"error": (
+        f"La herramienta {tool.name} ha fallado ({type(error).__name__}: "
+        f"{str(error)[:300]}). No inventes el dato: prueba otra herramienta si "
+        "tiene sentido o explica al usuario qué no has podido consultar."
+    )}
+
+
+# ---------------------------------------------------------------------------
 # Agentes por rol
 # ---------------------------------------------------------------------------
+
+# Sin razonamiento previo (thinking) en cada paso del modelo. Medido con
+# preguntas reales del histórico: 7,9 s de media por respuesta con el de por
+# defecto, 8,2 s con 512 tokens y 4,5 s sin él, y sin respuestas peores (con
+# razonamiento llegó a filtrar mal las salidas de hoy). Una respuesta con dos
+# herramientas son tres pasos del modelo, y cada uno pensaba antes.
+_CONFIG_MODELO = genai_types.GenerateContentConfig(
+    thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
+)
 
 agent_cliente = Agent(
     name="abahana_villas_agent_cliente",
     model="gemini-2.5-flash",
+    generate_content_config=_CONFIG_MODELO,
     description=(
         "Asistente de Abahana Villas: villas vacacionales, web corporativa "
         "e información turística local (fiestas, eventos, clima)."
@@ -2474,6 +2761,8 @@ agent_cliente = Agent(
     instruction=INSTRUCTION_CLIENTE,
     # Sin consultar_feedback_negativo: devuelve preguntas y respuestas de otros
     # usuarios, que no deben llegar a un cliente.
+    before_tool_callback=normalizar_argumentos,
+    on_tool_error_callback=error_de_herramienta,
     tools=[
         obtener_fecha_hora_actual,
         listar_propiedades,
@@ -2489,11 +2778,14 @@ agent_cliente = Agent(
 agent_interno = Agent(
     name="abahana_villas_agent_interno",
     model="gemini-2.5-flash",
+    generate_content_config=_CONFIG_MODELO,
     description=(
         "Asistente interno de Abahana Villas: villas, fichas completas, reservas, "
         "web corporativa e información turística local (fiestas, eventos, clima)."
     ),
     instruction=INSTRUCTION_INTERNO,
+    before_tool_callback=normalizar_argumentos,
+    on_tool_error_callback=error_de_herramienta,
     tools=[
         obtener_fecha_hora_actual,
         listar_propiedades,
@@ -2520,11 +2812,14 @@ agent_interno = Agent(
 agent_admin = Agent(
     name="abahana_villas_agent_admin",
     model="gemini-2.5-flash",
+    generate_content_config=_CONFIG_MODELO,
     description=(
         "Asistente de administración de Abahana Villas: villas, fichas completas, "
         "reservas, web corporativa e información turística local (fiestas, eventos, clima)."
     ),
     instruction=INSTRUCTION_ADMIN,
+    before_tool_callback=normalizar_argumentos,
+    on_tool_error_callback=error_de_herramienta,
     tools=[
         obtener_fecha_hora_actual,
         listar_propiedades,
