@@ -632,20 +632,19 @@ def _borrar_conversacion(session_id: str, email: str) -> None:
     st.rerun()
 
 
-# Los dos se llaman como callback del menú de la conversación: solo antes de
-# pintarlo se puede cambiar su estado (abierto/cerrado) en session_state.
+# Callbacks de la fila en modo edición: se ejecutan antes de repintar, así
+# que la fila vuelve directamente a su forma normal con el nombre nuevo.
 def _renombrar_conversacion(session_id: str, email: str) -> None:
     nombre = st.session_state.get(f"nombre_{session_id}", "")
     if not get_conversation_store().rename_session(session_id, email, nombre):
         st.toast("No se pudo cambiar el nombre. Inténtalo de nuevo.")
         return
     _invalidate_history_cache(email)
-    st.session_state[f"menuconv_{session_id}"] = False
+    st.session_state.pop(f"editar_conversacion_{session_id}", None)
 
 
-def _pedir_borrar_conversacion(session_id: str) -> None:
-    st.session_state[f"menuconv_{session_id}"] = False
-    st.session_state[f"confirmar_conversacion_{session_id}"] = True
+def _cancelar_renombrar(session_id: str) -> None:
+    st.session_state.pop(f"editar_conversacion_{session_id}", None)
 
 
 def _get_suggestions(role: str) -> list[str]:
@@ -759,7 +758,7 @@ def _clear_conversation_widgets() -> None:
     """Descarta el estado de widgets atado a la conversación que se deja."""
     st.session_state.pop("pending_prompt", None)
     for key in list(st.session_state.keys()):
-        if key.startswith(("feedback_", "suggestion_", "confirmar_")):
+        if key.startswith(("feedback_", "suggestion_", "confirmar_", "editar_")):
             del st.session_state[key]
 
 
@@ -909,7 +908,38 @@ def _render_conversation_history(email: str) -> None:
                         st.session_state.pop(clave, None)
                         st.rerun()
                 continue
-            col_titulo, col_menu = st.columns([6, 1], vertical_alignment="center")
+            if st.session_state.get(f"editar_conversacion_{session_id}"):
+                # Se edita en la propia fila. Formulario para que Intro guarde;
+                # guardar va primero porque es el botón que dispara Intro.
+                with st.form(f"formnombre_{session_id}", border=False):
+                    col_nombre, col_ok, col_no = st.columns(
+                        [8, 1, 1], gap="small", vertical_alignment="center")
+                    with col_nombre:
+                        st.text_input(
+                            "Nombre de la conversación",
+                            value=sesion["title"],
+                            max_chars=TITLE_MAX_CHARS,
+                            key=f"nombre_{session_id}",
+                            label_visibility="collapsed",
+                            placeholder="Vacío: vuelve a la primera pregunta",
+                        )
+                    with col_ok:
+                        st.form_submit_button(
+                            "", icon=":material/check:",
+                            key=f"guardarnombre_{session_id}",
+                            on_click=_renombrar_conversacion,
+                            args=(session_id, email),
+                        )
+                    with col_no:
+                        st.form_submit_button(
+                            "", icon=":material/close:",
+                            key=f"cancelarnombre_{session_id}",
+                            on_click=_cancelar_renombrar,
+                            args=(session_id,),
+                        )
+                continue
+            col_titulo, col_editar, col_papelera = st.columns(
+                [8, 1, 1], gap="small", vertical_alignment="center")
             with col_titulo:
                 pulsado = st.button(
                     _shorten(sesion["title"], 80),
@@ -917,36 +947,16 @@ def _render_conversation_history(email: str) -> None:
                     use_container_width=True,
                     type="primary" if es_actual else "secondary",
                 )
-            # Renombrar y borrar van en un menú: dos iconos por fila no caben
-            # junto al título en el ancho de la barra lateral.
-            # El contenido solo se pinta con el menú abierto: son hasta
-            # HISTORY_LIMIT filas y no hace falta un formulario oculto en cada una.
-            with col_menu:
-                menu = st.popover("", icon=":material/more_vert:",
-                                  key=f"menuconv_{session_id}", on_change="rerun")
-            if menu.open:
-                with menu:
-                    # Formulario para que Intro guarde el nombre.
-                    with st.form(f"nombreconv_{session_id}", border=False):
-                        st.text_input(
-                            "Nombre de la conversación",
-                            value=sesion["title"] if sesion.get("renamed") else "",
-                            placeholder=_shorten(sesion["title"], 60),
-                            max_chars=TITLE_MAX_CHARS,
-                            key=f"nombre_{session_id}",
-                        )
-                        st.caption("Déjalo vacío para volver a la primera pregunta.")
-                        st.form_submit_button(
-                            "Guardar nombre", type="primary",
-                            key=f"guardarnombre_{session_id}",
-                            use_container_width=True,
-                            on_click=_renombrar_conversacion,
-                            args=(session_id, email),
-                        )
-                    st.button("Borrar conversación", key=f"borrarconv_{session_id}",
-                              icon=":material/delete:", use_container_width=True,
-                              on_click=_pedir_borrar_conversacion,
-                              args=(session_id,))
+            with col_editar:
+                if st.button("", key=f"editarconv_{session_id}",
+                             icon=":material/edit:"):
+                    st.session_state[f"editar_conversacion_{session_id}"] = True
+                    st.rerun()
+            with col_papelera:
+                if st.button("", key=f"borrarconv_{session_id}",
+                             icon=":material/delete:"):
+                    st.session_state[clave] = True
+                    st.rerun()
             if pulsado and not es_actual:
                 _load_conversation(session_id, email)
 
@@ -1243,7 +1253,10 @@ a:focus-visible,
    rojo solo al pasar por encima, que es cuando se va a usar. El color se
    fuerza porque el tema puede venir oscuro (ver pulgares del feedback). */
 [class*="st-key-borrarconsulta_"] button,
-[class*="st-key-borrarconv_"] button {
+[class*="st-key-borrarconv_"] button,
+[class*="st-key-editarconv_"] button,
+[class*="st-key-guardarnombre_"] button,
+[class*="st-key-cancelarnombre_"] button {
     background-color: transparent !important;
     border: none !important;
     color: var(--abv-ink-soft) !important;
@@ -1253,7 +1266,10 @@ a:focus-visible,
 }
 
 [class*="st-key-borrarconsulta_"] button *,
-[class*="st-key-borrarconv_"] button * {
+[class*="st-key-borrarconv_"] button *,
+[class*="st-key-editarconv_"] button *,
+[class*="st-key-guardarnombre_"] button *,
+[class*="st-key-cancelarnombre_"] button * {
     color: inherit !important;
 }
 
@@ -1264,31 +1280,39 @@ a:focus-visible,
     opacity: 1;
 }
 
-/* Menú ⋮ de cada conversación: un icono sin caja, como la papelera que
-   sustituye; el chevron que añade Streamlit sobra en un botón tan estrecho. */
-[class*="st-key-menuconv_"] button {
-    background-color: transparent !important;
-    border: none !important;
-    color: var(--abv-ink-soft) !important;
-    min-height: 2rem !important;
-    padding: 0.2rem 0.4rem !important;
-}
-
-[class*="st-key-menuconv_"] button:hover,
-[class*="st-key-menuconv_"] button[aria-expanded="true"] {
+/* Editar y guardar no son destructivos: al pasar por encima, azul de marca
+   en lugar del rojo de la papelera. */
+[class*="st-key-editarconv_"] button:hover,
+[class*="st-key-guardarnombre_"] button:hover,
+[class*="st-key-cancelarnombre_"] button:hover {
     background-color: var(--abv-accent-wash) !important;
     color: var(--abv-ink) !important;
 }
 
-[class*="st-key-menuconv_"] button > div > div[aria-hidden="true"] {
-    display: none !important;
+[class*="st-key-guardarnombre_"] button {
+    color: var(--abv-accent-deep) !important;
 }
 
-/* El menú se abre fuera de la barra lateral, así que el botón de guardar
-   no hereda su estilo: texto blanco forzado sobre el azul de marca. */
-[class*="st-key-guardarnombre_"] button,
-[class*="st-key-guardarnombre_"] button p {
-    color: #FFFFFF !important;
+/* Campo del nombre en la fila: mismo alto que las entradas de la lista y
+   colores forzados, que con tema oscuro Streamlit lo pinta casi negro. */
+[data-testid="stSidebar"] [class*="st-key-nombre_"] input {
+    background-color: var(--abv-surface) !important;
+    color: var(--abv-ink) !important;
+    -webkit-text-fill-color: var(--abv-ink) !important;
+    caret-color: var(--abv-ink) !important;
+    font-size: 0.875rem !important;
+    padding: 0.35rem 0.6rem !important;
+    border: none !important;
+}
+
+[data-testid="stSidebar"] [class*="st-key-nombre_"] [data-testid="stTextInputRootElement"] {
+    background-color: var(--abv-surface) !important;
+    border: 1px solid var(--abv-accent) !important;
+}
+
+[data-testid="stSidebar"] [class*="st-key-nombre_"] [data-baseweb="base-input"] {
+    background-color: var(--abv-surface) !important;
+    border-color: transparent !important;
 }
 
 /* Confirmar un borrado es la acción destructiva: rojo con texto blanco
@@ -1719,9 +1743,15 @@ def main() -> None:
 
     st.divider()
 
-    # Bienvenida y sugerencias en chat vacío
+    # Bienvenida y sugerencias en chat vacío. El hueco existe siempre, aunque
+    # esté vacío: si la bienvenida desapareciera sin más, al repintar tras la
+    # primera pregunta todo subiría una posición y la respuesta en vivo (sin
+    # mapa) seguiría en pantalla debajo de la definitiva hasta acabar el
+    # repintado: dos respuestas iguales, una con mapa y otra sin él.
+    bienvenida = st.empty()
     if not st.session_state.messages and not st.session_state.get("pending_prompt"):
-        _render_welcome_empty_state(role)
+        with bienvenida.container():
+            _render_welcome_empty_state(role)
 
     # Historial
     _render_chat_history(st.session_state.messages, email)
@@ -1734,6 +1764,7 @@ def main() -> None:
     if prompt := st.chat_input(
         "Pregunta sobre villas, fiestas, eventos, clima, zonas, amenidades..."
     ):
+        bienvenida.empty()
         _process_user_prompt(prompt, role=role, email=email)
 
     # Cerrar sesión
