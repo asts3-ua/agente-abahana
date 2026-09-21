@@ -37,6 +37,10 @@ PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "abahanaweb")
 DATASET = "silver_clean"
 TABLA_VILLA = f"`{PROJECT_ID}.{DATASET}.stg_etendo_Villa`"
 TABLA_RESERVAS = f"`{PROJECT_ID}.{DATASET}.stg_etendo_Reserva`"
+TABLA_TERCERO = f"`{PROJECT_ID}.{DATASET}.stg_etendo_Tercero`"
+TABLA_PLAN_PAGOS = f"`{PROJECT_ID}.{DATASET}.stg_etendo_PlanFacturacion`"
+TABLA_LINEA_RESERVA = f"`{PROJECT_ID}.{DATASET}.stg_etendo_LineaReserva`"
+TABLA_CONDICION_PAGO = f"`{PROJECT_ID}.{DATASET}.stg_etendo_CondicionesDePago`"
 TABLA_PLANTA = f"`{PROJECT_ID}.{DATASET}.stg_etendo_Planta`"
 TABLA_BANIO = f"`{PROJECT_ID}.{DATASET}.stg_etendo_OV_Banios`"
 # Estancia = cada habitación de la villa (dormitorio, salón, cocina...). Es la
@@ -2415,7 +2419,159 @@ def _componer_calendario(rows: list[dict], desde, hasta) -> dict[str, Any]:
     }
 
 
+def _condicion_localizador(localizador: str, params: list) -> str:
+    """El localizador de Etendo es "AAAA_número"; Reservas lo escribe "2026/3079",
+    "2026-3079" o solo "3079". Solo el número vale para cualquier año."""
+    partes = re.findall(r"[0-9A-Za-z]+", localizador)
+    if len(partes) == 1 and partes[0].isdigit():
+        params.append(bigquery.ScalarQueryParameter(
+            "localizador", "STRING", rf"(^|_){partes[0]}$"))
+        return "REGEXP_CONTAINS(r.localizador, @localizador)"
+    params.append(bigquery.ScalarQueryParameter("localizador", "STRING", "_".join(partes)))
+    return "r.localizador = @localizador"
+
+
+# Nombre del titular sin tildes y en minúsculas, igual que las palabras buscadas.
+_TITULAR_NORMALIZADO = (
+    "REGEXP_REPLACE(NORMALIZE(LOWER(COALESCE(r.cliente_nombre, '')), NFD), r'\\p{M}', '')")
+
+
+def _condiciones_titular(titular: str, params: list) -> list[str]:
+    """Cada palabra tiene que estar en el titular ("APELLIDOS, Nombre"), en
+    cualquier orden y sin importar tildes."""
+    sin_tildes = unicodedata.normalize("NFKD", titular).encode("ascii", "ignore").decode()
+    palabras = [p for p in re.findall(r"[a-z0-9]+", sin_tildes.lower()) if len(p) > 1]
+    condiciones = []
+    for i, palabra in enumerate(palabras[:6]):
+        condiciones.append(f"{_TITULAR_NORMALIZADO} LIKE @titular_{i}")
+        params.append(bigquery.ScalarQueryParameter(f"titular_{i}", "STRING", f"%{palabra}%"))
+    return condiciones
+
+
+def detalle_reserva(localizador: str) -> dict[str, Any]:
+    """Todo lo de una reserva: datos, titular, notas y plan de pagos.
+
+    Úsala cuando ya se sabe qué reserva es (por su número, o tras localizarla
+    con consultar_reservas) y piden su información: quién es el titular y cómo
+    contactarle, cuántas personas y mascotas, notas de entrada y salida,
+    condición de pago, cuánto hay pagado y qué plazos quedan pendientes.
+
+    Args:
+        localizador: Número de reserva ("2026_3079", "2026/3079" o "3079").
+
+    Returns:
+        'reserva' con sus datos y los del titular (titular_*), 'pagos' con
+        cada plazo, 'resumen_pagos' (previsto, pagado, pendiente) y 'lineas'
+        (conceptos facturados; solo existen para reservas hasta 2023). Si el
+        número coincide con varias reservas, 'error' y 'candidatas'.
+    """
+    params: list = []
+    condicion = _condicion_localizador(localizador, params)
+    try:
+        filas = [_row_to_dict(f) for f in _bq.query(
+            f"""
+            WITH villa_dedup AS (
+                SELECT * FROM {TABLA_VILLA}
+                {_DEDUP_VILLA}
+            )
+            SELECT
+                r.reserva_id, r.localizador, r.villa_nombre, v.pueblo_cercano,
+                r.fecha_pedido, r.fecha_confirmacion, r.fecha_entrada, r.fecha_salida,
+                DATE_DIFF(r.fecha_salida, r.fecha_entrada, DAY) AS noches,
+                r.adultos, r.ninos, r.num_mascotas,
+                r.subtipo_reserva, r.estado_reserva, r.estado_documento,
+                r.fecha_anulacion, r.es_prereserva, r.es_alto_riesgo,
+                r.es_cliente_nuevo, r.estado_limpieza,
+                r.importe_total, r.moneda_id, c.condicion_pago,
+                r.nota_entrada, r.nota_salida, r.nota_cliente,
+                r.cliente_nombre AS titular,
+                t.email AS titular_email, t.nif AS titular_nif,
+                t.pais AS titular_pais, t.idioma AS titular_idioma
+            FROM {TABLA_RESERVAS} r
+            LEFT JOIN villa_dedup v ON v.villa_id = r.villa_id
+            LEFT JOIN {TABLA_TERCERO} t ON t.id = r.cliente_id
+            LEFT JOIN {TABLA_CONDICION_PAGO} c ON c.id = r.condicion_pago_id
+            WHERE {condicion}
+            ORDER BY r.fecha_entrada DESC
+            LIMIT 6
+            """,
+            job_config=bigquery.QueryJobConfig(
+                query_parameters=params, maximum_bytes_billed=_BILLING_CAP),
+        ).result()]
+    except Exception as e:
+        log.exception("detalle_reserva: error en BigQuery")
+        return {"error": str(e)}
+
+    if not filas:
+        return {"error": f"No hay ninguna reserva con el número '{localizador}'."}
+    if len(filas) > 1:
+        return {
+            "error": (f"El número '{localizador}' coincide con varias reservas; "
+                      "pregunta cuál es (el número completo lleva el año)."),
+            "candidatas": [
+                {k: f.get(k) for k in ("localizador", "villa_nombre", "titular",
+                                       "fecha_entrada", "fecha_salida", "estado_reserva")}
+                for f in filas
+            ],
+        }
+    reserva = filas[0]
+    reserva_id = reserva.pop("reserva_id")
+    id_param = [bigquery.ScalarQueryParameter("reserva_id", "STRING", reserva_id)]
+
+    def _pagos():
+        return [_row_to_dict(f) for f in _bq.query(
+            f"""
+            SELECT fecha_vencimiento, importe_previsto, importe_pagado,
+                   importe_pendiente, metodo_pago_nombre, fecha_pago
+            FROM {TABLA_PLAN_PAGOS}
+            WHERE reserva_id = @reserva_id AND es_activo = TRUE
+            ORDER BY fecha_vencimiento
+            """,
+            # La tabla de pagos pesa más que el límite general.
+            job_config=bigquery.QueryJobConfig(
+                query_parameters=id_param, maximum_bytes_billed=_BILLING_CAP_DIARIO),
+        ).result()]
+
+    def _lineas():
+        return [_row_to_dict(f) for f in _bq.query(
+            f"""
+            SELECT numero_linea, descripcion, cantidad_pedida, precio_unitario,
+                   descuento_pct, importe_neto, oferta_aplicada,
+                   last_minute_aplicado, early_bird_aplicado
+            FROM {TABLA_LINEA_RESERVA}
+            WHERE reserva_id = @reserva_id AND es_activo = TRUE
+            ORDER BY numero_linea
+            """,
+            job_config=bigquery.QueryJobConfig(
+                query_parameters=id_param, maximum_bytes_billed=_BILLING_CAP),
+        ).result()]
+
+    resultado: dict[str, Any] = {"reserva": reserva}
+    # Independientes: en paralelo tarda lo que la más lenta.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        f_pagos, f_lineas = pool.submit(_pagos), pool.submit(_lineas)
+        try:
+            pagos = f_pagos.result()
+            resultado["pagos"] = pagos
+            resultado["pagos_disponibles"] = True
+            resultado["resumen_pagos"] = {
+                clave: _redondear(sum(p.get(f"importe_{clave}") or 0 for p in pagos))
+                for clave in ("previsto", "pagado", "pendiente")
+            }
+        except Exception:
+            log.warning("detalle_reserva: no se pudo leer el plan de pagos", exc_info=True)
+            resultado["pagos_disponibles"] = False
+        try:
+            resultado["lineas"] = f_lineas.result()
+        except Exception:
+            log.warning("detalle_reserva: no se pudieron leer las líneas", exc_info=True)
+            resultado["lineas"] = []
+    return resultado
+
+
 def consultar_reservas(
+    localizador: str | None = None,
+    titular: str | None = None,
     villa_nombre: str | None = None,
     ubicacion: str | None = None,
     zona: str | None = None,
@@ -2457,7 +2613,17 @@ def consultar_reservas(
       también los presupuestos perdidos ('PE'), que son la mayoría de las
       anulaciones y no son reservas canceladas.
 
+    Para localizar una reserva concreta: por número (localizador), por
+    titular, por villa y por fechas de entrada o salida, combinables. Para ver
+    todo lo de una reserva ya localizada (titular, pagos, notas), usa
+    detalle_reserva.
+
     Args:
+        localizador: Número de reserva: "2026_3079", "2026/3079" o solo
+            "3079" (entonces sale la de cualquier año). Por número salen todos
+            los estados, también perdidas y anuladas.
+        titular: Nombre y/o apellidos del titular en cualquier orden y sin
+            importar tildes ("Verónica García", "garcia tomas").
         villa_nombre: Nombre o parte del nombre de la villa (ej. "NASSAU").
         ubicacion: Pueblo cercano (Altea, Calpe, Moraira…).
         zona: Zona geográfica (Benissa Costa, Moraira…).
@@ -2488,6 +2654,14 @@ def consultar_reservas(
     """
     conditions: list[str] = []
     params: list[bigquery.ScalarQueryParameter] = []
+
+    if localizador:
+        conditions.append(_condicion_localizador(localizador, params))
+        # La reserva que se busca puede estar perdida o anulada.
+        excluir_canceladas = False
+
+    if titular:
+        conditions += _condiciones_titular(titular, params)
 
     if villa_nombre:
         conditions.append("LOWER(r.villa_nombre) LIKE LOWER(@villa_nombre)")
@@ -3229,6 +3403,17 @@ _REGLAS_GESTION = """
   si `precio_completo` es false, que faltan precios de alguna noche.
 
 ## Reservas y facturación
+- Para localizar una reserva usa `consultar_reservas` con lo que den: número
+  (`localizador`: "2026_3079", "2026/3079" o solo "3079"), nombre y/o apellidos
+  del `titular` (en cualquier orden, sin importar tildes), villa, y fechas de
+  entrada o de salida, combinables. Con un número suelto pueden salir reservas
+  de varios años: pregunta cuál.
+- Para toda la información de una reserva ya localizada (titular y su email,
+  país e idioma; personas y mascotas; notas de entrada y salida; condición de
+  pago; plan de pagos con lo pagado y lo pendiente) usa `detalle_reserva`. Las
+  líneas facturadas solo existen para reservas hasta 2023: si faltan, no digas
+  que la reserva no tiene conceptos. Del huésped (si no es el titular) no hay
+  datos.
 - La ausencia de filas en `consultar_reservas` no demuestra disponibilidad.
 - `consultar_reservas` filtra por entrada, por salida (`salida_desde`,
   `salida_hasta`), por ocupación en una fecha (`activa_en`) y por fecha de
@@ -3267,11 +3452,15 @@ _HERRAMIENTAS_GESTION = """
   una villa por tramos (libre, ocupada por canal, bloqueada) y % de ocupación.
   Para saber si se puede vender en unas fechas, usa `consultar_disponibilidad`.
 - `consultar_reservas(...)`: reservas individuales con fechas de entrada/salida,
-  importe, cliente y estado. Filtra por villa, ubicación, zona, piscina, rango de
+  importe, cliente y estado. Filtra por número de reserva (`localizador`),
+  `titular`, villa, ubicación, zona, piscina, rango de
   fechas, estado_reserva ('RE'=reserva, 'PE'=perdida, 'CA'=cancelación,
   'NS'=no show, 'PR'=prereserva, 'BO'=borrador) y estado_documento
   ('CO'=confirmado, 'DR'=borrador, 'CL'=cerrado, 'VO'=anulado). Devuelve `total`
   con el número exacto aunque solo liste unas pocas.
+- `detalle_reserva(localizador)`: todo lo de una reserva: titular y su
+  contacto, personas, notas, condición de pago y plan de pagos (pagado y
+  pendiente).
 - `resumen_reservas(...)`: estadísticas agregadas (count, importe total/medio,
   noches medias). Agrupa por 'villa', 'zona', 'mes' o 'ano'. Para preguntas
   analíticas: qué villa tiene más reservas, qué zona factura más, evolución mensual.
@@ -3498,6 +3687,7 @@ agent_interno = Agent(
         buscar_ofertas,
         alternativas_villa,
         consultar_reservas,
+        detalle_reserva,
         resumen_reservas,
         # Solo interno y admin: consultar_precios expone precio de compra y
         # margen, y el calendario, el uso que hace el propietario de su villa.
@@ -3535,6 +3725,7 @@ agent_admin = Agent(
         buscar_ofertas,
         alternativas_villa,
         consultar_reservas,
+        detalle_reserva,
         resumen_reservas,
         # Solo interno y admin: consultar_precios expone precio de compra y
         # margen, y el calendario, el uso que hace el propietario de su villa.
