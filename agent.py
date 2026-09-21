@@ -301,6 +301,24 @@ _EQUIPAMIENTO = {
     "terraza": "(v.tiene_terraza_cubierta OR v.tiene_terraza_descubierta)",
 }
 
+# "Calpe o Moraira" son dos pueblos: el agente pasaba "Calpe | Moraira" y se
+# buscaba ese texto tal cual, con 0 resultados y un falso "no hay villas".
+_SEPARADOR_LUGARES = re.compile(r"\s*(?:\||,|/|;|\s+o\s+|\s+y\s+)\s*", re.IGNORECASE)
+
+
+def _condicion_lugar(columna: str, nombre: str, valor: str, params: list) -> str:
+    """Filtro por pueblo o zona; con varios, vale cualquiera de ellos."""
+    lugares = [l for l in _SEPARADOR_LUGARES.split(valor.strip()) if l]
+    if len(lugares) <= 1:
+        params.append(bigquery.ScalarQueryParameter(nombre, "STRING", f"%{valor.strip()}%"))
+        return f"LOWER({columna}) LIKE LOWER(@{nombre})"
+    partes = []
+    for i, lugar in enumerate(lugares[:6]):
+        params.append(bigquery.ScalarQueryParameter(f"{nombre}_{i}", "STRING", f"%{lugar}%"))
+        partes.append(f"LOWER({columna}) LIKE LOWER(@{nombre}_{i})")
+    return "(" + " OR ".join(partes) + ")"
+
+
 def _condiciones_equipamiento(**filtros: bool | None) -> list[str]:
     """Exigirlo compara contra TRUE; no exigirlo trata el dato ausente como
     ausencia, para no descartar las villas sin ficha."""
@@ -565,12 +583,10 @@ def buscar_propiedades(
     params: list[bigquery.ScalarQueryParameter] = []
 
     if ubicacion:
-        conditions.append("LOWER(v.pueblo_cercano) LIKE LOWER(@ubicacion)")
-        params.append(bigquery.ScalarQueryParameter("ubicacion", "STRING", f"%{ubicacion.strip()}%"))
+        conditions.append(_condicion_lugar("v.pueblo_cercano", "ubicacion", ubicacion, params))
 
     if zona:
-        conditions.append("LOWER(v.zona) LIKE LOWER(@zona)")
-        params.append(bigquery.ScalarQueryParameter("zona", "STRING", f"%{zona.strip()}%"))
+        conditions.append(_condicion_lugar("v.zona", "zona", zona, params))
 
     if capacidad_min is not None:
         conditions.append("v.capacidad_pax >= @capacidad_min")
@@ -689,8 +705,7 @@ def buscar_por_valoracion(
     params: list[bigquery.ScalarQueryParameter] = []
 
     if ubicacion:
-        conditions.append("LOWER(pueblo_cercano) LIKE LOWER(@ubicacion)")
-        params.append(bigquery.ScalarQueryParameter("ubicacion", "STRING", f"%{ubicacion.strip()}%"))
+        conditions.append(_condicion_lugar("pueblo_cercano", "ubicacion", ubicacion, params))
 
     if capacidad_min is not None:
         conditions.append("capacidad_pax >= @capacidad_min")
@@ -1544,15 +1559,9 @@ def consultar_disponibilidad(
             "villa_nombre", "STRING", f"%{villa_nombre.strip()}%"
         ))
     if ubicacion:
-        conditions.append("LOWER(v.pueblo_cercano) LIKE LOWER(@ubicacion)")
-        params.append(bigquery.ScalarQueryParameter(
-            "ubicacion", "STRING", f"%{ubicacion.strip()}%"
-        ))
+        conditions.append(_condicion_lugar("v.pueblo_cercano", "ubicacion", ubicacion, params))
     if zona:
-        conditions.append("LOWER(v.zona) LIKE LOWER(@zona)")
-        params.append(bigquery.ScalarQueryParameter(
-            "zona", "STRING", f"%{zona.strip()}%"
-        ))
+        conditions.append(_condicion_lugar("v.zona", "zona", zona, params))
     if capacidad_min is not None:
         conditions.append("v.capacidad_pax >= @capacidad_min")
         params.append(bigquery.ScalarQueryParameter(
@@ -1864,14 +1873,12 @@ def buscar_ofertas(
         return {"matches": [], "total": 0, "error": error}
     conditions: list[str] = []
     params: list[bigquery.ScalarQueryParameter] = []
-    for nombre, valor, sql in (
-        ("ubicacion", ubicacion, "LOWER(v.pueblo_cercano) LIKE LOWER(@ubicacion)"),
-        ("zona", zona, "LOWER(v.zona) LIKE LOWER(@zona)"),
+    for nombre, valor, columna in (
+        ("ubicacion", ubicacion, "v.pueblo_cercano"),
+        ("zona", zona, "v.zona"),
     ):
         if valor:
-            conditions.append(sql)
-            params.append(bigquery.ScalarQueryParameter(
-                nombre, "STRING", f"%{valor.strip()}%"))
+            conditions.append(_condicion_lugar(columna, nombre, valor, params))
     if capacidad_min is not None:
         conditions.append("v.capacidad_pax >= @capacidad_min")
         params.append(bigquery.ScalarQueryParameter("capacidad_min", "INT64", capacidad_min))
@@ -2167,8 +2174,9 @@ def consultar_precios(
         fecha_desde: Primera noche (YYYY-MM-DD). Si se omite, se toman los
             próximos 30 días desde hoy, para poder responder "cuánto cuesta
             esta villa" sin pedirle fechas al usuario.
-        fecha_hasta: Última noche (YYYY-MM-DD). El rango no puede superar
-            92 días.
+        fecha_hasta: Última noche (YYYY-MM-DD), incluida. Para una estancia
+            con fecha de salida, pasa el día anterior a la salida: la noche
+            de salida no se cobra. El rango no puede superar 92 días.
 
     Returns:
         Diccionario con 'noches' (venta, compra y margen por fecha),
@@ -2696,12 +2704,10 @@ def consultar_reservas(
         params.append(bigquery.ScalarQueryParameter("villa_nombre", "STRING", f"%{villa_nombre.strip()}%"))
 
     if ubicacion:
-        conditions.append("LOWER(v.pueblo_cercano) LIKE LOWER(@ubicacion)")
-        params.append(bigquery.ScalarQueryParameter("ubicacion", "STRING", f"%{ubicacion.strip()}%"))
+        conditions.append(_condicion_lugar("v.pueblo_cercano", "ubicacion", ubicacion, params))
 
     if zona:
-        conditions.append("LOWER(v.zona) LIKE LOWER(@zona)")
-        params.append(bigquery.ScalarQueryParameter("zona", "STRING", f"%{zona.strip()}%"))
+        conditions.append(_condicion_lugar("v.zona", "zona", zona, params))
 
     if piscina is not None:
         conditions.append(f"v.tiene_piscina_privada = {'TRUE' if piscina else 'FALSE'}")
@@ -2896,12 +2902,10 @@ def resumen_reservas(
         ))
 
     if ubicacion:
-        conditions.append("LOWER(v.pueblo_cercano) LIKE LOWER(@ubicacion)")
-        params.append(bigquery.ScalarQueryParameter("ubicacion", "STRING", f"%{ubicacion.strip()}%"))
+        conditions.append(_condicion_lugar("v.pueblo_cercano", "ubicacion", ubicacion, params))
 
     if zona:
-        conditions.append("LOWER(v.zona) LIKE LOWER(@zona)")
-        params.append(bigquery.ScalarQueryParameter("zona", "STRING", f"%{zona.strip()}%"))
+        conditions.append(_condicion_lugar("v.zona", "zona", zona, params))
 
     if fecha_desde:
         conditions.append("r.fecha_entrada >= @fecha_desde")
@@ -3439,6 +3443,11 @@ _REGLAS_GESTION = """
 - Si una búsqueda no da nada, no te quedes en "no hay": propón alternativas
   (`alternativas_villa`, o repite `buscar_ofertas` relajando un filtro y di
   cuál).
+- Para el precio de una estancia concreta (entrada y salida) usa el
+  `precio_total` de `buscar_ofertas` o `alternativas_villa`, que ya descuenta
+  la noche de salida. `consultar_precios` es noche a noche y su `fecha_hasta`
+  es la última noche: si la usas para una estancia, pásale la salida menos un
+  día.
 - Al presentar ofertas da siempre el precio total de la estancia y por noche;
   si `larga_estancia` es true, di que se aplica la tarifa de larga estancia, y
   si `precio_completo` es false, que faltan precios de alguna noche.
