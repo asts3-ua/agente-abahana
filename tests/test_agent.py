@@ -126,8 +126,8 @@ class AgentToolsTest(unittest.TestCase):
             parameter.name: parameter.value
             for parameter in base_config.query_parameters
         }
-        self.assertEqual(base_values["nombre"], "%ADORA%")
-        self.assertEqual(base_values["nombre_exacto"], "ADORA")
+        self.assertEqual(base_values["villa_nombre"], "%ADORA%")
+        self.assertEqual(base_values["villa_nombre_exacto"], "ADORA")
         self.assertEqual(result["matches"][0]["nombre"], "ADORA")
         self.assertEqual(result["matches"][0]["capacidad_pax"], 10)
         self.assertEqual(2, bq.query.call_count)

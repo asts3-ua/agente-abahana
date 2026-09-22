@@ -70,6 +70,28 @@ _DEDUP_VILLA = (
     "QUALIFY ROW_NUMBER() OVER (PARTITION BY villa_id ORDER BY fecha_actualizacion DESC) = 1"
 )
 
+
+def _sql_nombre_villa(columna: str, param: str = "villa_nombre") -> str:
+    """Condición sobre el nombre de la villa. Si hay una villa que se llama
+    exactamente así, solo esa: "PUNTA VISTA" no trae "PUNTA VISTA 6". Si no,
+    vale una parte del nombre ("punta", "Lighthous"). Usa @{param} (con %) y
+    @{param}_exacto: ver _params_nombre_villa."""
+    return (
+        f"(LOWER(TRIM({columna})) = LOWER(@{param}_exacto)"
+        f" OR (LOWER({columna}) LIKE LOWER(@{param})"
+        f" AND NOT EXISTS (SELECT 1 FROM {TABLA_VILLA} x_exacta"
+        f" WHERE x_exacta.es_activo = TRUE"
+        f" AND LOWER(TRIM(x_exacta.nombre)) = LOWER(@{param}_exacto))))"
+    )
+
+
+def _params_nombre_villa(nombre: str, param: str = "villa_nombre") -> list:
+    limpio = nombre.strip()
+    return [
+        bigquery.ScalarQueryParameter(param, "STRING", f"%{limpio}%"),
+        bigquery.ScalarQueryParameter(f"{param}_exacto", "STRING", limpio),
+    ]
+
 # El filtro activo/visible va SIEMPRE dentro del CTE, antes del QUALIFY: al
 # revés, una villa cuya fila más reciente esté inactiva desaparece entera en
 # lugar de resolverse por su última fila vigente. Definirlo una sola vez evita
@@ -962,14 +984,7 @@ def obtener_detalle_propiedad(
     nombre_limpio = nombre.strip()
     if nombre_limpio.lower().startswith("villa "):
         nombre_limpio = nombre_limpio[6:].strip()
-    params = [
-        bigquery.ScalarQueryParameter(
-            "nombre", "STRING", f"%{nombre_limpio}%"
-        ),
-        bigquery.ScalarQueryParameter(
-            "nombre_exacto", "STRING", nombre_limpio
-        ),
-    ]
+    params = _params_nombre_villa(nombre_limpio)
     pedidas = [s for s in (secciones or []) if s in _SECCIONES_FICHA]
     desconocidas = [s for s in (secciones or []) if s not in _SECCIONES_FICHA]
     # La ficha técnica va dentro de stg_etendo_Villa: basta con pedir sus
@@ -983,7 +998,7 @@ def obtener_detalle_propiedad(
         WITH villa_dedup AS (
             SELECT *
             FROM {TABLA_VILLA}
-            WHERE LOWER(nombre) LIKE LOWER(@nombre) AND es_activo = TRUE
+            WHERE {_sql_nombre_villa("nombre")} AND es_activo = TRUE
             {_DEDUP_VILLA}
         )
         SELECT
@@ -992,7 +1007,7 @@ def obtener_detalle_propiedad(
             {seleccion}
         FROM villa_dedup v
         ORDER BY
-            CASE WHEN UPPER(v.nombre) = UPPER(@nombre_exacto) THEN 0 ELSE 1 END,
+            CASE WHEN UPPER(v.nombre) = UPPER(@villa_nombre_exacto) THEN 0 ELSE 1 END,
             v.nombre
         LIMIT 5
     """
@@ -1602,10 +1617,8 @@ def consultar_disponibilidad(
         bigquery.ScalarQueryParameter("noches", "INT64", (hasta - desde).days),
     ]
     if villa_nombre:
-        conditions.append("LOWER(v.nombre) LIKE LOWER(@villa_nombre)")
-        params.append(bigquery.ScalarQueryParameter(
-            "villa_nombre", "STRING", f"%{villa_nombre.strip()}%"
-        ))
+        conditions.append(_sql_nombre_villa("v.nombre"))
+        params += _params_nombre_villa(villa_nombre)
     if ubicacion:
         conditions.append(_condicion_lugar("v.pueblo_cercano", "ubicacion", ubicacion, params))
     if zona:
@@ -2017,11 +2030,10 @@ def alternativas_villa(
             SELECT v.villa_id, v.nombre AS villa_nombre, v.zona,
                    v.pueblo_cercano, v.capacidad_pax, v.tiene_piscina_privada
             FROM villa_dedup v
-            WHERE LOWER(v.nombre) LIKE LOWER(@villa_nombre)
+            WHERE {_sql_nombre_villa("v.nombre")}
             """,
             job_config=bigquery.QueryJobConfig(
-                query_parameters=[bigquery.ScalarQueryParameter(
-                    "villa_nombre", "STRING", f"%{villa_nombre.strip()}%")],
+                query_parameters=_params_nombre_villa(villa_nombre),
                 maximum_bytes_billed=_BILLING_CAP,
             ),
         ).result()]
@@ -2399,7 +2411,7 @@ def consultar_precios(
             JOIN villa_dedup v ON v.villa_id = o.villa_id
             WHERE o.es_activo = TRUE
               AND o.fecha BETWEEN @desde AND @hasta
-              AND LOWER(v.nombre) LIKE LOWER(@villa_nombre)
+              AND {_sql_nombre_villa("v.nombre")}
         )
         SELECT
             oc.villa_id, oc.villa_nombre,
@@ -2417,9 +2429,7 @@ def consultar_precios(
     params = [
         bigquery.ScalarQueryParameter("desde", "DATE", desde),
         bigquery.ScalarQueryParameter("hasta", "DATE", hasta),
-        bigquery.ScalarQueryParameter(
-            "villa_nombre", "STRING", f"%{villa_nombre.strip()}%"
-        ),
+        *_params_nombre_villa(villa_nombre),
     ]
     try:
         rows = [_row_to_dict(r) for r in _bq.query(
@@ -2563,15 +2573,13 @@ def calendario_villa(
         JOIN villa_dedup v ON v.villa_id = o.villa_id
         WHERE o.es_activo = TRUE
           AND o.fecha BETWEEN @desde AND @hasta
-          AND LOWER(v.nombre) LIKE LOWER(@villa_nombre)
+          AND {_sql_nombre_villa("v.nombre")}
         ORDER BY o.fecha
     """
     params = [
         bigquery.ScalarQueryParameter("desde", "DATE", desde),
         bigquery.ScalarQueryParameter("hasta", "DATE", hasta),
-        bigquery.ScalarQueryParameter(
-            "villa_nombre", "STRING", f"%{villa_nombre.strip()}%"
-        ),
+        *_params_nombre_villa(villa_nombre),
     ]
     try:
         rows = [_row_to_dict(r) for r in _bq.query(
@@ -2913,8 +2921,8 @@ def consultar_reservas(
         conditions += _condiciones_titular(titular, params)
 
     if villa_nombre:
-        conditions.append("LOWER(r.villa_nombre) LIKE LOWER(@villa_nombre)")
-        params.append(bigquery.ScalarQueryParameter("villa_nombre", "STRING", f"%{villa_nombre.strip()}%"))
+        conditions.append(_sql_nombre_villa("r.villa_nombre"))
+        params += _params_nombre_villa(villa_nombre)
 
     if ubicacion:
         conditions.append(_condicion_lugar("v.pueblo_cercano", "ubicacion", ubicacion, params))
@@ -3163,10 +3171,8 @@ def resumen_reservas(
     params: list[bigquery.ScalarQueryParameter] = []
 
     if villa_nombre:
-        conditions.append("LOWER(r.villa_nombre) LIKE LOWER(@villa_nombre)")
-        params.append(bigquery.ScalarQueryParameter(
-            "villa_nombre", "STRING", f"%{villa_nombre.strip()}%"
-        ))
+        conditions.append(_sql_nombre_villa("r.villa_nombre"))
+        params += _params_nombre_villa(villa_nombre)
 
     if ubicacion:
         conditions.append(_condicion_lugar("v.pueblo_cercano", "ubicacion", ubicacion, params))
