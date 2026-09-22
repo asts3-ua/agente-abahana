@@ -419,7 +419,9 @@ class ConversationStore:
             client.get_dataset(dataset_ref)
         except NotFound:
             dataset = bigquery.Dataset(dataset_ref)
-            dataset.location = os.environ.get("GOOGLE_CLOUD_LOCATION", "europe-west1")
+            # Su propia variable: GOOGLE_CLOUD_LOCATION es la región de Gemini
+            # ("global"), que no vale para un dataset de BigQuery.
+            dataset.location = os.environ.get("CONVERSATIONS_LOCATION", "EU")
             client.create_dataset(dataset, exists_ok=True)
             log.info("Dataset BigQuery creado: %s.%s", PROJECT_ID, BQ_DATASET)
 

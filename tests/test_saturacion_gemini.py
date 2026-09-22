@@ -25,7 +25,7 @@ class ReintentosTest(unittest.TestCase):
         # "Event loop is closed". Por nombre, ADK crea uno nuevo cada vez.
         for rol, ag in agent.AGENTS.items():
             self.assertNotIsInstance(ag.model, Gemini, rol)
-            self.assertEqual("gemini-2.5-flash", ag.model, rol)
+            self.assertEqual(agent._MODELO_GEMINI, ag.model, rol)
 
     def test_la_busqueda_en_internet_tambien(self):
         cliente = Mock()

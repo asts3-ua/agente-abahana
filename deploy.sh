@@ -9,7 +9,10 @@
 set -euo pipefail
 
 PROJECT="abahanaweb"
-REGION="europe-west1"
+REGION="europe-west1"             # región del servicio de Cloud Run
+# Gemini 3.7 solo está en el punto de acceso global de Vertex AI: las
+# peticiones al modelo pueden procesarse fuera de la UE (decisión 2026-09-22).
+GEMINI_LOCATION="global"
 SERVICE="abahana-agent"
 SA_NAME="abahana-agent-sa"
 SA_EMAIL="${SA_NAME}@${PROJECT}.iam.gserviceaccount.com"
@@ -127,7 +130,7 @@ gcloud run deploy "$SERVICE" \
     --project="$PROJECT" \
     --region="$REGION" \
     --service-account="$SA_EMAIL" \
-    --set-env-vars="GOOGLE_CLOUD_PROJECT=$PROJECT,GOOGLE_CLOUD_LOCATION=$REGION,GOOGLE_GENAI_USE_VERTEXAI=true,CONVERSATIONS_BACKEND=bigquery" \
+    --set-env-vars="GOOGLE_CLOUD_PROJECT=$PROJECT,GOOGLE_CLOUD_LOCATION=$GEMINI_LOCATION,GOOGLE_GENAI_USE_VERTEXAI=true,CONVERSATIONS_BACKEND=bigquery" \
     --allow-unauthenticated \
     --memory=2Gi \
     --cpu=2 \

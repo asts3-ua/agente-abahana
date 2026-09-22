@@ -20,7 +20,7 @@ COPY agente_villas/ agente_villas/
 COPY .streamlit/ .streamlit/
 
 ENV GOOGLE_CLOUD_PROJECT=abahanaweb \
-    GOOGLE_CLOUD_LOCATION=europe-west1 \
+    GOOGLE_CLOUD_LOCATION=global \
     GOOGLE_GENAI_USE_VERTEXAI=true
 
 # Cloud Run injects $PORT; default 8080 for local docker run.

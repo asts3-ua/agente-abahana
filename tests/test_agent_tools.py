@@ -907,10 +907,11 @@ class EquipamientoYDireccionTest(_ConBigQueryFalso):
 
 class SinRazonamientoTest(unittest.TestCase):
 
-    def test_los_tres_agentes_responden_sin_razonamiento_previo(self):
+    def test_los_tres_agentes_razonan_lo_minimo(self):
+        # Gemini 3.7 no deja apagar el razonamiento: LOW es el nivel más bajo.
         for rol, ag in agent.AGENTS.items():
-            self.assertEqual(
-                0, ag.generate_content_config.thinking_config.thinking_budget, rol)
+            nivel = ag.generate_content_config.thinking_config.thinking_level
+            self.assertEqual("LOW", getattr(nivel, "value", nivel), rol)
 
 
 class FechaDeHoyTest(unittest.TestCase):
