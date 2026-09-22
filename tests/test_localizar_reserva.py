@@ -67,7 +67,9 @@ class BuscarPorTitularTest(unittest.TestCase):
         bq = _BQ()
         with patch.object(agent, "_bq", bq):
             agent.consultar_reservas(**kwargs)
-        return bq.consultas[-1][0], bq.params()
+        # La primera es la búsqueda; sin resultados, detrás van las de
+        # nombres parecidos.
+        return bq.consultas[0][0], bq.params(0)
 
     def test_cada_palabra_sin_tildes_y_en_cualquier_orden(self):
         sql, params = self._buscar(titular="Verónica García")

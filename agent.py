@@ -1002,7 +1002,7 @@ def obtener_detalle_propiedad(
 
     matches = [_row_to_dict(r) for r in rows]
     if not matches:
-        return {"matches": [], "count": 0}
+        return _con_sugerencias({"matches": [], "count": 0}, nombre)
 
     # El desglose es enriquecimiento opcional: se consulta aparte para que una
     # ausencia o un cambio en Planta/Banios/Estancia no inutilice la ficha.
@@ -1649,7 +1649,7 @@ def consultar_disponibilidad(
     total = int(matches[0].pop("total_disponibles")) if matches else 0
     for match in matches[1:]:
         match.pop("total_disponibles", None)
-    return {
+    resultado = {
         "available": total > 0,
         "total_disponibles": total,
         "matches": matches,
@@ -1659,6 +1659,8 @@ def consultar_disponibilidad(
             "zona_horaria": "Europe/Madrid",
         },
     }
+    # Sin resultados puede ser que no esté libre o que el nombre esté mal.
+    return _con_sugerencias(resultado, villa_nombre) if not total else resultado
 
 
 def _sql_villa_libre(desde: str = "@fecha_desde", hasta: str = "@fecha_hasta",
@@ -1981,7 +1983,9 @@ def alternativas_villa(
         if candidatas:
             return {"matches": [], **_error_villa_ambigua(villa_nombre, candidatas)}
         if not filas:
-            return {"matches": [], "error": f"No hay ninguna villa llamada '{villa_nombre}'."}
+            return _con_sugerencias(
+                {"matches": [], "error": f"No hay ninguna villa llamada '{villa_nombre}'."},
+                villa_nombre)
         villa = filas[0]
         villa_id = villa["villa_id"]
         id_villa = bigquery.ScalarQueryParameter("villa_id", "STRING", villa_id)
@@ -2123,6 +2127,119 @@ def _redondear(valor):
     return round(valor, 2) if valor is not None else None
 
 
+# Nombres de las villas activas para sugerir cuando uno está mal escrito.
+# Cambian poco: se leen una vez cada 10 minutos.
+_NOMBRES_VILLAS_TTL = 600
+_nombres_villas_cache: tuple[float, list[str]] = (0.0, [])
+
+
+def _nombres_villas() -> list[str]:
+    global _nombres_villas_cache
+    leido, nombres = _nombres_villas_cache
+    if nombres and time.monotonic() - leido < _NOMBRES_VILLAS_TTL:
+        return nombres
+    filas = _bq.query(
+        f"SELECT DISTINCT nombre FROM {TABLA_VILLA} WHERE es_activo = TRUE AND nombre IS NOT NULL",
+        job_config=bigquery.QueryJobConfig(maximum_bytes_billed=_BILLING_CAP),
+    ).result()
+    nombres = sorted({f.nombre for f in filas})
+    _nombres_villas_cache = (time.monotonic(), nombres)
+    return nombres
+
+
+def _nombre_comparable(texto: str) -> str:
+    sin_tildes = unicodedata.normalize("NFKD", texto).encode("ascii", "ignore").decode()
+    limpio = " ".join(re.findall(r"[A-Z0-9]+", sin_tildes.upper()))
+    return re.sub(r"^VILLA ", "", limpio)
+
+
+def _sugerir_villas(texto: str, n: int = 5) -> list[str]:
+    """Villas de nombre parecido a uno que no encaja con ninguna.
+
+    Vacío si el nombre sí encaja con alguna (entonces "no hay resultados"
+    significa otra cosa: no está libre, no tiene reservas...) o si no hay
+    ninguna parecida. Nunca rompe la herramienta que la llama.
+    """
+    try:
+        nombres = _nombres_villas()
+    except Exception:
+        log.warning("No se pudieron leer los nombres de las villas", exc_info=True)
+        return []
+    pedido = _nombre_comparable(texto or "")
+    if not pedido:
+        return []
+    comparables = {_nombre_comparable(nombre): nombre for nombre in nombres}
+    if any(pedido in comparable for comparable in comparables):
+        return []
+    parecidos = difflib.get_close_matches(pedido, list(comparables), n=n, cutoff=0.6)
+    if not parecidos:
+        return []
+    # Solo las cercanas a la mejor: con "Adorra", ADORA y no LADERA o SARA.
+    parecido = lambda c: difflib.SequenceMatcher(None, pedido, c).ratio()
+    mejor = parecido(parecidos[0])
+    return [comparables[p] for p in parecidos if parecido(p) >= mejor - 0.1]
+
+
+def _con_sugerencias(resultado: dict, villa_nombre: str | None) -> dict:
+    """Si el nombre de la villa no encaja con ninguna, añade las parecidas."""
+    if villa_nombre:
+        sugerencias = _sugerir_villas(villa_nombre)
+        if sugerencias:
+            resultado["sugerencias"] = sugerencias
+            resultado["aviso_nombre"] = (
+                f"No hay ninguna villa llamada '{villa_nombre}'. "
+                "Pregunta si se refiere a alguna de las sugerencias.")
+    return resultado
+
+
+def _sugerir_titulares(titular: str) -> list[str]:
+    """Titulares de reservas con nombre parecido (una o dos letras distintas
+    por palabra), para cuando una búsqueda por titular no da nada."""
+    sin_tildes = unicodedata.normalize("NFKD", titular).encode("ascii", "ignore").decode()
+    palabras = [p for p in re.findall(r"[a-z0-9]+", sin_tildes.lower()) if len(p) > 1][:4]
+    if not palabras:
+        return []
+    try:
+        filas = list(_bq.query(
+            f"""
+            WITH p AS (SELECT palabra FROM UNNEST(@palabras) AS palabra),
+            n AS (
+                SELECT DISTINCT cliente_nombre,
+                       REGEXP_REPLACE(NORMALIZE(LOWER(cliente_nombre), NFD), r'\\p{{M}}', '') AS norm
+                FROM {TABLA_RESERVAS}
+                WHERE cliente_nombre IS NOT NULL
+            ),
+            t AS (SELECT cliente_nombre, tok FROM n, UNNEST(REGEXP_EXTRACT_ALL(norm, r'[a-z0-9]+')) AS tok),
+            d AS (
+                SELECT t.cliente_nombre, p.palabra, MIN(EDIT_DISTANCE(t.tok, p.palabra)) AS mejor
+                FROM t CROSS JOIN p
+                GROUP BY 1, 2
+            )
+            SELECT cliente_nombre, SUM(mejor) AS puntos
+            FROM d
+            GROUP BY 1
+            HAVING COUNT(*) = @n AND MAX(mejor) <= 2
+            ORDER BY puntos, cliente_nombre
+            LIMIT 10
+            """,
+            job_config=bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ArrayQueryParameter("palabras", "STRING", palabras),
+                    bigquery.ScalarQueryParameter("n", "INT64", len(palabras)),
+                ],
+                maximum_bytes_billed=_BILLING_CAP,
+            ),
+        ).result())
+    except Exception:
+        log.warning("No se pudieron buscar titulares parecidos", exc_info=True)
+        return []
+    if not filas:
+        return []
+    # Solo los que están a una letra como mucho del más parecido.
+    mejor = min(f.puntos for f in filas)
+    return [f.cliente_nombre for f in filas if f.puntos <= mejor + 1][:5]
+
+
 def _una_sola_villa(rows: list[dict], villa_nombre: str):
     """Deja solo las filas de una villa, o dice que el nombre es ambiguo.
 
@@ -2244,6 +2361,8 @@ def consultar_precios(
     resultado = _componer_precios(rows, desde, hasta)
     if villa:
         resultado["villa"] = villa
+    if not rows:
+        _con_sugerencias(resultado, villa_nombre)
     return resultado
 
 
@@ -2394,6 +2513,8 @@ def calendario_villa(
     resultado = _componer_calendario(rows, desde, hasta)
     if villa:
         resultado["villa"] = villa
+    if not rows:
+        _con_sugerencias(resultado, villa_nombre)
     return resultado
 
 
@@ -2838,7 +2959,14 @@ def consultar_reservas(
         return {"reservas": [], "count": 0, "total": 0, "error": str(e)}
 
     reservas, total = _separar_total(rows)
-    return {"reservas": reservas, "count": len(reservas), "total": total}
+    resultado = {"reservas": reservas, "count": len(reservas), "total": total}
+    if not total:
+        _con_sugerencias(resultado, villa_nombre)
+        if titular:
+            parecidos = _sugerir_titulares(titular)
+            if parecidos:
+                resultado["sugerencias_titular"] = parecidos
+    return resultado
 
 
 def resumen_reservas(
@@ -3259,6 +3387,11 @@ en la Costa Blanca (España). Ayudas con villas Y con información turística lo
   si antes buscabas disponibilidad, sigue con `consultar_disponibilidad`.
   Solo quita un filtro si el usuario lo pide.
 - Nunca inventes datos. Si no hay resultados en BigQuery, sugiere alternativas.
+- Si una herramienta devuelve `sugerencias` (villas de nombre parecido) o
+  `sugerencias_titular` (titulares parecidos), el nombre estaba mal escrito:
+  no digas solo que no hay resultados; pregunta "¿te refieres a …?" con esas
+  opciones. Si solo hay una muy clara, puedes consultarla directamente y
+  decir que has usado ese nombre.
 - Distancias: `distancia_mar_m` es hasta la costa (puede ser una zona de
   rocas) y `distancia_playa_arena_m` hasta la playa de arena más cercana; si
   preguntan por "la playa", da las dos. Las listas de villas traen ambas; si

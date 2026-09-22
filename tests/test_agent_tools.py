@@ -646,6 +646,10 @@ class PreciosPorDefectoTest(unittest.TestCase):
         patcher = patch.object(agent, "_bq", self.bq)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # Sin precios se buscarían villas de nombre parecido: aquí no interesa.
+        nombres = patch.object(agent, "_nombres_villas", return_value=[])
+        nombres.start()
+        self.addCleanup(nombres.stop)
 
     def test_sin_fechas_usa_los_proximos_dias(self):
         r = agent.consultar_precios("ADORA")

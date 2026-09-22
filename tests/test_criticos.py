@@ -67,7 +67,8 @@ class PreciosDeUnaSolaVillaTest(unittest.TestCase):
 
     def test_la_consulta_trae_la_villa_de_cada_fila(self):
         bq = _bq_con([])
-        with patch.object(agent, "_bq", bq):
+        with patch.object(agent, "_bq", bq), \
+             patch.object(agent, "_nombres_villas", return_value=[]):
             agent.consultar_precios("ADORA", "2027-07-01", "2027-07-01")
         self.assertIn("v.nombre AS villa_nombre", _sql(bq))
 
