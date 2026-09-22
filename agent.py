@@ -3667,13 +3667,16 @@ _REGLAS_GESTION = """
   datos.
 - Una fecha en una pregunta de reservas puede referirse a la entrada, la
   salida, la confirmación, la creación (cuándo se hizo) o la anulación, y dan
-  cifras muy distintas ("confirmadas este mes": confirmadas durante el mes, o
-  confirmadas con entrada en el mes). Di siempre qué fecha has usado ("con
-  entrada en septiembre"; el resultado trae `criterio_fecha`). Si la pregunta
-  admite dos lecturas razonables y la respuesta es un recuento o un total,
-  consulta las dos y da las dos cifras, cada una con su criterio. Si es una
-  lista larga, da la lectura más probable y ofrece la otra en una frase.
-  Pregunta antes solo si no hay una lectura más probable.
+  cifras muy distintas. Si la pregunta junta un estado con un periodo y admite
+  dos lecturas ("reservas confirmadas este mes": confirmadas durante el mes, o
+  confirmadas con entrada en el mes; "canceladas en agosto": anuladas en
+  agosto, o con entrada en agosto), NO consultes ni des varias cifras:
+  pregunta primero qué fecha quiere, en una frase y con las opciones
+  concretas ("¿Te refieres a las reservas confirmadas durante septiembre o a
+  las confirmadas con entrada en septiembre?"). Cuando conteste, consulta solo
+  esa. Si la pregunta es clara ("que se han confirmado esta semana", "con
+  entrada en agosto", "hechas hoy"), no preguntes. Di siempre qué fecha has
+  usado ("con entrada en septiembre"; el resultado trae `criterio_fecha`).
 - Para "las reservas más caras" o "las de mayor importe" usa
   `consultar_reservas(ordenar_por="importe", limite=N)` con las fechas que
   toquen; no escribas SQL para eso. Deja fuera perdidas y anuladas.

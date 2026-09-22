@@ -95,11 +95,18 @@ class RecuadroDeFiltrosTest(unittest.TestCase):
 
 class InstruccionesTest(unittest.TestCase):
 
-    def test_ante_la_duda_dice_el_criterio_o_da_las_dos_cifras(self):
+    def test_ante_la_duda_pregunta_antes_de_consultar(self):
+        # El usuario prefiere que pregunte a recibir todas las lecturas.
         for rol in ("interno", "admin"):
             texto = " ".join(agent.AGENTS[rol].instruction.split()).lower()
+            self.assertIn("pregunta primero qué fecha quiere", texto, rol)
+            self.assertNotIn("da las dos cifras", texto, rol)
+
+    def test_si_la_pregunta_es_clara_no_pregunta_y_dice_el_criterio(self):
+        for rol in ("interno", "admin"):
+            texto = " ".join(agent.AGENTS[rol].instruction.split()).lower()
+            self.assertIn("si la pregunta es clara", texto, rol)
             self.assertIn("di siempre qué fecha has usado", texto, rol)
-            self.assertIn("da las dos cifras", texto, rol)
 
 
 if __name__ == "__main__":
