@@ -12,6 +12,7 @@ libres no es un dato con color propio y va siempre en leyenda y tabla.
 """
 from __future__ import annotations
 
+import datetime
 from typing import Any, Callable, Iterable
 
 import altair as alt
@@ -227,33 +228,107 @@ def grafico_precios(v: dict) -> alt.Chart:
     return _estilo(alt.layer(lineas, zona, puntos, guia).properties(height=240))
 
 
-def grafico_calendario(v: dict) -> alt.Chart:
-    """Franja de días: color por clase, canal y fechas en el detalle."""
-    df = pd.DataFrame(v["tramos"])
-    df["inicio"] = pd.to_datetime(df["desde"])
-    # "hasta" es el último día del tramo: la barra acaba al final de ese día.
-    df["fin"] = pd.to_datetime(df["hasta"]) + pd.Timedelta(days=1)
-    df["categoria"] = df["tipo_ocupacion"].map(categoria_calendario)
-    df["canal"] = df["tipo_ocupacion"].fillna("Sin dato")
+_MESES = ("Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto",
+          "Septiembre", "Octubre", "Noviembre", "Diciembre")
+_CLASE_CALENDARIO = {
+    "Reserva de cliente": "reserva", "Uso del propietario": "propietario",
+    "Bloqueada": "bloqueada", "Libre": "libre",
+}
 
-    return _estilo(
-        alt.Chart(df).mark_bar(size=28, cornerRadius=4, stroke=SUPERFICIE, strokeWidth=2).encode(
-            # En la burbuja del chat las fechas de un mes entero se pisaban.
-            x=alt.X("inicio:T", title=None,
-                    axis=alt.Axis(format="%d/%m", grid=False, labelOverlap=True, tickCount=6,
-                                  labelPadding=6, offset=4, domain=False)),
-            x2="fin:T",
-            color=alt.Color("categoria:N", title=None, scale=alt.Scale(
-                domain=_CATEGORIAS_CALENDARIO, range=_COLORES_CALENDARIO)),
-            tooltip=[
-                alt.Tooltip("canal:N", title="Estado"),
-                alt.Tooltip("desde:N", title="Desde"),
-                alt.Tooltip("hasta:N", title="Hasta"),
-                alt.Tooltip("noches:Q", title="Noches"),
-            ],
-        # La altura incluye la banda de fechas: con 70 px quedaban cortadas.
-        ).properties(height=90)
+_CSS_CALENDARIO = f"""
+.abv-cal {{ font-family: {FUENTE}; color: {TINTA}; }}
+.abv-cal .abv-cal-leyenda {{ display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; margin: 2px 0 10px; }}
+.abv-cal .abv-cal-leyenda span {{ display: inline-flex; align-items: center; gap: 6px; }}
+.abv-cal .abv-cal-leyenda i {{ width: 12px; height: 12px; border-radius: 3px; display: inline-block; }}
+.abv-cal .abv-cal-meses {{ display: flex; flex-wrap: wrap; gap: 14px 22px; }}
+.abv-cal .abv-cal-mes {{ flex: 0 1 238px; }}
+.abv-cal .abv-cal-titulo {{ font-size: 13px; font-weight: 600; margin: 0 0 6px 2px; }}
+.abv-cal table {{ border-collapse: separate; border-spacing: 3px; width: 100%; table-layout: fixed; margin: 0; border: none; }}
+.abv-cal th {{ font-size: 10.5px; font-weight: 600; color: {TINTA_SUAVE}; text-align: center; padding: 0 0 2px; border: none; background: none; }}
+.abv-cal td {{ height: 30px; text-align: center; vertical-align: middle; font-size: 12px; font-weight: 500;
+  border-radius: 5px; padding: 0; border: none; cursor: default; }}
+.abv-cal td.abv-cal-vacio {{ background: transparent; }}
+.abv-cal td.abv-cal-libre {{ background: {FONDO_LIBRE}; color: {TINTA}; }}
+.abv-cal td.abv-cal-reserva {{ background: {AZUL}; color: #fff; }}
+.abv-cal td.abv-cal-propietario {{ background: {NARANJA}; color: #fff; }}
+.abv-cal td.abv-cal-bloqueada {{ background: {GRIS_BLOQUEO}; color: #fff; }}
+.abv-cal td.abv-cal-fuera {{ background: transparent; color: #B9B6AE; font-weight: 400; }}
+.abv-cal td.abv-cal-entrada {{ box-shadow: inset 3px 0 0 {SUPERFICIE}; }}
+.abv-cal td.abv-cal-hoy {{ outline: 2px solid {TINTA}; outline-offset: -2px; }}
+"""
+
+
+def _dd_mm(fecha: datetime.date) -> str:
+    return fecha.strftime("%d/%m")
+
+
+def calendario_html(v: dict, hoy: datetime.date | None = None) -> str:
+    """El calendario de una villa como un calendario de verdad: un mes por
+    rejilla, de lunes a domingo, cada día con el color de su estado. Al pasar
+    el ratón, el estado tal cual (el canal de la reserva) y las fechas del
+    tramo. El primer día de cada reserva lleva una marca, para distinguir dos
+    reservas seguidas."""
+    import calendar
+    from html import escape
+
+    hoy = hoy or datetime.date.today()
+    dias: dict[datetime.date, tuple[str, str, bool]] = {}
+    previo = None
+    for tramo in v.get("tramos") or []:
+        try:
+            desde = datetime.date.fromisoformat(str(tramo["desde"])[:10])
+            hasta = datetime.date.fromisoformat(str(tramo["hasta"])[:10])
+        except (KeyError, ValueError):
+            continue
+        estado = str(tramo.get("tipo_ocupacion") or "Sin dato")
+        clase = _CLASE_CALENDARIO[categoria_calendario(estado)]
+        noches = (hasta - desde).days + 1
+        titulo = f"{estado} · {_dd_mm(desde)} – {_dd_mm(hasta)} ({noches} {'día' if noches == 1 else 'días'})"
+        # Marca de entrada: una reserva que empieza justo tras otra del mismo color.
+        entrada = previo == clase and clase != "libre"
+        dia = desde
+        while dia <= hasta:
+            dias[dia] = (clase, titulo, entrada and dia == desde)
+            dia += datetime.timedelta(days=1)
+        previo = clase
+    if not dias:
+        return ""
+
+    primero, ultimo = min(dias), max(dias)
+    meses = []
+    anio, mes = primero.year, primero.month
+    while (anio, mes) <= (ultimo.year, ultimo.month):
+        filas = []
+        for semana in calendar.Calendar(firstweekday=0).monthdatescalendar(anio, mes):
+            celdas = []
+            for dia in semana:
+                if dia.month != mes:
+                    celdas.append('<td class="abv-cal-vacio"></td>')
+                    continue
+                if dia in dias:
+                    clase, titulo, entrada = dias[dia]
+                    clases = f"abv-cal-{clase}" + (" abv-cal-entrada" if entrada else "")
+                else:
+                    clases, titulo = "abv-cal-fuera", "Fuera del periodo consultado"
+                if dia == hoy:
+                    clases += " abv-cal-hoy"
+                    titulo += " · hoy"
+                celdas.append(f'<td class="{clases}" title="{escape(titulo)}">{dia.day}</td>')
+            filas.append("<tr>" + "".join(celdas) + "</tr>")
+        cabecera = "".join(f"<th>{d}</th>" for d in "LMXJVSD")
+        meses.append(
+            f'<div class="abv-cal-mes"><div class="abv-cal-titulo">{_MESES[mes - 1]} {anio}</div>'
+            f"<table><thead><tr>{cabecera}</tr></thead><tbody>{''.join(filas)}</tbody></table></div>"
+        )
+        anio, mes = (anio + 1, 1) if mes == 12 else (anio, mes + 1)
+
+    leyenda = "".join(
+        f'<span><i style="background:{color}"></i>{etiqueta}</span>'
+        for etiqueta, color in zip(_CATEGORIAS_CALENDARIO, _COLORES_CALENDARIO)
     )
+    return (f"<style>{_CSS_CALENDARIO}</style><div class=\"abv-cal\">"
+            f'<div class="abv-cal-leyenda">{leyenda}</div>'
+            f'<div class="abv-cal-meses">{"".join(meses)}</div></div>')
 
 
 def grafico_resumen(v: dict) -> alt.Chart:
@@ -424,7 +499,7 @@ def render(v: dict, key: str | None = None) -> str | None:
             ("Libres", _numero(resumen.get("noches_libres"))),
             ("Bloqueadas", _numero(resumen.get("noches_bloqueadas"))),
         ]), unsafe_allow_html=True)
-        st.altair_chart(grafico_calendario(v), use_container_width=True, theme=None)
+        st.html(calendario_html(v))
     elif tipo == "resumen_reservas":
         st.caption(f"Reservas por {v['agrupar_por']}")
         st.altair_chart(grafico_resumen(v), use_container_width=True, theme=None)

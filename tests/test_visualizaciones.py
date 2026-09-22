@@ -6,6 +6,7 @@ punto y cada barra es un dato real.
 
 import asyncio
 import json
+import re
 import unittest
 from unittest.mock import Mock, patch
 
@@ -121,24 +122,64 @@ class CalendarioTest(unittest.TestCase):
         self.assertEqual("Bloqueada", viz.categoria_calendario("No Disponible"))
         self.assertEqual("Libre", viz.categoria_calendario("Libre"))
 
-    def test_el_grafico_usa_la_paleta_y_conserva_el_canal(self):
-        v = {"tipo": "calendario", "villa": "ADORA", "tramos": [
-            {"desde": "2026-10-01", "hasta": "2026-10-02", "tipo_ocupacion": "Libre", "noches": 2},
-            {"desde": "2026-10-03", "hasta": "2026-10-06", "tipo_ocupacion": "Reserva Agencia", "noches": 4},
-        ], "resumen": {}}
-        spec = _spec(viz.grafico_calendario(v))
-        for color in (AZUL, NARANJA, "#8A8780", "#E9E4D8"):
-            self.assertIn(color, spec, color)
-        self.assertIn("Reserva Agencia", spec)   # el canal va en el detalle
+    TRAMOS = {"tipo": "calendario", "villa": "ADORA", "tramos": [
+        {"desde": "2026-10-01", "hasta": "2026-10-02", "tipo_ocupacion": "Libre", "noches": 2},
+        {"desde": "2026-10-03", "hasta": "2026-10-06", "tipo_ocupacion": "Reserva Agencia", "noches": 4},
+        {"desde": "2026-10-07", "hasta": "2026-10-09", "tipo_ocupacion": "Reserva", "noches": 3},
+        {"desde": "2026-10-10", "hasta": "2026-11-02", "tipo_ocupacion": "Reserva Propietario", "noches": 24},
+    ], "resumen": {}}
 
-    def test_las_fechas_del_eje_no_se_pisan(self):
-        # En la burbuja del chat las fechas de octubre se solapaban.
-        v = {"tipo": "calendario", "villa": "ADORA", "tramos": [
-            {"desde": "2026-10-01", "hasta": "2026-10-31", "tipo_ocupacion": "Libre", "noches": 31},
-        ], "resumen": {}}
-        eje = viz.grafico_calendario(v).to_dict()["encoding"]["x"]["axis"]
-        self.assertTrue(eje.get("labelOverlap"))
-        self.assertLessEqual(eje.get("tickCount", 99), 6)
+    def _dias(self, h, mes="Octubre"):
+        """Los días de un mes: {día: (clases, detalle)}."""
+        rejilla = re.search(mes + r' 2026</div><table>(.*?)</table>', h, re.S).group(1)
+        return {int(n): (clase, titulo) for clase, titulo, n in
+                re.findall(r'<td class="([^"]*)"[^>]*title="([^"]*)"[^>]*>(\d+)</td>', rejilla)}
+
+    def test_un_mes_por_rejilla_de_lunes_a_domingo(self):
+        h = viz.calendario_html(self.TRAMOS)
+        self.assertIn("Octubre 2026", h)
+        self.assertIn("Noviembre 2026", h)
+        for dia in ("L", "M", "X", "J", "V", "S", "D"):
+            self.assertIn(f"<th>{dia}</th>", h)
+        # El 1 de octubre de 2026 es jueves: tres huecos antes.
+        primera = re.search(r"<tbody><tr>(.*?)</tr>", h).group(1)
+        self.assertEqual(3, primera.count('class="abv-cal-vacio"'))
+
+    def test_cada_dia_con_su_color_y_su_detalle(self):
+        dias = self._dias(viz.calendario_html(self.TRAMOS))
+        self.assertIn("abv-cal-libre", dias[1][0])
+        self.assertIn("abv-cal-reserva", dias[4][0])
+        self.assertIn("Reserva Agencia", dias[4][1])
+        self.assertIn("03/10 – 06/10", dias[4][1])
+        self.assertIn("abv-cal-propietario", dias[15][0])
+
+    def test_reservas_seguidas_se_distinguen(self):
+        dias = self._dias(viz.calendario_html(self.TRAMOS))
+        self.assertIn("abv-cal-entrada", dias[7][0])
+        self.assertNotIn("abv-cal-entrada", dias[8][0])
+
+    def test_dias_fuera_del_periodo_sin_color(self):
+        dias = self._dias(viz.calendario_html(self.TRAMOS), "Noviembre")
+        self.assertIn("abv-cal-propietario", dias[2][0])
+        self.assertIn("abv-cal-fuera", dias[30][0])
+
+    def test_leyenda_con_la_paleta(self):
+        h = viz.calendario_html(self.TRAMOS)
+        for color in (AZUL, NARANJA, "#8A8780", "#E9E4D8"):
+            self.assertIn(color, h, color)
+        for etiqueta in ("Reserva de cliente", "Uso del propietario", "Bloqueada", "Libre"):
+            self.assertIn(etiqueta, h)
+
+    def test_estilos_acotados(self):
+        css = re.search(r"<style>(.*?)</style>", viz.calendario_html(self.TRAMOS), re.S).group(1)
+        for regla in re.findall(r"(?:^|})\s*([^{}@]+?)\s*{", css):
+            for selector in regla.split(","):
+                self.assertTrue(selector.strip().startswith(".abv-cal"), selector)
+
+    def test_el_texto_se_escapa(self):
+        v = dict(self.TRAMOS, tramos=[{"desde": "2026-10-01", "hasta": "2026-10-01",
+                                       "tipo_ocupacion": "<b>x</b>", "noches": 1}])
+        self.assertNotIn("<b>x</b>", viz.calendario_html(v))
 
 
 class PreciosTest(unittest.TestCase):
