@@ -348,6 +348,11 @@ _SINONIMOS_FICHA = {
     "padel": "pista_padel", "pista_de_padel": "pista_padel",
     "wifi": "internet", "aire": "aire_acondicionado",
     "bbq": "barbacoa", "barbacoa_de_obra": "barbacoa_obra",
+    # Parcela de OV_Exterior: "cerrada" es la vallada.
+    "vallada": "parcela_cerrada", "vallado": "parcela_cerrada",
+    "parcela_vallada": "parcela_cerrada", "cerrada": "parcela_cerrada",
+    "semivallada": "parcela_semicerrada", "parcela_semivallada": "parcela_semicerrada",
+    "semicerrada": "parcela_semicerrada", "abierta": "parcela_abierta",
 }
 _CONDICION_FICHA = re.compile(
     r"^\s*(?P<neg>(?:sin|no)\s+|!)?(?P<campo>[^<>=!]+?)\s*"
@@ -574,8 +579,8 @@ def buscar_propiedades(
             los parecidos.
         direccion: Calle, número o urbanización ("Calle Kabul 7", "Cumbre del
             Sol", "La Fustera"). Sirve también para urbanizaciones y partidas
-            que no son un pueblo ni una zona. No hay dato de parcela vallada
-            ni de balcón: dilo si lo piden.
+            que no son un pueblo ni una zona. No hay dato de balcón: dilo
+            si lo piden.
         texto: Busca en nombre y tipo de villa.
 
     Returns:
@@ -833,6 +838,9 @@ _SECCIONES_FICHA: dict[str, list[str]] = {
         # Barbacoa de OV_Exterior: tiene_barbacoa es "de obra o portátil".
         "tiene_barbacoa", "tiene_barbacoa_obra", "tiene_barbacoa_portatil",
         "tipo_barbacoa_portatil", "gas_barbacoa", "barbacoa_plancha",
+        # Parcela de OV_Exterior; sin casilla marcada queda a None (no consta).
+        "tipo_parcela", "parcela_cerrada", "parcela_semicerrada",
+        "parcela_abierta", "terreno_parcela",
         "tiene_cesped", "tiene_arbolado",
         "tiene_solarium", "tiene_jardin",
     ],
@@ -3525,7 +3533,13 @@ en la Costa Blanca (España). Ayudas con villas Y con información turística lo
   piedra, eléctrica...). En la ficha también salen el gas (bombonas, tanque) y
   la plancha. De las barbacoas de obra no consta si son de carbón, gas o
   eléctricas: si lo preguntan, dilo.
-- No hay dato de parcela vallada ni de balcón: dilo claramente.
+- Parcela: "parcela vallada" o "cerrada" (`parcela_cerrada`), "semivallada"
+  (`parcela_semicerrada`), "abierta" (`parcela_abierta`) y el terreno
+  ("terreno_parcela = plana" o inclinada). Solo algo más de la mitad de las
+  villas lo tiene marcado: si `tipo_parcela` viene vacío, di que no consta; no
+  lo cuentes como que no está vallada. Si pide villas no valladas, busca
+  "parcela abierta", no "sin parcela vallada".
+- No hay dato de balcón: dilo claramente.
 
 ## Fecha, hora y disponibilidad
 - La zona horaria del negocio y del agente es `Europe/Madrid`.

@@ -1003,6 +1003,50 @@ class BarbacoaDesdeExteriorTest(_ConBigQueryFalso):
             self.assertIsNone(aviso.search(agent.AGENTS[rol].instruction), rol)
 
 
+class ParcelaDesdeExteriorTest(_ConBigQueryFalso):
+    """Parcela cerrada (vallada), semicerrada o abierta, y plana o inclinada,
+    de OV_Exterior. Sin casilla marcada el dato no consta: no es un "no"."""
+
+    TIPOS = {
+        "parcela_cerrada": "BOOLEAN", "parcela_semicerrada": "BOOLEAN",
+        "parcela_abierta": "BOOLEAN", "tipo_parcela": "STRING",
+        "terreno_parcela": "STRING",
+    }
+
+    def setUp(self):
+        super().setUp()
+        tipos = patch.object(agent, "_tipos_columnas_villa", return_value=self.TIPOS)
+        tipos.start()
+        self.addCleanup(tipos.stop)
+
+    def test_la_ficha_muestra_la_parcela(self):
+        for columna in self.TIPOS:
+            self.assertIn(columna, agent._SECCIONES_FICHA["exterior"], columna)
+
+    def test_vallada_es_parcela_cerrada(self):
+        for escrito in ("parcela vallada", "vallada", "parcela cerrada", "cerrada", "vallado"):
+            agent.buscar_propiedades(caracteristicas=[escrito])
+            self.assertIn("v.parcela_cerrada = TRUE", self._sql(), escrito)
+
+    def test_semivallada_y_abierta(self):
+        agent.buscar_propiedades(caracteristicas=["parcela semivallada"])
+        self.assertIn("v.parcela_semicerrada = TRUE", self._sql())
+        agent.buscar_propiedades(caracteristicas=["parcela abierta"])
+        self.assertIn("v.parcela_abierta = TRUE", self._sql())
+
+    def test_terreno_plano(self):
+        agent.buscar_propiedades(caracteristicas=["terreno_parcela = plana"])
+        self.assertIn("LOWER(COALESCE(v.terreno_parcela, '')) LIKE", self._sql())
+
+    def test_ya_no_dice_que_no_hay_dato_de_vallado(self):
+        for rol in ("interno", "admin", "cliente"):
+            texto = " ".join(agent.AGENTS[rol].instruction.split())
+            self.assertNotIn("No hay dato de parcela vallada", texto, rol)
+            self.assertIn("parcela_cerrada", texto, rol)
+            self.assertIn("no consta", texto, rol)
+        self.assertNotIn("No hay dato de parcela vallada", " ".join(agent.buscar_propiedades.__doc__.split()))
+
+
 class FiltroPorCualquierDatoDeFichaTest(_ConBigQueryFalso):
     """El usuario puede filtrar por cualquier dato de la ficha, no solo por los
     que tienen parámetro propio."""
