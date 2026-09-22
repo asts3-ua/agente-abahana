@@ -27,6 +27,7 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
 import filtros
+import exportar
 import frescura
 import visualizaciones
 from agent import AGENTS, TABLA_VILLA, _bq
@@ -584,6 +585,44 @@ def _render_visualizaciones(msg: dict) -> None:
             log.warning("No se pudo pintar la visualización %s", v.get("tipo"), exc_info=True)
 
 
+def _exportable_del_turno(herramientas: list[tuple[str, dict, dict]]) -> tuple[list[dict], bytes | None]:
+    """Listas del turno y su Excel, calculados al responder (no en cada clic).
+    Nunca rompe la respuesta de texto."""
+    try:
+        tablas = exportar.tablas(herramientas)
+        return tablas, (exportar.a_excel(tablas) if tablas else None)
+    except Exception:
+        log.warning("No se pudo preparar la exportación", exc_info=True)
+        return [], None
+
+
+def _render_exportar(msg: dict, i: int) -> None:
+    """Copiar la respuesta (para un correo o un chat) o sus listas (para una
+    hoja de seguimiento), y descargarlas en Excel."""
+    tablas = msg.get("tablas") or []
+    col_copiar, col_excel, _ = st.columns([3, 3, 6], vertical_alignment="center")
+    with col_copiar:
+        with st.popover("Copiar", icon=":material/content_copy:"):
+            st.caption("Texto de la respuesta, para un correo o un chat. "
+                       "Pulsa el icono de copiar de la esquina.")
+            st.code(exportar.texto_plano(msg["content"]), language=None, wrap_lines=True)
+            for tabla in tablas:
+                # El total puede ser mayor porque se pidió un top o porque la
+                # herramienta limita la lista: se dice sin suponer cuál.
+                parcial = (f" · {len(tabla['filas'])} de las {tabla['total']} que cumplen la búsqueda"
+                           if tabla.get("total") and tabla["total"] > len(tabla["filas"]) else "")
+                st.caption(f"{tabla['titulo']}, para pegar en una hoja de cálculo{parcial}")
+                st.code(exportar.a_tsv(tabla), language=None)
+    if msg.get("excel"):
+        with col_excel:
+            st.download_button(
+                "Excel", data=msg["excel"], icon=":material/download:",
+                file_name=f"abahana_{msg.get('turn_id') or i}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key=f"excel_{msg.get('turn_id') or i}",
+            )
+
+
 def _render_chat_history(messages: list[dict], email: str = "") -> None:
     avatar = _assistant_avatar()
     for i, msg in enumerate(messages):
@@ -593,6 +632,7 @@ def _render_chat_history(messages: list[dict], email: str = "") -> None:
                 _render_filtros(msg)
                 st.markdown(msg["content"])
                 _render_visualizaciones(msg)
+                _render_exportar(msg, i)
                 _render_assistant_feedback(msg, i)
         else:
             with st.chat_message(msg["role"]):
@@ -738,6 +778,7 @@ def _process_user_prompt(prompt: str, *, role: str, email: str) -> None:
         visuales = _preparar_visualizaciones(herramientas, role)
         lineas_filtros = _filtros_del_turno(herramientas)
         lineas_frescura = _frescura_del_turno(herramientas)
+        tablas_turno, excel_turno = _exportable_del_turno(herramientas)
 
     response_ms = int((time.perf_counter() - started) * 1000)
     turn_id = get_conversation_store().save_turn(
@@ -762,6 +803,9 @@ def _process_user_prompt(prompt: str, *, role: str, email: str) -> None:
         "filtros": lineas_filtros,
         # Cuándo se actualizaron esos datos, fijado al responder.
         "frescura": lineas_frescura,
+        # Para copiar o descargar las listas de la respuesta (solo en la sesión).
+        "tablas": tablas_turno,
+        "excel": excel_turno,
     })
     # El turno recién guardado cambia el histórico (conversación nueva, título
     # o recuento), así que la lista cacheada deja de valer.

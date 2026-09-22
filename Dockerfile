@@ -15,6 +15,7 @@ COPY chat_app.py .
 COPY conversation_store.py .
 COPY visualizaciones.py .
 COPY frescura.py .
+COPY exportar.py .
 COPY filtros.py .
 COPY assets/ assets/
 COPY agente_villas/ agente_villas/
