@@ -8,6 +8,7 @@ Autenticación: OAuth 2.0 directo con Google (sin Streamlit native auth).
 """
 
 import asyncio
+import datetime
 import base64
 import logging
 import hashlib
@@ -26,6 +27,7 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
 import filtros
+import frescura
 import visualizaciones
 from agent import AGENTS, TABLA_VILLA, _bq
 from conversation_store import TITLE_MAX_CHARS, get_conversation_store
@@ -542,10 +544,36 @@ def _filtros_del_turno(herramientas: list[tuple[str, dict, dict]]) -> list[str]:
         return []
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def _datos_frescura() -> dict:
+    """Último cambio en Etendo y hora de carga de cada tipo de dato. Diez
+    minutos de caché: las cargas son nocturnas y así no se consulta a cada
+    respuesta."""
+    return frescura.consultar(_bq)
+
+
+def _frescura_del_turno(herramientas: list[tuple[str, dict, dict]]) -> list[str]:
+    """Cuándo se actualizaron los datos de esta respuesta; se fija al
+    responder. Nunca rompe la respuesta de texto."""
+    try:
+        usados = frescura.dominios(herramientas)
+        web = frescura.uso_web(herramientas)
+        if not usados and not web:
+            return []
+        datos = _datos_frescura() if usados else {}
+        return frescura.lineas(usados, datos, datetime.datetime.now(frescura._MADRID), web=web)
+    except Exception:
+        log.warning("No se pudo calcular la actualidad de los datos", exc_info=True)
+        return []
+
+
 def _render_filtros(msg: dict) -> None:
     lineas = msg.get("filtros") or []
     if lineas:
         st.caption("  \n".join(f":material/filter_alt: {linea}" for linea in lineas))
+    actualidad = msg.get("frescura") or []
+    if actualidad:
+        st.caption("  \n".join(f":material/schedule: {linea}" for linea in actualidad))
 
 
 def _render_visualizaciones(msg: dict) -> None:
@@ -709,6 +737,7 @@ def _process_user_prompt(prompt: str, *, role: str, email: str) -> None:
         st.markdown(response)
         visuales = _preparar_visualizaciones(herramientas, role)
         lineas_filtros = _filtros_del_turno(herramientas)
+        lineas_frescura = _frescura_del_turno(herramientas)
 
     response_ms = int((time.perf_counter() - started) * 1000)
     turn_id = get_conversation_store().save_turn(
@@ -731,6 +760,8 @@ def _process_user_prompt(prompt: str, *, role: str, email: str) -> None:
         "visualizaciones": visuales,
         # Qué buscó el agente, para comprobar que entendió la pregunta.
         "filtros": lineas_filtros,
+        # Cuándo se actualizaron esos datos, fijado al responder.
+        "frescura": lineas_frescura,
     })
     # El turno recién guardado cambia el histórico (conversación nueva, título
     # o recuento), así que la lista cacheada deja de valer.
