@@ -649,6 +649,55 @@ def _render_pie_de_respuesta(msg: dict, i: int) -> None:
         _render_exportar(msg, i)
 
 
+# Lleva la vista al principio del último mensaje. El chat de Streamlit va en
+# un contenedor que se pega al final y vuelve a bajar en cuanto la página cambia
+# de alto (mapas, gráficos): moverlo sin más no se sostenía ni medio segundo.
+# Por eso, mientras la persona no toque nada, se ignoran sus intentos de mover
+# la vista; con la primera rueda, dedo, tecla o clic todo vuelve a ser normal
+# (y la siguiente pregunta se ve abajo como siempre). La cabecera fija tapa
+# unos 60 px: se deja margen.
+_SCRIPT_IR_AL_INICIO = """
+(function () {
+  const win = window.parent, doc = win.document;
+  const caja = doc.querySelector('[data-testid="stAppScrollToBottomContainer"]');
+  const mensajes = doc.querySelectorAll('[data-testid="stChatMessage"]');
+  const ultimo = mensajes[mensajes.length - 1];
+  if (!caja || !ultimo) {
+    if (ultimo) ultimo.scrollIntoView({block: 'start', behavior: 'instant'});
+    return;
+  }
+  if (win.__abvSoltarVista) win.__abvSoltarVista();
+  const nativo = Object.getOwnPropertyDescriptor(win.Element.prototype, 'scrollTop');
+  Object.defineProperty(caja, 'scrollTop', {
+    configurable: true,
+    get() { return nativo.get.call(this); },
+    set(v) { /* bloqueado hasta que la persona interactúe */ },
+  });
+  const eventos = ['wheel', 'touchstart', 'keydown', 'pointerdown'];
+  function soltar() {
+    delete caja.scrollTop;
+    eventos.forEach(function (e) { doc.removeEventListener(e, soltar, true); });
+    win.__abvSoltarVista = null;
+  }
+  win.__abvSoltarVista = soltar;
+  eventos.forEach(function (e) { doc.addEventListener(e, soltar, {capture: true, passive: true}); });
+  function ir() {
+    if (win.__abvSoltarVista !== soltar) return;
+    const hueco = ultimo.getBoundingClientRect().top - caja.getBoundingClientRect().top - 80;
+    nativo.set.call(caja, nativo.get.call(caja) + hueco);
+  }
+  [0, 300, 900].forEach(function (ms) { setTimeout(ir, ms); });
+})();
+"""
+
+
+def _ir_al_inicio_de_la_respuesta() -> None:
+    import streamlit.components.v1 as componentes
+
+    with st.container(key="ir_al_inicio"):
+        componentes.html(f"<script>{_SCRIPT_IR_AL_INICIO}</script>", height=0)
+
+
 def _render_chat_history(messages: list[dict], email: str = "") -> None:
     avatar = _assistant_avatar()
     for i, msg in enumerate(messages):
@@ -835,6 +884,8 @@ def _process_user_prompt(prompt: str, *, role: str, email: str) -> None:
     # El turno recién guardado cambia el histórico (conversación nueva, título
     # o recuento), así que la lista cacheada deja de valer.
     _invalidate_history_cache(email)
+    # Al repintar, la vista irá al principio de la respuesta, no a su final.
+    st.session_state["ir_al_inicio_de_la_respuesta"] = True
     st.rerun()
 
 
@@ -1687,6 +1738,14 @@ a:focus-visible,
     background-color: var(--abv-accent-wash) !important;
 }
 
+/* El script que lleva la vista al principio de la respuesta no ocupa sitio. */
+.st-key-ir_al_inicio {
+    height: 0 !important;
+    min-height: 0 !important;
+    overflow: hidden;
+    margin: 0 !important;
+}
+
 /* Línea a todo el ancho sobre el pie de la respuesta (valoración, copiar,
    Excel), que va en una sola fila. */
 .abv-pie {
@@ -1926,6 +1985,10 @@ def main() -> None:
     # Al final y fuera de la barra lateral: el aviso de borrado no ocupa un
     # hueco en la página, así que no desplaza el historial al abrirse.
     _abrir_aviso_borrado(email)
+
+    # Solo tras una respuesta nueva: al pulsar un botón la página no salta.
+    if st.session_state.pop("ir_al_inicio_de_la_respuesta", False):
+        _ir_al_inicio_de_la_respuesta()
 
 
 if __name__ == "__main__":
