@@ -131,7 +131,7 @@ def _fechas(nombre: str, args: dict) -> list[str]:
             partes.append(f"noche del {_dia(_fecha(desde))}" if _fecha(desde) else str(desde))
         else:
             prefijo = {"consultar_reservas": "entrada ",
-                       "resumen_reservas": "entrada "}.get(nombre, "")
+                       "resumen_reservas": _prefijo_criterio(args)}.get(nombre, "")
             partes.append(prefijo + _rango(desde, hasta))
     if args.get("salida_desde") or args.get("salida_hasta"):
         partes.append("salida " + _rango(args.get("salida_desde"), args.get("salida_hasta")))
@@ -139,7 +139,26 @@ def _fechas(nombre: str, args: dict) -> list[str]:
         partes.append(f"ocupadas el {_dia(_fecha(args['activa_en']))}")
     if args.get("anulada_desde") or args.get("anulada_hasta"):
         partes.append("anuladas " + _rango(args.get("anulada_desde"), args.get("anulada_hasta")))
+    if args.get("confirmada_desde") or args.get("confirmada_hasta"):
+        partes.append("confirmadas " + _rango(args.get("confirmada_desde"), args.get("confirmada_hasta")))
+    if args.get("creada_desde") or args.get("creada_hasta"):
+        partes.append("hechas " + _rango(args.get("creada_desde"), args.get("creada_hasta")))
+    criterio = str(args.get("criterio_fecha") or "").lower()
+    if (nombre == "resumen_reservas" and criterio.startswith(("confirm", "crea"))
+            and not (desde or hasta)):
+        partes.append("por fecha de " + ("confirmación" if criterio.startswith("confirm") else "creación"))
     return partes
+
+
+def _prefijo_criterio(args: dict) -> str:
+    """En los resúmenes, qué fecha filtra: la de entrada salvo que se pida
+    la de confirmación o la de creación."""
+    criterio = str(args.get("criterio_fecha") or "").lower()
+    if criterio.startswith("confirm"):
+        return "confirmadas "
+    if criterio.startswith("crea"):
+        return "hechas "
+    return "entrada "
 
 
 def describir_llamada(nombre: str, args: dict | None) -> str | None:
@@ -150,6 +169,10 @@ def describir_llamada(nombre: str, args: dict | None) -> str | None:
             if v not in (None, "", []) and k not in _IGNORADOS}
     partes: list[str] = []
 
+    if args.get("localizador"):
+        partes.append(f"nº {args['localizador']}")
+    if args.get("titular"):
+        partes.append(f"titular {args['titular']}")
     for clave in ("villa_nombre", "nombre"):
         if args.get(clave):
             partes.append(f"villa {str(args[clave]).upper()}")
@@ -168,6 +191,8 @@ def describir_llamada(nombre: str, args: dict | None) -> str | None:
         partes.append(f"hasta {importe} €")
     if args.get("orden") and args["orden"] != "precio":
         partes.append(f"orden: {args['orden']}")
+    if str(args.get("ordenar_por") or "").lower().startswith(("importe", "precio")):
+        partes.append("más caras primero")
     if args.get("rating_min") is not None:
         partes.append(f"valoración ≥ {args['rating_min']}")
     if args.get("distancia_mar_max_m") is not None:
@@ -207,7 +232,9 @@ def describir_llamada(nombre: str, args: dict | None) -> str | None:
                   "distancia_mar_max_m", "estado_reserva", "estado_documento",
                   "excluir_canceladas", "solo_en_firme", "incluir_propietario",
                   "agrupar_por", "secciones", "texto", "caracteristicas",
-                  "presupuesto_max", "orden"}
+                  "presupuesto_max", "orden", "confirmada_desde", "confirmada_hasta",
+                  "creada_desde", "creada_hasta", "criterio_fecha", "localizador",
+                  "titular", "ordenar_por"}
                  | set(_MINIMOS) | set(_SI_NO))
     for clave, valor in args.items():
         if clave not in conocidos:

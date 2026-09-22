@@ -2738,6 +2738,10 @@ def consultar_reservas(
     activa_en: str | None = None,
     anulada_desde: str | None = None,
     anulada_hasta: str | None = None,
+    confirmada_desde: str | None = None,
+    confirmada_hasta: str | None = None,
+    creada_desde: str | None = None,
+    creada_hasta: str | None = None,
     estado_reserva: str | None = None,
     estado_documento: str | None = None,
     excluir_canceladas: bool = True,
@@ -2754,6 +2758,9 @@ def consultar_reservas(
     Cada tipo de pregunta tiene su filtro de fecha:
     - Entradas (llegadas) de un día o periodo: fecha_desde / fecha_hasta.
     - Salidas de un día o periodo: salida_desde / salida_hasta.
+    - Reservas confirmadas en un periodo (cuándo se confirmaron, sea cual sea
+      su entrada): confirmada_desde / confirmada_hasta.
+    - Reservas hechas (creadas) en un periodo: creada_desde / creada_hasta.
     Para UN día concreto ("hoy", "mañana") pon esa fecha en los dos extremos
     (desde y hasta); con uno solo salen todas las anteriores o posteriores.
     - Villas ocupadas en una fecha ("ahora mismo", "esta noche"): activa_en.
@@ -2791,6 +2798,10 @@ def consultar_reservas(
         activa_en: Fecha (YYYY-MM-DD) en la que la villa está ocupada.
         anulada_desde: Fecha de anulación desde (YYYY-MM-DD).
         anulada_hasta: Fecha de anulación hasta (YYYY-MM-DD).
+        confirmada_desde: Fecha de CONFIRMACIÓN desde (YYYY-MM-DD).
+        confirmada_hasta: Fecha de CONFIRMACIÓN hasta (YYYY-MM-DD).
+        creada_desde: Fecha en que se HIZO la reserva, desde (YYYY-MM-DD).
+        creada_hasta: Fecha en que se HIZO la reserva, hasta (YYYY-MM-DD).
         estado_reserva: 'RE'=reserva, 'PE'=perdida, 'CA'=cancelación,
                         'NS'=no show, 'PR'=prereserva, 'BO'=bloqueada.
         estado_documento: 'CO'=confirmado, 'DR'=borrador, 'CL'=cerrado, 'VO'=anulado.
@@ -2863,6 +2874,15 @@ def consultar_reservas(
         conditions.append("r.fecha_anulacion <= @anulada_hasta")
         params.append(bigquery.ScalarQueryParameter("anulada_hasta", "DATE", anulada_hasta))
 
+    for campo, operador, valor in (
+        ("confirmada_desde", ">=", confirmada_desde), ("confirmada_hasta", "<=", confirmada_hasta),
+        ("creada_desde", ">=", creada_desde), ("creada_hasta", "<=", creada_hasta),
+    ):
+        if valor:
+            columna = "r.fecha_confirmacion" if campo.startswith("confirmada") else "r.fecha_pedido"
+            conditions.append(f"{columna} {operador} @{campo}")
+            params.append(bigquery.ScalarQueryParameter(campo, "DATE", valor))
+
     # Preguntar por anulaciones o por un estado concreto y a la vez excluir
     # las canceladas daba "no se encontraron" o 6 según recordara el modelo
     # desactivarlo: lo que se pide explícitamente manda.
@@ -2901,6 +2921,10 @@ def consultar_reservas(
         orden = "r.importe_total DESC, r.fecha_entrada DESC"
     elif anulada_desde or anulada_hasta:
         orden = "r.fecha_anulacion DESC"
+    elif confirmada_desde or confirmada_hasta:
+        orden = "r.fecha_confirmacion DESC"
+    elif creada_desde or creada_hasta:
+        orden = "r.fecha_pedido DESC"
     elif salida_desde or salida_hasta:
         orden = "r.fecha_salida, r.villa_nombre"
     elif activa_en:
@@ -2927,6 +2951,8 @@ def consultar_reservas(
             r.estado_reserva,
             r.estado_documento,
             r.fecha_anulacion,
+            r.fecha_confirmacion,
+            r.fecha_pedido,
             r.estado_limpieza,
             -- Reserva, Reserva Agencia, Reserva TTOO o Reserva Propietario.
             r.subtipo_reserva,
@@ -2960,6 +2986,20 @@ def consultar_reservas(
 
     reservas, total = _separar_total(rows)
     resultado = {"reservas": reservas, "count": len(reservas), "total": total}
+    # Qué fecha se ha filtrado: "de septiembre" puede ser entrada, salida,
+    # confirmación o creación, y el agente tiene que decir cuál usó.
+    criterio = [
+        etiqueta for etiqueta, usado in (
+            ("fecha de entrada", fecha_desde or fecha_hasta),
+            ("fecha de salida", salida_desde or salida_hasta),
+            ("ocupación en una fecha", activa_en),
+            ("fecha de anulación", anulada_desde or anulada_hasta),
+            ("fecha de confirmación", confirmada_desde or confirmada_hasta),
+            ("fecha de creación", creada_desde or creada_hasta),
+        ) if usado
+    ]
+    if criterio:
+        resultado["criterio_fecha"] = criterio
     if not total:
         _con_sugerencias(resultado, villa_nombre)
         if titular:
@@ -2969,6 +3009,16 @@ def consultar_reservas(
     return resultado
 
 
+# criterio_fecha de resumen_reservas -> (columna, cómo decirlo)
+_CRITERIOS_FECHA = {
+    "entrada": ("r.fecha_entrada", "fecha de entrada"),
+    "confirmacion": ("r.fecha_confirmacion", "fecha de confirmación"),
+    "confirmada": ("r.fecha_confirmacion", "fecha de confirmación"),
+    "creacion": ("r.fecha_pedido", "fecha de creación"),
+    "creada": ("r.fecha_pedido", "fecha de creación"),
+}
+
+
 def resumen_reservas(
     agrupar_por: str = "villa",
     villa_nombre: str | None = None,
@@ -2976,6 +3026,7 @@ def resumen_reservas(
     zona: str | None = None,
     fecha_desde: str | None = None,
     fecha_hasta: str | None = None,
+    criterio_fecha: str = "entrada",
     solo_en_firme: bool = True,
     incluir_propietario: bool = False,
     limite: int = 20,
@@ -2992,8 +3043,12 @@ def resumen_reservas(
         villa_nombre: Nombre o parte del nombre de una villa concreta.
         ubicacion: Filtra por pueblo cercano (Altea, Calpe, Moraira…).
         zona: Filtra por zona geográfica.
-        fecha_desde: Fecha de entrada desde (YYYY-MM-DD).
-        fecha_hasta: Fecha de entrada hasta (YYYY-MM-DD).
+        fecha_desde: Desde (YYYY-MM-DD), sobre la fecha de criterio_fecha.
+        fecha_hasta: Hasta (YYYY-MM-DD), sobre la fecha de criterio_fecha.
+        criterio_fecha: Qué fecha manda en el filtro y al agrupar por mes o
+            año: 'entrada' (defecto, cuándo llegan), 'confirmacion' (cuándo
+            se confirmó la reserva) o 'creacion' (cuándo se hizo). "Reservas
+            confirmadas este mes" puede ser cualquiera de las dos primeras.
         solo_en_firme: Si True (defecto), cuenta solo reservas en firme y no
             shows: excluye canceladas, anuladas, perdidas, prerreservas y
             borradores. Pon False solo si piden expresamente incluirlas.
@@ -3013,16 +3068,19 @@ def resumen_reservas(
         'total_grupos' (si es mayor que count, hay grupos que no se muestran)
         y, si los importes mezclan monedas, 'aviso_monedas'.
     """
+    criterio = _CRITERIOS_FECHA.get(
+        _clave_ficha(criterio_fecha or "entrada"), _CRITERIOS_FECHA["entrada"])
+    columna_fecha, etiqueta_criterio = criterio
     _GROUP_OPTIONS: dict[str, tuple[str, str]] = {
-        "villa": ("r.villa_nombre",                         "r.villa_nombre"),
-        "zona":  ("v.zona",                                 "v.zona"),
-        "mes":   ("FORMAT_DATE('%Y-%m', r.fecha_entrada)",  "FORMAT_DATE('%Y-%m', r.fecha_entrada)"),
-        "ano":   ("EXTRACT(YEAR FROM r.fecha_entrada)",     "EXTRACT(YEAR FROM r.fecha_entrada)"),
+        "villa": ("r.villa_nombre", "r.villa_nombre"),
+        "zona":  ("v.zona", "v.zona"),
+        "mes":   (f"FORMAT_DATE('%Y-%m', {columna_fecha})", f"FORMAT_DATE('%Y-%m', {columna_fecha})"),
+        "ano":   (f"EXTRACT(YEAR FROM {columna_fecha})", f"EXTRACT(YEAR FROM {columna_fecha})"),
     }
     group_key = agrupar_por.lower() if agrupar_por.lower() in _GROUP_OPTIONS else "villa"
     select_expr, group_expr = _GROUP_OPTIONS[group_key]
 
-    conditions: list[str] = ["r.fecha_entrada IS NOT NULL"]
+    conditions: list[str] = [f"{columna_fecha} IS NOT NULL"]
     params: list[bigquery.ScalarQueryParameter] = []
 
     if villa_nombre:
@@ -3038,11 +3096,11 @@ def resumen_reservas(
         conditions.append(_condicion_lugar("v.zona", "zona", zona, params))
 
     if fecha_desde:
-        conditions.append("r.fecha_entrada >= @fecha_desde")
+        conditions.append(f"{columna_fecha} >= @fecha_desde")
         params.append(bigquery.ScalarQueryParameter("fecha_desde", "DATE", fecha_desde))
 
     if fecha_hasta:
-        conditions.append("r.fecha_entrada <= @fecha_hasta")
+        conditions.append(f"{columna_fecha} <= @fecha_hasta")
         params.append(bigquery.ScalarQueryParameter("fecha_hasta", "DATE", fecha_hasta))
 
     if solo_en_firme:
@@ -3068,7 +3126,7 @@ def resumen_reservas(
         # Hay reservas cargadas años por delante: sin tope, "los periodos más
         # recientes" eran meses futuros con un puñado de reservas.
         conditions.append(
-            "r.fecha_entrada <= LAST_DAY(CURRENT_DATE('Europe/Madrid')"
+            f"{columna_fecha} <= LAST_DAY(CURRENT_DATE('Europe/Madrid')"
             + (", YEAR)" if group_key == "ano" else ")")
         )
 
@@ -3134,6 +3192,7 @@ def resumen_reservas(
         "resumen": resumen,
         "count": len(resumen),
         "total_grupos": total_grupos,
+        "criterio_fecha": etiqueta_criterio,
     }
     if len(monedas) > 1:
         resultado["aviso_monedas"] = (
@@ -3606,6 +3665,15 @@ _REGLAS_GESTION = """
   líneas facturadas solo existen para reservas hasta 2023: si faltan, no digas
   que la reserva no tiene conceptos. Del huésped (si no es el titular) no hay
   datos.
+- Una fecha en una pregunta de reservas puede referirse a la entrada, la
+  salida, la confirmación, la creación (cuándo se hizo) o la anulación, y dan
+  cifras muy distintas ("confirmadas este mes": confirmadas durante el mes, o
+  confirmadas con entrada en el mes). Di siempre qué fecha has usado ("con
+  entrada en septiembre"; el resultado trae `criterio_fecha`). Si la pregunta
+  admite dos lecturas razonables y la respuesta es un recuento o un total,
+  consulta las dos y da las dos cifras, cada una con su criterio. Si es una
+  lista larga, da la lectura más probable y ofrece la otra en una frase.
+  Pregunta antes solo si no hay una lectura más probable.
 - Para "las reservas más caras" o "las de mayor importe" usa
   `consultar_reservas(ordenar_por="importe", limite=N)` con las fechas que
   toquen; no escribas SQL para eso. Deja fuera perdidas y anuladas.
