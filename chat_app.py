@@ -29,6 +29,7 @@ from google.genai import types
 import filtros
 import agent
 import exportar
+import ficha
 import frescura
 import visualizaciones
 from agent import AGENTS, TABLA_VILLA, _bq
@@ -707,10 +708,77 @@ def _render_chat_history(messages: list[dict], email: str = "") -> None:
                 _render_filtros(msg)
                 st.markdown(msg["content"])
                 _render_visualizaciones(msg)
+                _render_botones_ficha(msg, i)
                 _render_pie_de_respuesta(msg, i)
         else:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
+
+
+def _render_botones_ficha(msg: dict, i: int) -> None:
+    """Un botón por villa de la respuesta: abre su ficha completa sin tener
+    que preguntar otra vez."""
+    villas = msg.get("villas") or []
+    if not villas:
+        return
+    with st.container(horizontal=True, key=f"fichas_{i}"):
+        for n, nombre in enumerate(villas):
+            st.button(f"Ficha · {nombre}", key=f"ficha_{i}_{n}", icon=":material/villa:",
+                      on_click=_pedir_ficha, args=(nombre,))
+
+
+def _pedir_ficha(nombre: str) -> None:
+    """Como el borrado: el botón solo anota qué abrir; el diálogo se abre
+    desde el cuerpo de la página (_abrir_ficha)."""
+    st.session_state["ficha_pendiente"] = nombre
+
+
+def _abrir_ficha(role: str) -> None:
+    if nombre := st.session_state.pop("ficha_pendiente", None):
+        _dialogo_ficha(nombre, role)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _datos_ficha(nombre: str, con_internos: bool) -> dict | None:
+    """La villa con todos sus datos y sus fotos de la web. Diez minutos de
+    caché: abrir y cerrar la misma ficha no repite las consultas."""
+    villa = agent.ficha_completa(nombre, con_internos=con_internos)
+    if not villa:
+        return None
+    return {"villa": villa, "fotos": ficha.fotos_de_la_web(villa.get("url_web"))}
+
+
+@st.dialog("Ficha de la villa", width="large")
+def _dialogo_ficha(nombre: str, role: str) -> None:
+    try:
+        with st.spinner("Cargando la ficha..."):
+            datos = _datos_ficha(nombre, role in ("interno", "admin"))
+    except Exception:
+        log.warning("No se pudo cargar la ficha de %s", nombre, exc_info=True)
+        st.error("No se pudo cargar la ficha. Inténtalo de nuevo en un momento.")
+        return
+    if not datos:
+        st.warning(f"No se encuentra la villa {nombre}.")
+        return
+    villa = datos["villa"]
+    nombre = villa.get("nombre") or nombre
+    # Precios y calendario los calcula el asistente: la pregunta va al chat.
+    with st.container(horizontal=True, horizontal_alignment="right", key="ficha_acciones"):
+        if st.button("Precios", icon=":material/euro:", key="ficha_precios"):
+            st.session_state.pending_prompt = (
+                f"¿Qué precio tiene la villa {nombre} en las próximas semanas?")
+            st.rerun()
+        if st.button("Calendario", icon=":material/calendar_month:", key="ficha_calendario"):
+            st.session_state.pending_prompt = (
+                f"Calendario de disponibilidad de la villa {nombre} para los próximos dos meses")
+            st.rerun()
+    try:
+        actualidad = frescura.lineas(["villas"], _datos_frescura(),
+                                     datetime.datetime.now(frescura._MADRID))
+    except Exception:
+        actualidad = []
+    st.html(ficha.html(villa, role=role, url=villa.get("url_web"),
+                       fotos=datos["fotos"], frescura=actualidad))
 
 
 def _pedir_borrado(tipo: str, ident: str, titulo: str) -> None:
@@ -880,6 +948,8 @@ def _process_user_prompt(prompt: str, *, role: str, email: str) -> None:
         # Para copiar o descargar las listas de la respuesta (solo en la sesión).
         "tablas": tablas_turno,
         "excel": excel_turno,
+        # Un botón "Ficha" por villa de la respuesta (solo en la sesión).
+        "villas": ficha.villas_del_turno(herramientas),
     })
     # El turno recién guardado cambia el histórico (conversación nueva, título
     # o recuento), así que la lista cacheada deja de valer.
@@ -1985,6 +2055,7 @@ def main() -> None:
     # Al final y fuera de la barra lateral: el aviso de borrado no ocupa un
     # hueco en la página, así que no desplaza el historial al abrirse.
     _abrir_aviso_borrado(email)
+    _abrir_ficha(role)
 
     # Solo tras una respuesta nueva: al pulsar un botón la página no salta.
     if st.session_state.pop("ir_al_inicio_de_la_respuesta", False):

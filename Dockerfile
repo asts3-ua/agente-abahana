@@ -17,6 +17,7 @@ COPY visualizaciones.py .
 COPY frescura.py .
 COPY exportar.py .
 COPY filtros.py .
+COPY ficha.py .
 COPY assets/ assets/
 COPY agente_villas/ agente_villas/
 COPY .streamlit/ .streamlit/

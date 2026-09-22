@@ -1128,6 +1128,43 @@ def obtener_detalle_propiedad(
     return resultado
 
 
+# Lo que la versión cliente no ve en la ficha completa de la app.
+_SECCIONES_INTERNAS = {"licencia", "comercial", "acceso_seguridad"}
+_CAMPOS_INTERNOS = {"propietario_nombre"}
+
+
+def _url_web_villa(nombre: str) -> str | None:
+    rows = list(_bq.query(
+        f"SELECT url FROM `{PROJECT_ID}.{DATASET}.web_villa_urls` "
+        "WHERE UPPER(nombre) = UPPER(@nombre) LIMIT 1",
+        job_config=bigquery.QueryJobConfig(
+            query_parameters=[bigquery.ScalarQueryParameter("nombre", "STRING", nombre)],
+            maximum_bytes_billed=_BILLING_CAP,
+        ),
+    ).result())
+    return rows[0]["url"] if rows else None
+
+
+def ficha_completa(nombre: str, con_internos: bool) -> dict[str, Any] | None:
+    """Todos los datos de una villa para el botón "Ficha" de la app, sin pasar
+    por el modelo. No es una herramienta del agente."""
+    secciones = [s for s in _SECCIONES_FICHA
+                 if con_internos or s not in _SECCIONES_INTERNAS]
+    matches = obtener_detalle_propiedad(nombre, secciones=secciones).get("matches") or []
+    if not matches:
+        return None
+    villa = next((m for m in matches if str(m.get("nombre", "")).upper() == nombre.upper()),
+                 matches[0])
+    if not con_internos:
+        villa = {k: v for k, v in villa.items() if k not in _CAMPOS_INTERNOS}
+    try:
+        villa["url_web"] = _url_web_villa(villa.get("nombre") or nombre)
+    except Exception:
+        log.warning("No se pudo leer la URL web de %s", nombre, exc_info=True)
+        villa["url_web"] = None
+    return villa
+
+
 _DOMINIO_WEB = "abahanavillas.com"
 
 # Nada de esto hace falta para extraer texto, y cada uno es una descarga más
