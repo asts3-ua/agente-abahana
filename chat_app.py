@@ -579,12 +579,37 @@ def _render_filtros(msg: dict) -> None:
         st.caption("  \n".join(f":material/schedule: {linea}" for linea in actualidad))
 
 
-def _render_visualizaciones(msg: dict) -> None:
-    for v in msg.get("visualizaciones") or []:
+def _render_visualizaciones(msg: dict, i: int) -> None:
+    for n, v in enumerate(msg.get("visualizaciones") or []):
         try:
-            visualizaciones.render(v)
+            pulsada = visualizaciones.render(v, key=f"viz_{msg.get('turn_id') or i}_{n}")
+            if pulsada:
+                _render_desplegable_villa(v, pulsada, f"{msg.get('turn_id') or i}_{n}")
         except Exception:
             log.warning("No se pudo pintar la visualización %s", v.get("tipo"), exc_info=True)
+
+
+def _render_desplegable_villa(mapa: dict, nombre: str, clave: str) -> None:
+    """Lo que se abre al pulsar una villa del mapa: su resumen y el botón de la
+    ficha completa."""
+    villa = next((x for x in mapa.get("villas") or [] if x.get("nombre") == nombre), {"nombre": nombre})
+    detalles = [str(villa[c]) for c in ("pueblo_cercano",) if villa.get(c)]
+    if villa.get("capacidad_pax"):
+        detalles.append(f"{villa['capacidad_pax']} pax")
+    if villa.get("numero_habitaciones"):
+        detalles.append(f"{villa['numero_habitaciones']} hab.")
+    if villa.get("tiene_piscina_privada"):
+        detalles.append("piscina privada")
+    with st.container(border=True, key=f"desplegable_{clave}"):
+        col_texto, col_boton = st.columns([3, 2], vertical_alignment="center")
+        with col_texto:
+            st.markdown(f"**:material/location_on: {nombre}**")
+            if detalles:
+                st.caption(" · ".join(detalles))
+        with col_boton:
+            st.button("Ver ficha completa", key=f"ficha_mapa_{clave}", icon=":material/villa:",
+                      type="primary", use_container_width=True,
+                      on_click=_pedir_ficha, args=(nombre,))
 
 
 def _con_todas_las_filas(herramientas: list[tuple[str, dict, dict]]) -> list[tuple[str, dict, dict]]:
@@ -707,7 +732,7 @@ def _render_chat_history(messages: list[dict], email: str = "") -> None:
                 # Antes de la respuesta: es lo primero que hay que comprobar.
                 _render_filtros(msg)
                 st.markdown(msg["content"])
-                _render_visualizaciones(msg)
+                _render_visualizaciones(msg, i)
                 _render_botones_ficha(msg, i)
                 _render_pie_de_respuesta(msg, i)
         else:
@@ -718,13 +743,25 @@ def _render_chat_history(messages: list[dict], email: str = "") -> None:
 def _render_botones_ficha(msg: dict, i: int) -> None:
     """Un botón por villa de la respuesta: abre su ficha completa sin tener
     que preguntar otra vez."""
-    villas = msg.get("villas") or []
+    villas = _villas_sin_mapa(msg)
     if not villas:
         return
     with st.container(horizontal=True, key=f"fichas_{i}"):
         for n, nombre in enumerate(villas):
             st.button(f"Ficha · {nombre}", key=f"ficha_{i}_{n}", icon=":material/villa:",
                       on_click=_pedir_ficha, args=(nombre,))
+
+
+def _villas_sin_mapa(msg: dict) -> list[str]:
+    """Con un mapa de varias villas, su ficha se abre desde el mapa: solo
+    llevan botón aparte las que no salen en él."""
+    en_mapa = {
+        str(x.get("nombre", "")).upper()
+        for v in msg.get("visualizaciones") or []
+        if v.get("tipo") == "mapa" and len(v.get("villas") or []) > 1
+        for x in v["villas"]
+    }
+    return [n for n in msg.get("villas") or [] if n.upper() not in en_mapa]
 
 
 def _pedir_ficha(nombre: str) -> None:

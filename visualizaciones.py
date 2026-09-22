@@ -294,6 +294,10 @@ def _zoom(villas: list[dict]) -> float:
     return 8.5
 
 
+# Id de la capa de villas: la selección del mapa llega agrupada por capa.
+CAPA_VILLAS = "villas"
+
+
 def mapa_deck(v: dict) -> pdk.Deck:
     """Puntos azules de marca con anillo blanco; el nombre al pasar el ratón."""
     villas = v["villas"]
@@ -305,6 +309,7 @@ def mapa_deck(v: dict) -> pdk.Deck:
 
     capa = pdk.Layer(
         "ScatterplotLayer",
+        id=CAPA_VILLAS,
         data=df,
         get_position="[lon, lat]",
         get_fill_color=[62, 90, 154, 235],
@@ -332,6 +337,7 @@ def tooltip_mapa(v: dict) -> dict:
     html = "<b>{nombre}</b><br/>{pueblo_cercano}"
     if not v.get("aproximado") and any(villa.get("direccion") for villa in v["villas"]):
         html += "<br/>{direccion}"
+    html += f'<br/><span style="color:{GRIS_BLOQUEO}">Pulsa para ver más información</span>'
     return {"html": html, "style": {
         "backgroundColor": SUPERFICIE, "color": TINTA, "fontFamily": FUENTE,
         "fontSize": "12px", "border": f"1px solid {REJILLA}", "borderRadius": "6px",
@@ -372,17 +378,32 @@ def cifras_html(pares: Iterable[tuple[str, str]]) -> str:
     return f'<div class="abv-cifras">{celdas}</div>'
 
 
-def render(v: dict) -> None:
+def villa_pulsada(evento: Any) -> str | None:
+    """Nombre de la villa pulsada en el mapa, si hay alguna."""
+    try:
+        objetos = evento.selection.objects.get(CAPA_VILLAS) or []
+    except AttributeError:
+        return None
+    nombre = objetos[0].get("nombre") if objetos and isinstance(objetos[0], dict) else None
+    return nombre or None
+
+
+def render(v: dict, key: str | None = None) -> str | None:
+    """Pinta la visualización. En un mapa devuelve la villa pulsada, para
+    abrir su desplegable con el botón de la ficha."""
     import streamlit as st
 
     tipo = v.get("tipo")
     if tipo == "mapa":
         villas = v["villas"]
+        cuantas = f"{len(villas)} {'villa' if len(villas) == 1 else 'villas'} en el mapa"
         st.caption(
-            "Ubicación aproximada de las villas" if v.get("aproximado")
-            else f"{len(villas)} {'villa' if len(villas) == 1 else 'villas'} en el mapa"
+            ("Ubicación aproximada de las villas" if v.get("aproximado") else cuantas)
+            + " · pulsa una para ver su información"
         )
-        st.pydeck_chart(mapa_deck(v), use_container_width=True, height=320)
+        evento = st.pydeck_chart(mapa_deck(v), use_container_width=True, height=320,
+                                 on_select="rerun", selection_mode="single-object", key=key)
+        return villa_pulsada(evento)
     elif tipo == "precios":
         resumen = v.get("resumen") or {}
         st.caption(f"Precio por noche · {v.get('villa') or ''}")
@@ -407,3 +428,4 @@ def render(v: dict) -> None:
     elif tipo == "resumen_reservas":
         st.caption(f"Reservas por {v['agrupar_por']}")
         st.altair_chart(grafico_resumen(v), use_container_width=True, theme=None)
+    return None
