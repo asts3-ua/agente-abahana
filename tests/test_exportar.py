@@ -2,6 +2,7 @@
 listas para una hoja de seguimiento. Sale de los datos de las herramientas, no
 del texto del modelo."""
 
+import datetime
 import io
 import os
 import unittest
@@ -49,18 +50,86 @@ class TablasTest(unittest.TestCase):
 
 
 class ExcelTest(unittest.TestCase):
+    """Un Excel ordenado: título y resumen arriba, cabecera destacada y fija
+    con filtros, solo las columnas útiles en orden y cada dato con su formato."""
 
-    def test_una_hoja_por_lista_con_columnas_en_espanol(self):
-        datos = exportar.a_excel(exportar.tablas([RESERVAS, OFERTAS]))
-        hojas = pd.read_excel(io.BytesIO(datos), sheet_name=None)
-        self.assertEqual(["Reservas", "Ofertas"], list(hojas))
-        self.assertIn("Localizador", hojas["Reservas"].columns)
-        self.assertIn("Titular", hojas["Reservas"].columns)
-        self.assertEqual(41339.25, hojas["Reservas"]["Importe total (€)"][1])
+    GENERADO = datetime.datetime(2026, 9, 22, 14, 30)
+
+    def _libro(self, *llamadas):
+        import openpyxl
+        datos = exportar.a_excel(exportar.tablas(list(llamadas)), generado=self.GENERADO)
+        return openpyxl.load_workbook(io.BytesIO(datos))
+
+    def test_una_hoja_por_lista(self):
+        self.assertEqual(["Reservas", "Ofertas"], self._libro(RESERVAS, OFERTAS).sheetnames)
 
     def test_nombres_de_hoja_repetidos(self):
-        datos = exportar.a_excel(exportar.tablas([RESERVAS, RESERVAS]))
-        self.assertEqual(["Reservas", "Reservas (2)"], list(pd.read_excel(io.BytesIO(datos), sheet_name=None)))
+        self.assertEqual(["Reservas", "Reservas (2)"], self._libro(RESERVAS, RESERVAS).sheetnames)
+
+    def test_titulo_y_resumen_arriba(self):
+        hoja = self._libro(RESERVAS)["Reservas"]
+        self.assertEqual("Reservas", hoja["A1"].value)
+        self.assertTrue(hoja["A1"].font.bold)
+        self.assertIn("2 de 463 que cumplen la búsqueda", hoja["A2"].value)
+        self.assertIn("22/09/2026 14:30", hoja["A2"].value)
+
+    def test_cabecera_destacada_fija_y_con_filtros(self):
+        hoja = self._libro(RESERVAS)["Reservas"]
+        self.assertTrue(hoja["A4"].font.bold)
+        self.assertEqual("FF1E2B3C", hoja["A4"].fill.fgColor.rgb)
+        self.assertEqual("A5", hoja.freeze_panes)
+        self.assertTrue(hoja.auto_filter.ref.startswith("A4:"))
+
+    def test_columnas_utiles_en_orden(self):
+        hoja = self._libro(RESERVAS)["Reservas"]
+        cabecera = [c.value for c in hoja[4] if c.value]
+        self.assertEqual(["Localizador", "Titular", "Villa", "Entrada", "Salida", "Importe total (€)"],
+                         cabecera)
+
+    def test_sin_columnas_vacias(self):
+        reservas = (RESERVAS[0], RESERVAS[1], dict(RESERVAS[2], reservas=[
+            dict(f, fecha_anulacion=None) for f in RESERVAS[2]["reservas"]]))
+        cabecera = [c.value for c in self._libro(reservas)["Reservas"][4] if c.value]
+        self.assertNotIn("Anulada el", cabecera)
+
+    def test_quita_campos_tecnicos(self):
+        reservas = (RESERVAS[0], RESERVAS[1], dict(RESERVAS[2], reservas=[
+            dict(RESERVAS[2]["reservas"][0], es_alto_riesgo=False, moneda_id="EUR", estado_documento="CO")]))
+        cabecera = [c.value for c in self._libro(reservas)["Reservas"][4] if c.value]
+        for tecnico in ("Es alto riesgo", "Moneda", "Estado del documento"):
+            self.assertNotIn(tecnico, cabecera)
+
+    def test_fechas_importes_y_si_no_con_formato(self):
+        hoja = self._libro(RESERVAS, OFERTAS)["Reservas"]
+        entrada, importe = hoja["D5"], hoja["F6"]
+        self.assertIsInstance(entrada.value, datetime.datetime)
+        self.assertEqual("dd/mm/yyyy", entrada.number_format)
+        self.assertEqual(41339.25, importe.value)
+        self.assertIn("€", importe.number_format)
+        villas = exportar.a_excel(exportar.tablas([("buscar_propiedades", {}, {"matches": [
+            {"nombre": "ADORA", "tiene_piscina_privada": True, "admite_animales": False}]})]))
+        import openpyxl
+        fila = [c.value for c in openpyxl.load_workbook(io.BytesIO(villas))["Villas"][5]]
+        self.assertEqual(["ADORA", "Sí", "No"], [v for v in fila if v is not None])
+
+
+class BotonesTest(unittest.TestCase):
+    """Copiar va directo al portapapeles; los dos botones, abajo a la derecha."""
+
+    def test_copia_directamente_y_descarga_el_excel(self):
+        html = exportar.botones_html("Hola **mundo**", b"PK-excel", "abahana.xlsx")
+        self.assertIn("navigator.clipboard.writeText", html)
+        self.assertIn("Hola mundo", html)
+        self.assertIn('download="abahana.xlsx"', html)
+        self.assertIn("data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,", html)
+        self.assertIn("justify-content: flex-end", html)
+
+    def test_sin_listas_no_hay_boton_de_excel(self):
+        self.assertNotIn("download=", exportar.botones_html("Hola", None, "x.xlsx"))
+
+    def test_el_texto_no_puede_romper_la_pagina(self):
+        html = exportar.botones_html("</script><script>alert(1)</script>", None, "x.xlsx")
+        self.assertNotIn("</script><script>alert(1)", html)
 
 
 class CopiarTest(unittest.TestCase):
@@ -70,7 +139,7 @@ class CopiarTest(unittest.TestCase):
         lineas = tsv.splitlines()
         self.assertEqual(3, len(lineas))
         self.assertEqual("Localizador", lineas[0].split("\t")[0])
-        self.assertIn("2026_3274\tMARACALA\tFarley, Olivia", lineas[1])
+        self.assertIn("2026_3274\tFarley, Olivia\tMARACALA", lineas[1])
 
     def test_texto_sin_formato_para_un_correo_o_un_chat(self):
         md = ("### Reservas\n\nHay **463 reservas** con entrada en septiembre:\n\n"

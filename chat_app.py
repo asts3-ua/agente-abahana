@@ -597,30 +597,15 @@ def _exportable_del_turno(herramientas: list[tuple[str, dict, dict]]) -> tuple[l
 
 
 def _render_exportar(msg: dict, i: int) -> None:
-    """Copiar la respuesta (para un correo o un chat) o sus listas (para una
-    hoja de seguimiento), y descargarlas en Excel."""
-    tablas = msg.get("tablas") or []
-    col_copiar, col_excel, _ = st.columns([3, 3, 6], vertical_alignment="center")
-    with col_copiar:
-        with st.popover("Copiar", icon=":material/content_copy:"):
-            st.caption("Texto de la respuesta, para un correo o un chat. "
-                       "Pulsa el icono de copiar de la esquina.")
-            st.code(exportar.texto_plano(msg["content"]), language=None, wrap_lines=True)
-            for tabla in tablas:
-                # El total puede ser mayor porque se pidió un top o porque la
-                # herramienta limita la lista: se dice sin suponer cuál.
-                parcial = (f" · {len(tabla['filas'])} de las {tabla['total']} que cumplen la búsqueda"
-                           if tabla.get("total") and tabla["total"] > len(tabla["filas"]) else "")
-                st.caption(f"{tabla['titulo']}, para pegar en una hoja de cálculo{parcial}")
-                st.code(exportar.a_tsv(tabla), language=None)
-    if msg.get("excel"):
-        with col_excel:
-            st.download_button(
-                "Excel", data=msg["excel"], icon=":material/download:",
-                file_name=f"abahana_{msg.get('turn_id') or i}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key=f"excel_{msg.get('turn_id') or i}",
-            )
+    """"Copiar" (la respuesta sin formato, al portapapeles en un clic) y
+    "Excel" (si hay listas), abajo a la derecha de la respuesta."""
+    import streamlit.components.v1 as componentes
+
+    componentes.html(
+        exportar.botones_html(msg["content"], msg.get("excel"),
+                              f"abahana_{msg.get('turn_id') or i}.xlsx"),
+        height=40,
+    )
 
 
 def _render_chat_history(messages: list[dict], email: str = "") -> None:
@@ -632,8 +617,9 @@ def _render_chat_history(messages: list[dict], email: str = "") -> None:
                 _render_filtros(msg)
                 st.markdown(msg["content"])
                 _render_visualizaciones(msg)
-                _render_exportar(msg, i)
                 _render_assistant_feedback(msg, i)
+                # Al final: abajo a la derecha de la respuesta.
+                _render_exportar(msg, i)
         else:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])

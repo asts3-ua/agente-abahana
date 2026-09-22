@@ -21,5 +21,17 @@ class BotonesTest(unittest.TestCase):
         self.assertTrue(hasattr(chat_app, "_renombrar_conversacion"))
 
 
+class CopiarYExcelTest(unittest.TestCase):
+
+    def test_copiar_va_directo_sin_panel(self):
+        codigo = inspect.getsource(chat_app._render_exportar)
+        self.assertIn("botones_html", codigo)
+        self.assertNotIn("popover", codigo)
+
+    def test_los_botones_van_al_final_de_la_respuesta(self):
+        codigo = inspect.getsource(chat_app._render_chat_history)
+        self.assertLess(codigo.index("_render_assistant_feedback"), codigo.index("_render_exportar"))
+
+
 if __name__ == "__main__":
     unittest.main()
