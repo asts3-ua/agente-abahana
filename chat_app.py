@@ -608,6 +608,24 @@ def _render_exportar(msg: dict, i: int) -> None:
     )
 
 
+def _render_pie_de_respuesta(msg: dict, i: int) -> None:
+    """Pie de cada respuesta: valoración a la izquierda y Copiar/Excel a la
+    derecha, en la misma fila y bajo una línea a todo el ancho. Con el
+    formulario de motivos abierto (pulgar abajo), el formulario ocupa todo el
+    ancho y los botones van debajo."""
+    st.markdown('<div class="abv-pie"></div>', unsafe_allow_html=True)
+    borrador = st.session_state.get(f"feedback_draft_{msg.get('turn_id')}_{i}")
+    if borrador in ("parcial", "no_resolvio"):
+        _render_assistant_feedback(msg, i)
+        _render_exportar(msg, i)
+        return
+    col_valoracion, col_botones = st.columns([1, 1], vertical_alignment="bottom")
+    with col_valoracion:
+        _render_assistant_feedback(msg, i)
+    with col_botones:
+        _render_exportar(msg, i)
+
+
 def _render_chat_history(messages: list[dict], email: str = "") -> None:
     avatar = _assistant_avatar()
     for i, msg in enumerate(messages):
@@ -617,9 +635,7 @@ def _render_chat_history(messages: list[dict], email: str = "") -> None:
                 _render_filtros(msg)
                 st.markdown(msg["content"])
                 _render_visualizaciones(msg)
-                _render_assistant_feedback(msg, i)
-                # Al final: abajo a la derecha de la respuesta.
-                _render_exportar(msg, i)
+                _render_pie_de_respuesta(msg, i)
         else:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
@@ -1648,11 +1664,16 @@ a:focus-visible,
     background-color: var(--abv-accent-wash) !important;
 }
 
+/* Línea a todo el ancho sobre el pie de la respuesta (valoración, copiar,
+   Excel), que va en una sola fila. */
+.abv-pie {
+    margin-top: 0.85rem;
+    border-top: 1px solid var(--abv-line);
+}
+
 /* La pregunta de feedback acompaña a la respuesta, no compite con ella. */
 .feedback-card {
-    margin-top: 0.85rem;
-    padding-top: 0.7rem;
-    border-top: 1px solid var(--abv-line);
+    padding-top: 0.2rem;
 }
 
 .feedback-title {

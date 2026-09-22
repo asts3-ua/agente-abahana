@@ -28,9 +28,11 @@ class CopiarYExcelTest(unittest.TestCase):
         self.assertIn("botones_html", codigo)
         self.assertNotIn("popover", codigo)
 
-    def test_los_botones_van_al_final_de_la_respuesta(self):
-        codigo = inspect.getsource(chat_app._render_chat_history)
-        self.assertLess(codigo.index("_render_assistant_feedback"), codigo.index("_render_exportar"))
+    def test_valoracion_y_botones_en_la_misma_fila(self):
+        self.assertIn("_render_pie_de_respuesta", inspect.getsource(chat_app._render_chat_history))
+        pie = inspect.getsource(chat_app._render_pie_de_respuesta)
+        self.assertIn("st.columns", pie)
+        self.assertLess(pie.index("_render_assistant_feedback"), pie.rindex("_render_exportar"))
 
 
 if __name__ == "__main__":

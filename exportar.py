@@ -230,7 +230,9 @@ def botones_html(texto_markdown: str, excel: bytes | None, nombre_excel: str) ->
 <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@500;600&display=swap" rel="stylesheet">
 <style>
   body {{ margin: 0; background: transparent; font-family: 'Montserrat', sans-serif; }}
-  .fila {{ display: flex; justify-content: flex-end; gap: 8px; padding: 2px 2px 0 0; }}
+  html, body {{ height: 100%; }}
+  .fila {{ display: flex; justify-content: flex-end; align-items: center; gap: 8px;
+          height: 100%; padding-right: 2px; box-sizing: border-box; }}
   .b {{ display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px;
         border: 1px solid #E2E0D6; border-radius: 8px; background: #FFFFFF; color: #1E2B3C;
         font: 500 13px 'Montserrat', sans-serif; text-decoration: none; cursor: pointer; }}
