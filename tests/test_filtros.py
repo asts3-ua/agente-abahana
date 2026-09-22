@@ -14,38 +14,38 @@ class DescribirLlamadaTest(unittest.TestCase):
             "admite_animales": True,
         })
         self.assertEqual(
-            "Disponibilidad: Moraira · del 3 al 10 oct 2026 · 6+ personas · admite mascotas",
+            "Disponibilidad: Moraira · del sáb 3 al sáb 10 oct 2026 · 6+ personas · admite mascotas",
             linea)
 
     def test_las_fechas_de_reservas_dicen_si_son_de_entrada_o_de_salida(self):
         self.assertEqual(
-            "Reservas: entrada el 21 sep 2026",
+            "Reservas: entrada el lun 21 sep 2026",
             filtros.describir_llamada("consultar_reservas", {
                 "fecha_desde": "2026-09-21", "fecha_hasta": "2026-09-21"}))
         self.assertEqual(
-            "Reservas: salida el 21 sep 2026",
+            "Reservas: salida el lun 21 sep 2026",
             filtros.describir_llamada("consultar_reservas", {
                 "salida_desde": "2026-09-21", "salida_hasta": "2026-09-21"}))
 
     def test_un_solo_extremo_de_fecha_se_ve(self):
         # Fue un error real: con solo salida_hasta salían 37.747 reservas.
         self.assertEqual(
-            "Reservas: salida hasta el 21 sep 2026",
+            "Reservas: salida hasta el lun 21 sep 2026",
             filtros.describir_llamada("consultar_reservas", {"salida_hasta": "2026-09-21"}))
 
     def test_rango_entre_meses_y_entre_anios(self):
-        self.assertIn("del 28 sep al 5 oct 2026", filtros.describir_llamada(
+        self.assertIn("del lun 28 sep al lun 5 oct 2026", filtros.describir_llamada(
             "consultar_disponibilidad",
             {"fecha_desde": "2026-09-28", "fecha_hasta": "2026-10-05"}))
-        self.assertIn("del 28 dic 2026 al 3 ene 2027", filtros.describir_llamada(
+        self.assertIn("del lun 28 dic 2026 al dom 3 ene 2027", filtros.describir_llamada(
             "consultar_disponibilidad",
             {"fecha_desde": "2026-12-28", "fecha_hasta": "2027-01-03"}))
 
     def test_ocupacion_anulaciones_y_estados(self):
-        self.assertEqual("Reservas: ocupadas el 21 sep 2026", filtros.describir_llamada(
+        self.assertEqual("Reservas: ocupadas el lun 21 sep 2026", filtros.describir_llamada(
             "consultar_reservas", {"activa_en": "2026-09-21"}))
         self.assertEqual(
-            "Reservas: anuladas desde el 22 ago 2026 · canceladas",
+            "Reservas: anuladas desde el sáb 22 ago 2026 · canceladas",
             filtros.describir_llamada("consultar_reservas", {
                 "anulada_desde": "2026-08-22", "estado_reserva": "CA"}))
 
@@ -63,7 +63,7 @@ class DescribirLlamadaTest(unittest.TestCase):
 
     def test_ofertas_con_presupuesto_y_orden(self):
         self.assertEqual(
-            "Ofertas: Moraira · del 3 al 10 oct 2026 · 6+ personas · hasta 4.000 € · orden: margen",
+            "Ofertas: Moraira · del sáb 3 al sáb 10 oct 2026 · 6+ personas · hasta 4.000 € · orden: margen",
             filtros.describir_llamada("buscar_ofertas", {
                 "ubicacion": "Moraira", "fecha_desde": "2026-10-03",
                 "fecha_hasta": "2026-10-10", "capacidad_min": 6,
@@ -110,6 +110,26 @@ class DescribirTurnoTest(unittest.TestCase):
             ("obtener_detalle_propiedad", {"nombre": "Atalaya"}, {}),
         ])
         self.assertEqual(["Ficha: villa ATALAYA", "Precios: villa ATALAYA"], lineas)
+
+
+
+
+
+class DiaDeLaSemanaTest(unittest.TestCase):
+    """"Este sábado" o "este fin de semana" se entienden mal a veces: el día de
+    la semana junto a la fecha deja ver qué fecha se ha usado."""
+
+    def test_este_sabado(self):
+        self.assertEqual("Reservas: entrada el sáb 26 sep 2026", filtros.describir_llamada(
+            "consultar_reservas", {"fecha_desde": "2026-09-26", "fecha_hasta": "2026-09-26"}))
+
+    def test_este_fin_de_semana(self):
+        self.assertIn("del vie 25 al lun 28 sep 2026", filtros.describir_llamada(
+            "consultar_disponibilidad", {"fecha_desde": "2026-09-25", "fecha_hasta": "2026-09-28"}))
+
+    def test_una_sola_noche(self):
+        self.assertIn("noche del sáb 26 sep 2026", filtros.describir_llamada(
+            "consultar_disponibilidad", {"fecha_desde": "2026-09-26"}))
 
 
 if __name__ == "__main__":

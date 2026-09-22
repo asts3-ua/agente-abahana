@@ -95,19 +95,24 @@ def _fecha(valor: Any) -> datetime.date | None:
         return None
 
 
+# Con el día de la semana se ve si "este sábado" o "este fin de semana" se
+# han entendido como el usuario quería.
+_DIAS_SEMANA = ("lun", "mar", "mié", "jue", "vie", "sáb", "dom")
+
+
 def _dia(d: datetime.date, con_anio: bool = True) -> str:
-    texto = f"{d.day} {_MESES[d.month - 1]}"
+    texto = f"{_DIAS_SEMANA[d.weekday()]} {d.day} {_MESES[d.month - 1]}"
     return f"{texto} {d.year}" if con_anio else texto
 
 
 def _rango(desde: Any, hasta: Any) -> str:
-    """"del 3 al 10 oct 2026", "desde el 3 oct 2026", "hasta el 10 oct 2026"."""
+    """"del sáb 3 al sáb 10 oct 2026", "desde el sáb 3 oct 2026"..."""
     d1, d2 = _fecha(desde), _fecha(hasta)
     if d1 and d2:
         if d1 == d2:
             return f"el {_dia(d1)}"
         if (d1.year, d1.month) == (d2.year, d2.month):
-            return f"del {d1.day} al {_dia(d2)}"
+            return f"del {_DIAS_SEMANA[d1.weekday()]} {d1.day} al {_dia(d2)}"
         if d1.year == d2.year:
             return f"del {_dia(d1, False)} al {_dia(d2)}"
         return f"del {_dia(d1)} al {_dia(d2)}"
