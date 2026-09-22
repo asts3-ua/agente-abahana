@@ -10,6 +10,7 @@ Roles disponibles:
 
 import asyncio
 import concurrent.futures
+import contextvars
 import datetime
 import difflib
 import functools
@@ -1598,7 +1599,7 @@ def consultar_disponibilidad(
     if direccion:
         conditions += _condiciones_direccion(direccion, params)
 
-    limite = min(max(1, limite), 50)
+    limite = _tope_filas(limite)
     where = " AND ".join(conditions) if conditions else "TRUE"
     query = f"""
         WITH{_CTE_VILLAS_VIGENTES},{_CTE_CAMAS},
@@ -1789,7 +1790,7 @@ def _consultar_ofertas(desde, hasta, conditions: list[str], params: list,
         FROM ofertas
         {filtro_presupuesto}
         ORDER BY {orden_sql}
-        LIMIT {min(max(1, limite), 50)}
+        LIMIT {_tope_filas(limite)}
     """
     rows = [_row_to_dict(r) for r in _bq.query(
         query,
@@ -2238,6 +2239,39 @@ def _sugerir_titulares(titular: str) -> list[str]:
     # Solo los que están a una letra como mucho del más parecido.
     mejor = min(f.puntos for f in filas)
     return [f.cliente_nombre for f in filas if f.puntos <= mejor + 1][:5]
+
+
+# Filas que puede devolver una herramienta. Al agente, como mucho 50: cada
+# fila entra en su contexto. Para el Excel se repite la misma búsqueda sin
+# ese tope (hasta _TOPE_EXPORTAR) y sin pasar por el modelo.
+_TOPE_AGENTE = 50
+_TOPE_EXPORTAR = 5000
+_tope_actual: contextvars.ContextVar[int] = contextvars.ContextVar("tope_filas", default=_TOPE_AGENTE)
+
+
+def _tope_filas(limite: int) -> int:
+    return _tope_actual.get() if _tope_actual.get() != _TOPE_AGENTE else min(max(1, limite), _TOPE_AGENTE)
+
+
+def consulta_completa(nombre: str, args: dict) -> dict | None:
+    """La misma búsqueda de una herramienta de listas, con todas las filas.
+
+    Para exportar a Excel lo que el agente solo ha enseñado de muestra. None si
+    la herramienta no es de listas.
+    """
+    herramienta = {
+        "consultar_reservas": consultar_reservas,
+        "resumen_reservas": resumen_reservas,
+        "buscar_ofertas": buscar_ofertas,
+        "consultar_disponibilidad": consultar_disponibilidad,
+    }.get(nombre)
+    if herramienta is None:
+        return None
+    marca = _tope_actual.set(_TOPE_EXPORTAR)
+    try:
+        return herramienta(**{**args, "limite": _TOPE_EXPORTAR})
+    finally:
+        _tope_actual.reset(marca)
 
 
 def _una_sola_villa(rows: list[dict], villa_nombre: str):
@@ -2914,7 +2948,7 @@ def consultar_reservas(
         )
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-    limite = min(max(1, limite), 50)
+    limite = _tope_filas(limite)
     # Primero lo más relevante para la pregunta: las últimas anuladas, o las
     # salidas y ocupaciones por orden de fecha.
     if (ordenar_por or "").strip().lower() in ("importe", "importe_total", "precio"):
@@ -3131,7 +3165,7 @@ def resumen_reservas(
         )
 
     where = f"WHERE {' AND '.join(conditions)}"
-    limite = min(max(1, limite), 50)
+    limite = _tope_filas(limite)
     # Por tiempo interesan los periodos más recientes, no los de más volumen.
     orden = "dimension DESC" if cronologico else "total_reservas DESC"
 

@@ -27,6 +27,7 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
 import filtros
+import agent
 import exportar
 import frescura
 import visualizaciones
@@ -585,11 +586,32 @@ def _render_visualizaciones(msg: dict) -> None:
             log.warning("No se pudo pintar la visualización %s", v.get("tipo"), exc_info=True)
 
 
+def _con_todas_las_filas(herramientas: list[tuple[str, dict, dict]]) -> list[tuple[str, dict, dict]]:
+    """Para el Excel: si una herramienta devolvió solo una muestra (su total es
+    mayor que las filas que trajo), se repite la búsqueda con todas las filas.
+    Si la repetición falla, se exporta lo que había."""
+    resultado = []
+    for nombre, args, respuesta in herramientas:
+        filas = next((respuesta.get(k) for k in ("reservas", "matches", "resumen")
+                      if isinstance(respuesta, dict) and isinstance(respuesta.get(k), list)), None)
+        total = next((respuesta.get(k) for k in ("total", "total_disponibles", "total_grupos")
+                      if isinstance(respuesta, dict) and isinstance(respuesta.get(k), int)), None)
+        if filas is not None and total and total > len(filas):
+            try:
+                completa = agent.consulta_completa(nombre, args)
+                if isinstance(completa, dict) and not completa.get("error"):
+                    respuesta = completa
+            except Exception:
+                log.warning("No se pudo repetir %s con todas las filas", nombre, exc_info=True)
+        resultado.append((nombre, args, respuesta))
+    return resultado
+
+
 def _exportable_del_turno(herramientas: list[tuple[str, dict, dict]]) -> tuple[list[dict], bytes | None]:
     """Listas del turno y su Excel, calculados al responder (no en cada clic).
     Nunca rompe la respuesta de texto."""
     try:
-        tablas = exportar.tablas(herramientas)
+        tablas = exportar.tablas(_con_todas_las_filas(herramientas))
         return tablas, (exportar.a_excel(tablas) if tablas else None)
     except Exception:
         log.warning("No se pudo preparar la exportación", exc_info=True)
@@ -603,7 +625,8 @@ def _render_exportar(msg: dict, i: int) -> None:
 
     componentes.html(
         exportar.botones_html(msg["content"], msg.get("excel"),
-                              f"abahana_{msg.get('turn_id') or i}.xlsx"),
+                              f"abahana_{msg.get('turn_id') or i}.xlsx",
+                              filas=sum(len(t["filas"]) for t in msg.get("tablas") or []) or None),
         height=40,
     )
 

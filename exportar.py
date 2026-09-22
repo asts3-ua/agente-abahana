@@ -210,7 +210,8 @@ def a_excel(lista_tablas: list[dict], generado: datetime.datetime | None = None)
     return salida.getvalue()
 
 
-def botones_html(texto_markdown: str, excel: bytes | None, nombre_excel: str) -> str:
+def botones_html(texto_markdown: str, excel: bytes | None, nombre_excel: str,
+                 filas: int | None = None) -> str:
     """"Copiar" (al portapapeles, en un clic) y "Excel" (descarga), alineados
     abajo a la derecha con los colores de la marca.
 
@@ -225,7 +226,7 @@ def botones_html(texto_markdown: str, excel: bytes | None, nombre_excel: str) ->
         boton_excel = (
             f'<a class="b" download="{html.escape(nombre_excel)}" '
             f'href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{datos}">'
-            '<span class="i">⤓</span>Excel</a>')
+            f'<span class="i">⤓</span>Excel{f" · {filas}" if filas else ""}</a>')
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@500;600&display=swap" rel="stylesheet">
 <style>
