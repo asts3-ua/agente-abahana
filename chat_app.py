@@ -882,6 +882,25 @@ def _load_conversation(session_id: str, email: str) -> None:
     st.rerun()
 
 
+@st.fragment
+def _barra_lateral(email: str, role: str) -> None:
+    """Histórico, renombrar, borrar y cerrar sesión.
+
+    Es un fragmento: sus botones redibujan solo la barra. Antes cada clic
+    volvía a pintar la conversación entera (mapas y gráficos incluidos) y
+    los botones tardaban segundos en reaccionar. Lo que cambia la página
+    (abrir una conversación, empezar otra, cerrar sesión, borrar) la redibuja
+    entera con st.rerun().
+    """
+    st.caption(f"Acceso: {ROLE_LABELS.get(role, role)}")
+    _render_conversation_history(email)
+    st.divider()
+    if st.button("Cerrar sesión", use_container_width=True):
+        st.session_state.clear()
+        st.session_state["_logged_out"] = True
+        st.rerun()
+
+
 def _render_conversation_history(email: str) -> None:
     if st.button(
         "＋ Nueva conversación",
@@ -944,11 +963,14 @@ def _render_conversation_history(email: str) -> None:
                 if st.button("", key=f"editarconv_{session_id}",
                              icon=":material/edit:"):
                     st.session_state[f"editar_conversacion_{session_id}"] = True
-                    st.rerun()
+                    st.rerun(scope="fragment")
             with col_papelera:
-                st.button("", key=f"borrarconv_{session_id}",
-                          icon=":material/delete:", on_click=_pedir_borrado,
-                          args=("conversacion", session_id, sesion["title"]))
+                # El aviso se abre desde el cuerpo de la página: esta barra es
+                # un fragmento, así que aquí hace falta redibujarla entera.
+                if st.button("", key=f"borrarconv_{session_id}",
+                             icon=":material/delete:"):
+                    _pedir_borrado("conversacion", session_id, sesion["title"])
+                    st.rerun()
             if pulsado and not es_actual:
                 _load_conversation(session_id, email)
 
@@ -1793,15 +1815,8 @@ def main() -> None:
         bienvenida.empty()
         _process_user_prompt(prompt, role=role, email=email)
 
-    # Cerrar sesión
     with st.sidebar:
-        st.caption(f"Acceso: {ROLE_LABELS.get(role, role)}")
-        _render_conversation_history(email)
-        st.divider()
-        if st.button("Cerrar sesión", use_container_width=True):
-            st.session_state.clear()
-            st.session_state["_logged_out"] = True
-            st.rerun()
+        _barra_lateral(email, role)
 
     # Al final y fuera de la barra lateral: el aviso de borrado no ocupa un
     # hueco en la página, así que no desplaza el historial al abrirse.
