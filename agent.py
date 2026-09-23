@@ -2784,6 +2784,79 @@ def _componer_precios(rows: list[dict], desde, hasta) -> dict[str, Any]:
 _ESTADOS_NO_OCUPADOS = {"Libre", "No Disponible"}
 
 
+def _fecha(valor: Any) -> datetime.date | None:
+    """Una fecha venga como date o como texto (BigQuery las devuelve ya en
+    ISO al pasar por _row_to_dict)."""
+    if isinstance(valor, datetime.date):
+        return valor
+    try:
+        return datetime.date.fromisoformat(str(valor)[:10])
+    except (TypeError, ValueError):
+        return None
+
+
+def _enlazar_tramos(tramos: list[dict], villa_id: str | None, desde, hasta) -> None:
+    """Pone en cada tramo ocupado el número de su reserva y su enlace a Etendo.
+
+    El `reserva_id` de la ocupación no vale: guarda el código del canal
+    ("SYNC_PREVIO", números de agencia), no el id de Etendo. La reserva se
+    busca por villa y fechas, que es como se cruzan las dos tablas.
+    """
+    ocupados = [t for t in tramos if t.get("tipo_ocupacion") not in _ESTADOS_NO_OCUPADOS]
+    if not villa_id or not ocupados:
+        return
+    try:
+        reservas = [_row_to_dict(f) for f in _bq.query(
+            f"""
+            SELECT reserva_id, localizador, fecha_entrada, fecha_salida
+            FROM {TABLA_RESERVAS}
+            WHERE villa_id = @villa_id
+              AND fecha_entrada <= @hasta
+              AND COALESCE(fecha_salida, fecha_entrada) >= @desde
+              AND UPPER(COALESCE(estado_reserva, '')) NOT IN
+                  ('CA', 'CANCELACION', 'CANCELADA', 'PE', 'PERDIDA')
+              AND UPPER(COALESCE(estado_documento, '')) NOT IN
+                  ('VO', 'ANULADA', 'ANULADO')
+            """,
+            job_config=bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ScalarQueryParameter("villa_id", "STRING", villa_id),
+                    bigquery.ScalarQueryParameter("desde", "DATE", desde),
+                    bigquery.ScalarQueryParameter("hasta", "DATE", hasta),
+                ],
+                maximum_bytes_billed=_BILLING_CAP,
+            ),
+        ).result()]
+    except Exception:
+        log.warning("calendario_villa: no se pudieron enlazar las reservas", exc_info=True)
+        return
+
+    for tramo in ocupados:
+        inicio, fin = _fecha(tramo.get("desde")), _fecha(tramo.get("hasta"))
+        if not inicio or not fin:
+            continue
+        # La que más noches comparte con el tramo: una villa puede tener dos
+        # reservas pegadas y el tramo empieza el día de entrada.
+        mejor, solape_mayor = None, 0
+        for reserva in reservas:
+            entrada = _fecha(reserva.get("fecha_entrada"))
+            salida = _fecha(reserva.get("fecha_salida")) or entrada
+            if not entrada:
+                continue
+            # La noche de salida no se ocupa.
+            ultima = max(entrada, salida - datetime.timedelta(days=1))
+            solape = (min(fin, ultima) - max(inicio, entrada)).days + 1
+            if solape > solape_mayor:
+                mejor, solape_mayor = reserva, solape
+        if not mejor:
+            continue
+        if mejor.get("localizador"):
+            tramo["localizador"] = mejor["localizador"]
+        enlace = enlaces.reserva(mejor.get("reserva_id"), villa_id)
+        if enlace:
+            tramo["enlace_etendo"] = enlace
+
+
 def calendario_villa(
     villa_nombre: str,
     fecha_desde: str,
@@ -2850,6 +2923,8 @@ def calendario_villa(
         return {"tramos": [], "resumen": {},
                 **_error_villa_ambigua(villa_nombre, candidatas)}
     resultado = _componer_calendario(rows, desde, hasta)
+    _enlazar_tramos(resultado["tramos"],
+                    rows[0].get("villa_id") if rows else None, desde, hasta)
     if villa:
         resultado["villa"] = villa
     if not rows:
@@ -3819,6 +3894,8 @@ en la Costa Blanca (España). Ayudas con villas Y con información turística lo
   mapas o gráficos: si los piden, llama a la herramienta que corresponda y di
   que el mapa o el gráfico aparece bajo la respuesta. No escribas coordenadas
   ni tablas para copiar a una hoja de cálculo en su lugar.
+- Lo que ya se ve en el mapa o en el gráfico NO se repite en el texto: resume
+  en dos o tres líneas y deja que la imagen enseñe el detalle.
 
 ## Búsquedas por equipamiento y dirección
 - `buscar_propiedades` y `consultar_disponibilidad` filtran por CUALQUIER
@@ -3986,6 +4063,14 @@ _REGLAS_GESTION = """
 - Etendo no guarda contraseñas de wifi ni una "contraseña" de alarma aparte:
   los códigos van dentro de las instrucciones de activación y desactivación.
 - No saques estos datos si no te los piden.
+
+## El calendario ya se ve: no lo escribas
+- Con `calendario_villa`, la aplicación pinta bajo la respuesta el calendario
+  mes a mes, con cada día del color de su estado. NO enumeres los tramos ni los
+  días: contesta en dos o tres líneas con la ocupación del periodo, las noches
+  ocupadas y libres, y solo lo que de verdad aporte (el hueco libre más
+  próximo, una estancia mínima que sorprenda), y di que el calendario está
+  debajo. Si preguntan por unas fechas concretas, responde a esas fechas.
 
 ## Reservas y venta: ofertas y alternativas
 - Si preguntan qué hay libre en unas fechas CON precio, presupuesto u "opciones"

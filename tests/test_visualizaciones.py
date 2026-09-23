@@ -242,6 +242,21 @@ class ResumenReservasTest(unittest.TestCase):
         self.assertLessEqual(d["mark"]["size"], 24)
 
 
+class NoRepetirLoQueYaSeVeTest(unittest.TestCase):
+
+    def test_el_calendario_no_se_enumera_en_el_texto(self):
+        import agent as ag
+        for rol in ("interno", "admin"):   # el cliente no tiene calendario
+            texto = " ".join(ag.AGENTS[rol].instruction.split())
+            self.assertIn("NO enumeres los tramos", texto, rol)
+
+    def test_la_regla_general_vale_para_todos(self):
+        import agent as ag
+        for rol, agente in ag.AGENTS.items():
+            texto = " ".join(agente.instruction.split())
+            self.assertIn("NO se repite en el texto", texto, rol)
+
+
 class SinDatosNoHayGraficoTest(unittest.TestCase):
     """Un gráfico sin nada que pintar solo ensucia la consola del navegador
     ("Infinite extent for field fecha") y deja un hueco vacío."""

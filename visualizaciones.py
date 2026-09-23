@@ -264,6 +264,10 @@ _CSS_CALENDARIO = f"""
 .abv-cal td.abv-cal-fuera {{ background: transparent; color: #B9B6AE; font-weight: 400; }}
 .abv-cal td.abv-cal-entrada {{ box-shadow: inset 3px 0 0 {SUPERFICIE}; }}
 .abv-cal td.abv-cal-hoy {{ outline: 2px solid {TINTA}; outline-offset: -2px; }}
+.abv-cal td.abv-cal-enlace {{ padding: 0; cursor: pointer; }}
+.abv-cal td.abv-cal-enlace a {{ display: block; width: 100%; height: 100%; line-height: 30px;
+  color: inherit !important; text-decoration: none !important; }}
+.abv-cal td.abv-cal-enlace:hover a {{ text-decoration: underline !important; }}
 """
 
 
@@ -281,7 +285,7 @@ def calendario_html(v: dict, hoy: datetime.date | None = None) -> str:
     from html import escape
 
     hoy = hoy or datetime.date.today()
-    dias: dict[datetime.date, tuple[str, str, bool]] = {}
+    dias: dict[datetime.date, tuple[str, str, bool, str | None]] = {}
     previo = None
     for tramo in v.get("tramos") or []:
         try:
@@ -293,11 +297,17 @@ def calendario_html(v: dict, hoy: datetime.date | None = None) -> str:
         clase = _CLASE_CALENDARIO[categoria_calendario(estado)]
         noches = (hasta - desde).days + 1
         titulo = f"{estado} · {_dd_mm(desde)} – {_dd_mm(hasta)} ({noches} {'día' if noches == 1 else 'días'})"
+        # Los días de una reserva abren esa reserva en Etendo.
+        enlace = tramo.get("enlace_etendo")
+        if enlace:
+            localizador = tramo.get("localizador")
+            titulo += f" · {localizador}" if localizador else ""
+            titulo += " · pulsa para abrir en Etendo"
         # Marca de entrada: una reserva que empieza justo tras otra del mismo color.
         entrada = previo == clase and clase != "libre"
         dia = desde
         while dia <= hasta:
-            dias[dia] = (clase, titulo, entrada and dia == desde)
+            dias[dia] = (clase, titulo, entrada and dia == desde, enlace)
             dia += datetime.timedelta(days=1)
         previo = clase
     if not dias:
@@ -314,15 +324,21 @@ def calendario_html(v: dict, hoy: datetime.date | None = None) -> str:
                 if dia.month != mes:
                     celdas.append('<td class="abv-cal-vacio"></td>')
                     continue
+                enlace = None
                 if dia in dias:
-                    clase, titulo, entrada = dias[dia]
+                    clase, titulo, entrada, enlace = dias[dia]
                     clases = f"abv-cal-{clase}" + (" abv-cal-entrada" if entrada else "")
                 else:
                     clases, titulo = "abv-cal-fuera", "Fuera del periodo consultado"
                 if dia == hoy:
                     clases += " abv-cal-hoy"
                     titulo += " · hoy"
-                celdas.append(f'<td class="{clases}" title="{escape(titulo)}">{dia.day}</td>')
+                contenido = str(dia.day)
+                if enlace:
+                    clases += " abv-cal-enlace"
+                    contenido = (f'<a href="{escape(str(enlace))}" target="_blank" '
+                                 f'rel="noopener">{dia.day}</a>')
+                celdas.append(f'<td class="{clases}" title="{escape(titulo)}">{contenido}</td>')
             filas.append("<tr>" + "".join(celdas) + "</tr>")
         cabecera = "".join(f"<th>{d}</th>" for d in "LMXJVSD")
         meses.append(
