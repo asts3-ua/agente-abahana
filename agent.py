@@ -71,6 +71,19 @@ _DEDUP_VILLA = (
 )
 
 
+# Villas de prueba de Etendo: la de código de búsqueda "test" (se llama
+# "test1") y las que se llaman "prueba...". No son villas reales y ensucian
+# listas, fichas, sugerencias y recuentos.
+_NO_ES_PRUEBA = (
+    "NOT (LOWER(COALESCE(codigo_busqueda, '')) = 'test'"
+    " OR REGEXP_CONTAINS(LOWER(COALESCE(nombre, '')), r'^(test|prueba)'))"
+)
+# Lo mismo sobre el nombre de villa que guarda cada reserva.
+_RESERVA_NO_ES_PRUEBA = (
+    "NOT REGEXP_CONTAINS(LOWER(COALESCE(r.villa_nombre, '')), r'^(test|prueba)')"
+)
+
+
 def _sql_nombre_villa(columna: str, param: str = "villa_nombre") -> str:
     """Condición sobre el nombre de la villa. Si hay una villa que se llama
     exactamente así, solo esa: "PUNTA VISTA" no trae "PUNTA VISTA 6". Si no,
@@ -80,7 +93,7 @@ def _sql_nombre_villa(columna: str, param: str = "villa_nombre") -> str:
         f"(LOWER(TRIM({columna})) = LOWER(@{param}_exacto)"
         f" OR (LOWER({columna}) LIKE LOWER(@{param})"
         f" AND NOT EXISTS (SELECT 1 FROM {TABLA_VILLA} x_exacta"
-        f" WHERE x_exacta.es_activo = TRUE"
+        f" WHERE x_exacta.es_activo = TRUE AND {_NO_ES_PRUEBA}"
         f" AND LOWER(TRIM(x_exacta.nombre)) = LOWER(@{param}_exacto))))"
     )
 
@@ -100,7 +113,7 @@ _CTE_VILLAS_VIGENTES = f"""
         villa_dedup AS (
             SELECT *
             FROM {TABLA_VILLA}
-            WHERE es_activo = TRUE AND es_visible = TRUE
+            WHERE es_activo = TRUE AND es_visible = TRUE AND {_NO_ES_PRUEBA}
             {_DEDUP_VILLA}
         )"""
 
@@ -999,6 +1012,7 @@ def obtener_detalle_propiedad(
             SELECT *
             FROM {TABLA_VILLA}
             WHERE {_sql_nombre_villa("nombre")} AND es_activo = TRUE
+              AND {_NO_ES_PRUEBA}
             {_DEDUP_VILLA}
         )
         SELECT
@@ -2197,7 +2211,8 @@ def _nombres_villas() -> list[str]:
     if nombres and time.monotonic() - leido < _NOMBRES_VILLAS_TTL:
         return nombres
     filas = _bq.query(
-        f"SELECT DISTINCT nombre FROM {TABLA_VILLA} WHERE es_activo = TRUE AND nombre IS NOT NULL",
+        f"SELECT DISTINCT nombre FROM {TABLA_VILLA} "
+        f"WHERE es_activo = TRUE AND nombre IS NOT NULL AND {_NO_ES_PRUEBA}",
         job_config=bigquery.QueryJobConfig(maximum_bytes_billed=_BILLING_CAP),
     ).result()
     nombres = sorted({f.nombre for f in filas})
@@ -2714,6 +2729,7 @@ def detalle_reserva(localizador: str) -> dict[str, Any]:
             f"""
             WITH villa_dedup AS (
                 SELECT * FROM {TABLA_VILLA}
+                WHERE {_NO_ES_PRUEBA}
                 {_DEDUP_VILLA}
             )
             SELECT
@@ -2909,7 +2925,7 @@ def consultar_reservas(
         Finalizada, Limpieza en Curso, Asignar Limpieza, Repaso Limpieza,
         Estancia, No disponible).
     """
-    conditions: list[str] = []
+    conditions: list[str] = [_RESERVA_NO_ES_PRUEBA]
     params: list[bigquery.ScalarQueryParameter] = []
 
     if localizador:
@@ -3023,6 +3039,7 @@ def consultar_reservas(
         WITH villa_dedup AS (
             SELECT *
             FROM {TABLA_VILLA}
+            WHERE {_NO_ES_PRUEBA}
             {_DEDUP_VILLA}
         )
         SELECT
@@ -3167,7 +3184,7 @@ def resumen_reservas(
     group_key = agrupar_por.lower() if agrupar_por.lower() in _GROUP_OPTIONS else "villa"
     select_expr, group_expr = _GROUP_OPTIONS[group_key]
 
-    conditions: list[str] = [f"{columna_fecha} IS NOT NULL"]
+    conditions: list[str] = [f"{columna_fecha} IS NOT NULL", _RESERVA_NO_ES_PRUEBA]
     params: list[bigquery.ScalarQueryParameter] = []
 
     if villa_nombre:
@@ -3224,6 +3241,7 @@ def resumen_reservas(
         WITH villa_dedup AS (
             SELECT *
             FROM {TABLA_VILLA}
+            WHERE {_NO_ES_PRUEBA}
             {_DEDUP_VILLA}
         )
         SELECT
