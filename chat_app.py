@@ -572,9 +572,15 @@ def _frescura_del_turno(herramientas: list[tuple[str, dict, dict]]) -> list[str]
         return []
 
 
+# Qué buscó el agente, encima de cada respuesta. Se oculta a petición del
+# usuario (2026-09-23) para la presentación: sigue calculándose y guardándose,
+# así que para volver a enseñarlo basta con poner esto en True.
+MOSTRAR_FILTROS = False
+
+
 def _render_filtros(msg: dict) -> None:
     lineas = msg.get("filtros") or []
-    if lineas:
+    if lineas and MOSTRAR_FILTROS:
         st.caption("  \n".join(f":material/filter_alt: {linea}" for linea in lineas))
     actualidad = msg.get("frescura") or []
     if actualidad:

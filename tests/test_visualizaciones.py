@@ -5,6 +5,7 @@ punto y cada barra es un dato real.
 """
 
 import asyncio
+import inspect
 import json
 import re
 import unittest
@@ -240,6 +241,19 @@ class ResumenReservasTest(unittest.TestCase):
         d = viz.grafico_resumen(v).to_dict()
         self.assertEqual("dimension", d["encoding"]["y"]["field"])
         self.assertLessEqual(d["mark"]["size"], 24)
+
+
+class FiltrosOcultosTest(unittest.TestCase):
+    """Los filtros no se enseñan por ahora, pero se siguen guardando."""
+
+    def test_el_interruptor_esta_apagado(self):
+        from unittest.mock import Mock, patch
+        with patch("google.cloud.bigquery.Client", Mock()):
+            import chat_app
+        self.assertFalse(chat_app.MOSTRAR_FILTROS)
+        codigo = inspect.getsource(chat_app._render_filtros)
+        self.assertIn("MOSTRAR_FILTROS", codigo)
+        self.assertIn("frescura", codigo)   # la actualidad del dato sí se ve
 
 
 class NoRepetirLoQueYaSeVeTest(unittest.TestCase):
