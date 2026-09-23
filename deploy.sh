@@ -17,6 +17,12 @@ SERVICE="abahana-agent"
 SA_NAME="abahana-agent-sa"
 SA_EMAIL="${SA_NAME}@${PROJECT}.iam.gserviceaccount.com"
 STREAMLIT_SECRET="streamlit-secrets"   # secrets.toml de Streamlit en Secret Manager
+# Credenciales de la API de Etendo (precio final en vivo y enlaces al ERP).
+ETENDO_SECRETS=(
+    "etendo-precontrol-api-user"
+    "etendo-precontrol-api-password"
+    "etendo-precontrol-api-base-url"
+)
 CONV_DATASET="agent_analytics"   # conversaciones del asistente (chat_turns)
 CONV_LOCATION="EU"               # misma ubicación que bronze_raw/silver_clean/gold_bi
 
@@ -79,6 +85,17 @@ if [ "$SKIP_IAM" -eq 0 ]; then
             --quiet >/dev/null
         echo "  · $role"
     done
+
+    # Lectura SOLO de los secretos de Etendo, no de todo Secret Manager.
+    echo "Dando acceso a los secretos de Etendo..."
+    for secreto in "${ETENDO_SECRETS[@]}"; do
+        gcloud secrets add-iam-policy-binding "$secreto" \
+            --member="serviceAccount:$SA_EMAIL" \
+            --role="roles/secretmanager.secretAccessor" \
+            --project="$PROJECT" \
+            --quiet >/dev/null
+        echo "  · $secreto"
+    done
 fi
 
 # ── 2b. Dataset de conversaciones + permiso de escritura ─────────────────────
@@ -126,7 +143,7 @@ echo "Desplegando en Cloud Run (puede tardar)..."
 # duplicados que se añadieron a mano desde la consola.
 gcloud run deploy "$SERVICE" \
     --source . \
-    --set-secrets="/root/.streamlit/secrets.toml=${STREAMLIT_SECRET}:latest" \
+    --set-secrets="/root/.streamlit/secrets.toml=${STREAMLIT_SECRET}:latest,ETENDO_API_USER=${ETENDO_SECRETS[0]}:latest,ETENDO_API_PASSWORD=${ETENDO_SECRETS[1]}:latest,ETENDO_API_BASE_URL=${ETENDO_SECRETS[2]}:latest" \
     --project="$PROJECT" \
     --region="$REGION" \
     --service-account="$SA_EMAIL" \

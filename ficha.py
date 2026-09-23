@@ -158,7 +158,7 @@ class _Lector:
 
     _NO_SE_MUESTRAN = {
         "villa_id", "latitud", "longitud", "plantas", "url_web",
-        "licencia_vut_normalizada", "detalle_banios_disponible",
+        "licencia_vut_normalizada", "enlace_etendo", "detalle_banios_disponible",
         "detalle_dormitorios_disponible", "banios_con_detalle",
     }
 

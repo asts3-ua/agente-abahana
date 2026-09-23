@@ -561,10 +561,12 @@ def _frescura_del_turno(herramientas: list[tuple[str, dict, dict]]) -> list[str]
     try:
         usados = frescura.dominios(herramientas)
         web = frescura.uso_web(herramientas)
-        if not usados and not web:
+        vivo = frescura.uso_en_vivo(herramientas)
+        if not usados and not web and not vivo:
             return []
         datos = _datos_frescura() if usados else {}
-        return frescura.lineas(usados, datos, datetime.datetime.now(frescura._MADRID), web=web)
+        return frescura.lineas(usados, datos, datetime.datetime.now(frescura._MADRID),
+                               web=web, vivo=vivo)
     except Exception:
         log.warning("No se pudo calcular la actualidad de los datos", exc_info=True)
         return []
@@ -801,6 +803,10 @@ def _dialogo_ficha(nombre: str, role: str) -> None:
     nombre = villa.get("nombre") or nombre
     # Precios y calendario los calcula el asistente: la pregunta va al chat.
     with st.container(horizontal=True, horizontal_alignment="right", key="ficha_acciones"):
+        # El enlace a Etendo solo lo trae la ficha del personal.
+        if villa.get("enlace_etendo"):
+            st.link_button("Abrir en Etendo", villa["enlace_etendo"],
+                           icon=":material/open_in_new:")
         if st.button("Precios", icon=":material/euro:", key="ficha_precios"):
             st.session_state.pending_prompt = (
                 f"¿Qué precio tiene la villa {nombre} en las próximas semanas?")

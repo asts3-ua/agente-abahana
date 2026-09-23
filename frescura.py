@@ -37,6 +37,9 @@ _HERRAMIENTAS = {
     "detalle_reserva": ("reservas",),
 }
 _HERRAMIENTAS_WEB = {"consultar_web", "buscar_pagina_web", "buscar_internet"}
+# Herramientas que preguntan a Etendo en vivo: su dato no viene de la carga
+# nocturna, así que no lleva el aviso de "puede no estar al día".
+_HERRAMIENTAS_EN_VIVO = {"precio_final_villa"}
 # En producción reservas y ocupación cambian a diario: si no, algo va mal
 # aguas arriba. Villas y precios cambian poco y un aviso sería ruido.
 _AVISAR_SI_PARADO = {"reservas", "disponibilidad"}
@@ -53,6 +56,10 @@ def uso_web(llamadas: Iterable[tuple[str, dict, Any]]) -> bool:
     return any(nombre in _HERRAMIENTAS_WEB for nombre, _, _ in llamadas)
 
 
+def uso_en_vivo(llamadas: Iterable[tuple[str, dict, Any]]) -> bool:
+    return any(nombre in _HERRAMIENTAS_EN_VIVO for nombre, _, _ in llamadas)
+
+
 def _cuando(momento: datetime.datetime, ahora: datetime.datetime) -> str:
     local = momento.astimezone(_MADRID)
     hora = local.strftime("%H:%M")
@@ -65,7 +72,7 @@ def _cuando(momento: datetime.datetime, ahora: datetime.datetime) -> str:
 
 
 def lineas(usados: list[str], datos: dict[str, dict], ahora: datetime.datetime,
-           web: bool = False) -> list[str]:
+           web: bool = False, vivo: bool = False) -> list[str]:
     """Una línea por tipo de dato; sin datos de un tipo, no se inventa nada."""
     resultado = []
     for dominio in usados:
@@ -83,6 +90,8 @@ def lineas(usados: list[str], datos: dict[str, dict], ahora: datetime.datetime,
         if cambio and dominio in _AVISAR_SI_PARADO and ahora - cambio > _PARADO:
             linea += " · puede no estar al día"
         resultado.append(linea)
+    if vivo:
+        resultado.append(f"Precio final: consultado en Etendo {_cuando(ahora, ahora)}")
     if web:
         resultado.append(f"Web e internet: consultado {_cuando(ahora, ahora)}")
     return resultado

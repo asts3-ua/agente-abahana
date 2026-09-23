@@ -30,6 +30,8 @@ from bs4 import BeautifulSoup
 from google import genai
 from google.adk.agents import Agent
 from google.cloud import bigquery
+
+import enlaces
 from google.genai import types as genai_types
 
 log = logging.getLogger("agente-villas")
@@ -1140,6 +1142,10 @@ def obtener_detalle_propiedad(
 
     for match in matches:
         villa_id = match.pop("villa_id")
+        # Acceso directo a la villa en Etendo, para no buscarla a mano.
+        enlace = enlaces.villa(villa_id)
+        if enlace:
+            match["enlace_etendo"] = enlace
         plantas = plantas_por_villa.get(villa_id)
         if plantas:
             match["plantas"] = plantas
@@ -2381,6 +2387,207 @@ def _error_villa_ambigua(villa_nombre: str, candidatas: list[str]) -> dict[str, 
     }
 
 
+# ---------------------------------------------------------------------------
+# Precio final: se lo pregunta a Etendo en vivo
+# ---------------------------------------------------------------------------
+
+# Las tarifas del lake son solo la villa (y se cargan de noche). El precio que
+# paga el cliente lo calcula Etendo, que añade los extras obligatorios, como la
+# limpieza final. Este servicio web es el mismo que usa la web de Abahana.
+_WS_PRECIO_VILLA = "/etendo/ws/es.opentix.webservices.preciovilla"
+_TIMEOUT_ETENDO = 25
+_MAX_NOCHES_PRECIO_FINAL = 365
+# Tipo de línea en la respuesta: 1 es la villa, 2 son los extras.
+_LINEA_VILLA = "1"
+
+_credenciales_etendo_cache: tuple[str, str, str] | None = None
+_productos_cache: tuple[float, dict[str, str]] = (0.0, {})
+_PRODUCTOS_TTL = 3600.0
+
+
+def _credenciales_etendo() -> tuple[str, str, str]:
+    """Usuario, contraseña y URL base de la API de Etendo. Llegan como
+    variables de entorno desde Secret Manager (ver deploy.sh)."""
+    global _credenciales_etendo_cache
+    if _credenciales_etendo_cache:
+        return _credenciales_etendo_cache
+    usuario = os.environ.get("ETENDO_API_USER", "")
+    clave = os.environ.get("ETENDO_API_PASSWORD", "")
+    base = os.environ.get("ETENDO_API_BASE_URL", "").rstrip("/")
+    if not (usuario and clave and base):
+        raise RuntimeError(
+            "Faltan las credenciales de Etendo (ETENDO_API_USER, "
+            "ETENDO_API_PASSWORD, ETENDO_API_BASE_URL)."
+        )
+    _credenciales_etendo_cache = (usuario, clave, base)
+    return _credenciales_etendo_cache
+
+
+def _productos_etendo() -> dict[str, str]:
+    """Id de producto -> nombre, para poner nombre a cada línea del precio."""
+    global _productos_cache
+    leido, productos = _productos_cache
+    if productos and time.monotonic() - leido < _PRODUCTOS_TTL:
+        return productos
+    filas = _bq.query(
+        f"SELECT id, nombre FROM `{PROJECT_ID}.{DATASET}.stg_etendo_Producto` "
+        "WHERE nombre IS NOT NULL",
+        job_config=bigquery.QueryJobConfig(maximum_bytes_billed=_BILLING_CAP),
+    ).result()
+    productos = {f["id"]: f["nombre"] for f in filas}
+    _productos_cache = (time.monotonic(), productos)
+    return productos
+
+
+def _villa_por_nombre(villa_nombre: str) -> tuple[str | None, str | None]:
+    """(villa_id, nombre) de la villa que pide el usuario. El villa_id de
+    nuestras tablas es el resourceId que espera Etendo."""
+    filas = list(_bq.query(
+        f"""
+        WITH{_CTE_VILLAS_VIGENTES}
+        SELECT villa_id, nombre
+        FROM villa_dedup
+        WHERE {_sql_nombre_villa("nombre")}
+        ORDER BY nombre
+        LIMIT 5
+        """,
+        job_config=bigquery.QueryJobConfig(
+            query_parameters=_params_nombre_villa(villa_nombre),
+            maximum_bytes_billed=_BILLING_CAP,
+        ),
+    ).result())
+    if not filas:
+        return None, None
+    pedido = villa_nombre.strip().upper()
+    exacta = next((f for f in filas if (f["nombre"] or "").strip().upper() == pedido), None)
+    fila = exacta or filas[0]
+    return fila["villa_id"], fila["nombre"]
+
+
+def precio_final_villa(
+    villa_nombre: str,
+    fecha_entrada: str,
+    fecha_salida: str,
+) -> dict[str, Any]:
+    """Precio final de una estancia: lo que pagaría el cliente, extras
+    obligatorios incluidos.
+
+    Úsala siempre que pregunten "cuánto cuesta", "cuánto le sale", "precio
+    total" o "presupuesto" de una estancia con fechas. Se lo pregunta a Etendo
+    en ese momento, así que el dato está al día, e incluye los extras
+    obligatorios (limpieza final y los que tenga cada villa), que las tarifas
+    de `consultar_precios` NO llevan: por eso `consultar_precios` da un total
+    más bajo. Usa `consultar_precios` solo para gestión interna: precio de
+    compra, margen o el detalle noche a noche.
+
+    Args:
+        villa_nombre: Nombre de la villa.
+        fecha_entrada: Día de entrada (YYYY-MM-DD).
+        fecha_salida: Día de salida (YYYY-MM-DD). La noche de salida no se
+            cobra: del 3 al 10 son 7 noches.
+
+    Returns:
+        Diccionario con 'precio_final' (suma de las líneas obligatorias),
+        'alojamiento', 'obligatorios' (cada extra obligatorio con su importe),
+        'incluidos_sin_coste' y 'opcionales' (extras y descuentos que solo se
+        aplican si se contratan, como el descuento por pago completo).
+    """
+    try:
+        entrada = _parse_iso_date(fecha_entrada, "fecha_entrada")
+        salida = _parse_iso_date(fecha_salida, "fecha_salida")
+    except ValueError as exc:
+        return {"error": str(exc)}
+    noches = (salida - entrada).days
+    if noches <= 0:
+        return {"error": "La fecha de salida tiene que ser posterior a la de entrada."}
+    if noches > _MAX_NOCHES_PRECIO_FINAL:
+        return {"error": f"El rango no puede superar {_MAX_NOCHES_PRECIO_FINAL} noches."}
+
+    try:
+        villa_id, nombre = _villa_por_nombre(villa_nombre)
+    except Exception as e:
+        log.exception("precio_final_villa: error leyendo la villa")
+        return {"error": str(e)}
+    if not villa_id:
+        return _con_sugerencias({}, villa_nombre)
+
+    try:
+        usuario, clave, base = _credenciales_etendo()
+        respuesta = requests.get(
+            base + _WS_PRECIO_VILLA,
+            params={
+                "resourceId": villa_id,
+                "dateFrom": entrada.isoformat(),
+                "dateTo": salida.isoformat(),
+                "extras": "si",
+            },
+            auth=(usuario, clave),
+            timeout=_TIMEOUT_ETENDO,
+        )
+        if respuesta.status_code != 200:
+            return {"error": f"Etendo respondió {respuesta.status_code} al pedir el precio "
+                             f"de {nombre}."}
+        cuerpo = respuesta.json()
+    except Exception as e:
+        log.exception("precio_final_villa: error llamando a Etendo")
+        return {"error": f"No se pudo consultar el precio en Etendo: {e}"}
+
+    datos = ((cuerpo or {}).get("response") or {}).get("data") or []
+    estado = ((cuerpo or {}).get("response") or {}).get("status")
+    if estado not in (None, "0") or not datos:
+        return {"error": f"Etendo no ha devuelto precio para {nombre} en esas fechas."}
+
+    return _componer_precio_final(datos[0], nombre, entrada, salida, noches)
+
+
+def _componer_precio_final(datos: dict, nombre: str | None, entrada, salida,
+                           noches: int) -> dict[str, Any]:
+    productos = {}
+    try:
+        productos = _productos_etendo()
+    except Exception:
+        log.warning("precio_final_villa: sin nombres de producto", exc_info=True)
+
+    alojamiento = 0.0
+    obligatorios: list[dict[str, Any]] = []
+    sin_coste: list[str] = []
+    opcionales: list[dict[str, Any]] = []
+    for linea in datos.get("lineas") or []:
+        if not isinstance(linea, dict):
+            continue
+        id_producto = linea.get("id_producto")
+        concepto = productos.get(id_producto) or id_producto or "Sin nombre"
+        importe = _redondear(float(linea.get("precio_despues") or 0))
+        if not linea.get("obligatorio"):
+            if importe:
+                opcionales.append({"concepto": concepto, "importe": importe})
+            continue
+        if str(linea.get("tipo")) == _LINEA_VILLA:
+            alojamiento += importe
+        elif importe:
+            obligatorios.append({"concepto": concepto, "importe": importe})
+        else:
+            # Extras que la villa incluye sin cobrar aparte (energía, wifi...).
+            sin_coste.append(concepto)
+
+    total = _redondear(alojamiento + sum(o["importe"] for o in obligatorios))
+    return {
+        "villa": nombre,
+        "entrada": entrada.isoformat(),
+        "salida": salida.isoformat(),
+        "noches": noches,
+        "precio_final": total,
+        "precio_medio_noche": _redondear(total / noches) if noches else None,
+        "alojamiento": _redondear(alojamiento),
+        "obligatorios": obligatorios,
+        "incluidos_sin_coste": sin_coste,
+        "opcionales": opcionales,
+        "nota": ("Precio consultado en Etendo en este momento. 'precio_final' suma el "
+                 "alojamiento y los extras obligatorios; los opcionales (y los descuentos, "
+                 "como el de pago completo) solo se aplican si se contratan."),
+    }
+
+
 def consultar_precios(
     villa_nombre: str,
     fecha_desde: str | None = None,
@@ -2733,7 +2940,7 @@ def detalle_reserva(localizador: str) -> dict[str, Any]:
                 {_DEDUP_VILLA}
             )
             SELECT
-                r.reserva_id, r.localizador, r.villa_nombre, v.pueblo_cercano,
+                r.reserva_id, r.villa_id, r.localizador, r.villa_nombre, v.pueblo_cercano,
                 r.fecha_pedido, r.fecha_confirmacion, r.fecha_entrada, r.fecha_salida,
                 DATE_DIFF(r.fecha_salida, r.fecha_entrada, DAY) AS noches,
                 r.adultos, r.ninos, r.num_mascotas,
@@ -2774,6 +2981,9 @@ def detalle_reserva(localizador: str) -> dict[str, Any]:
         }
     reserva = filas[0]
     reserva_id = reserva.pop("reserva_id")
+    enlace = enlaces.reserva(reserva_id, reserva.pop("villa_id", None))
+    if enlace:
+        reserva["enlace_etendo"] = enlace
     id_param = [bigquery.ScalarQueryParameter("reserva_id", "STRING", reserva_id)]
 
     def _pagos():
@@ -3723,6 +3933,9 @@ _REGLAS_GESTION = """
 - Da el precio en esa misma respuesta, sin preguntar antes: llama a
   `consultar_precios`, que sin fechas toma los próximos 30 días. No pidas
   fechas al usuario para dar un precio orientativo.
+- La ficha trae `enlace_etendo`: ofrécelo al final como "Abrir en Etendo",
+  en un enlace con ese texto, para que el usuario vaya directo a la villa en
+  Etendo. Usa el que devuelve la herramienta; no lo escribas de memoria.
 
 ## Datos de acceso a las villas (alarma, caja fuerte, wifi, puertas)
 - El usuario de esta versión es personal interno de Abahana y está autorizado
@@ -3762,12 +3975,30 @@ _REGLAS_GESTION = """
   si `larga_estancia` es true, di que se aplica la tarifa de larga estancia, y
   si `precio_completo` es false, que faltan precios de alguna noche.
 
+## Cuánto paga el cliente: `precio_final_villa`
+- Para "cuánto cuesta", "cuánto le sale", "precio total" o "presupuesto" de una
+  estancia con entrada y salida, usa `precio_final_villa(villa, entrada,
+  salida)`. Se lo pregunta a Etendo en ese momento y suma los extras
+  OBLIGATORIOS (la limpieza final y los que tenga cada villa), que las tarifas
+  del lake no llevan: es la cifra que ve el cliente en la web.
+- Las demás herramientas de precio (`consultar_precios`, `buscar_ofertas`,
+  `alternativas_villa`) salen de la copia nocturna y son SOLO el alojamiento:
+  sirven para comparar villas, para el margen y para el detalle noche a noche,
+  pero dan un total más bajo. Si das una de esas cifras como precio al cliente,
+  acláralo o confírmala con `precio_final_villa`.
+- Al dar el precio final, desglosa: alojamiento, cada extra obligatorio con su
+  importe y el total. Menciona los `opcionales` (descuento por pago completo,
+  mascotas, cuna...) como lo que son: solo si se contratan.
+
 ## Reservas y facturación
 - Para localizar una reserva usa `consultar_reservas` con lo que den: número
   (`localizador`: "2026_3079", "2026/3079" o solo "3079"), nombre y/o apellidos
   del `titular` (en cualquier orden, sin importar tildes), villa, y fechas de
   entrada o de salida, combinables. Con un número suelto pueden salir reservas
   de varios años: pregunta cuál.
+- `detalle_reserva` trae `enlace_etendo`: ofrécelo como "Abrir en Etendo" para
+  ir directo a la reserva. Usa el que devuelve la herramienta, nunca uno
+  inventado.
 - Para toda la información de una reserva ya localizada (titular y su email,
   país e idioma; personas y mascotas; notas de entrada y salida; condición de
   pago; plan de pagos con lo pagado y lo pendiente) usa `detalle_reserva`. Las
@@ -3821,8 +4052,11 @@ _HERRAMIENTAS_GESTION = """
 - `alternativas_villa(villa_nombre, fecha_desde, fecha_hasta)`: si una villa
   está libre y su precio; si no, fechas cercanas libres de esa villa y villas
   parecidas libres, de precio más parecido primero.
+- `precio_final_villa(villa_nombre, fecha_entrada, fecha_salida)`: precio final
+  de una estancia, extras obligatorios incluidos (limpieza final), preguntado a
+  Etendo en vivo. Es el precio que paga el cliente.
 - `consultar_precios(villa_nombre, ...)`: precio de venta, precio de compra y
-  margen noche a noche, tarifa de larga estancia y extras.
+  margen noche a noche, tarifa de larga estancia y extras. Solo alojamiento.
 - `calendario_villa(villa_nombre, fecha_desde, ...)`: calendario de ocupación de
   una villa por tramos (libre, ocupada por canal, bloqueada) y % de ocupación.
   Para saber si se puede vender en unas fechas, usa `consultar_disponibilidad`.
@@ -4075,6 +4309,7 @@ agent_interno = Agent(
         # Solo interno y admin: consultar_precios expone precio de compra y
         # margen, y el calendario, el uso que hace el propietario de su villa.
         consultar_precios,
+        precio_final_villa,
         calendario_villa,
         consultar_web,
         buscar_pagina_web,
@@ -4116,6 +4351,7 @@ agent_admin = Agent(
         # Solo interno y admin: consultar_precios expone precio de compra y
         # margen, y el calendario, el uso que hace el propietario de su villa.
         consultar_precios,
+        precio_final_villa,
         calendario_villa,
         consultar_web,
         buscar_pagina_web,
