@@ -109,6 +109,8 @@ class EnLasHerramientasTest(unittest.TestCase):
         for rol in ("interno", "admin"):
             texto = " ".join(agent.AGENTS[rol].instruction.split())
             self.assertIn("[2026_3079](enlace_etendo)", texto, rol)
+            # Escribía "[2026_1741]" como texto del enlace, con corchetes.
+            self.assertIn("sin corchetes", texto, rol)
 
     def test_el_excel_lleva_el_enlace(self):
         import exportar

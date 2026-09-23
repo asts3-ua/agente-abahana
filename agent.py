@@ -4121,7 +4121,9 @@ _REGLAS_GESTION = """
   de varios años: pregunta cuál.
 - Cada reserva trae `enlace_etendo`, que la abre en Etendo. Escribe SIEMPRE el
   número de reserva como enlace a esa dirección, tanto en una lista como en el
-  detalle: `[2026_3079](enlace_etendo)`. Usa el enlace que devuelve la
+  detalle: `[2026_3079](enlace_etendo)`. El texto del enlace es solo el
+  número, tal cual, sin corchetes, comillas ni la palabra "reserva": se tiene
+  que leer 2026_3079, no [2026_3079]. Usa el enlace que devuelve la
   herramienta, nunca uno inventado, y no lo enseñes como texto suelto. En
   listas de más de 25 reservas no viene: ahí deja el número tal cual.
 - Para toda la información de una reserva ya localizada (titular y su email,
