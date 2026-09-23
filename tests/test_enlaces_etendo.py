@@ -82,6 +82,43 @@ class EnLasHerramientasTest(unittest.TestCase):
         self.assertIn(RESERVA, unquote(r["reserva"]["enlace_etendo"]))
         self.assertNotIn("reserva_id", r["reserva"])
 
+    def test_cada_reserva_de_la_lista_lo_trae(self):
+        filas = [{"reserva_id": RESERVA, "villa_id": VILLA, "localizador": "2018_4307",
+                  "total_resultados": 2},
+                 {"reserva_id": "OTRA", "villa_id": VILLA, "localizador": "2026_1"}]
+        bq = Mock()
+        bq.query.return_value = Mock(**{"result.return_value": filas})
+        with patch.object(agent, "_bq", bq), patch.object(agent, "_row_to_dict", side_effect=lambda f: dict(f)):
+            r = agent.consultar_reservas(limite=20)
+        self.assertIn(RESERVA, unquote(r["reservas"][0]["enlace_etendo"]))
+        # Los ids internos no se enseñan al modelo.
+        for reserva in r["reservas"]:
+            self.assertNotIn("reserva_id", reserva)
+            self.assertNotIn("villa_id", reserva)
+
+    def test_en_listas_largas_no_se_llena_de_enlaces(self):
+        filas = [{"reserva_id": f"R{i}", "villa_id": VILLA, "localizador": f"2026_{i}"}
+                 for i in range(agent._MAX_RESERVAS_CON_ENLACE + 1)]
+        bq = Mock()
+        bq.query.return_value = Mock(**{"result.return_value": filas})
+        with patch.object(agent, "_bq", bq), patch.object(agent, "_row_to_dict", side_effect=lambda f: dict(f)):
+            r = agent.consultar_reservas(limite=50)
+        self.assertNotIn("enlace_etendo", r["reservas"][0])
+
+    def test_el_localizador_se_da_como_enlace(self):
+        for rol in ("interno", "admin"):
+            texto = " ".join(agent.AGENTS[rol].instruction.split())
+            self.assertIn("[2026_3079](enlace_etendo)", texto, rol)
+
+    def test_el_excel_lleva_el_enlace(self):
+        import exportar
+        tablas = exportar.tablas([("consultar_reservas", {}, {"reservas": [
+            {"localizador": "2026_1", "enlace_etendo": "https://x/y"}], "total": 1})])
+        self.assertEqual("https://x/y", tablas[0]["filas"][0]["enlace_etendo"])
+        import io, openpyxl
+        hoja = openpyxl.load_workbook(io.BytesIO(exportar.a_excel(tablas)))["Reservas"]
+        self.assertIn("Enlace en Etendo", [c.value for c in hoja[4] if c.value])
+
     def test_sin_configurar_la_url_no_falla(self):
         with patch.object(enlaces, "base_etendo", return_value=""):
             self.assertIsNone(enlaces.villa(VILLA))
@@ -99,6 +136,13 @@ class EnLaAppTest(unittest.TestCase):
         codigo = inspect.getsource(chat_app._dialogo_ficha)
         self.assertIn("enlace_etendo", codigo)
         self.assertIn("Abrir en Etendo", codigo)
+
+    def test_los_enlaces_del_chat_van_subrayados(self):
+        self.assertIn("text-decoration: underline", chat_app._BRAND_CSS)
+
+    def test_los_enlaces_se_abren_en_otra_pestana(self):
+        self.assertIn("_blank", chat_app._SCRIPT_ENLACES_NUEVA_PESTANA)
+        self.assertIn("_enlaces_en_pestana_nueva()", inspect.getsource(chat_app.main))
 
     def test_la_imagen_incluye_el_modulo(self):
         import os

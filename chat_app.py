@@ -726,6 +726,37 @@ def _ir_al_inicio_de_la_respuesta() -> None:
         componentes.html(f"<script>{_SCRIPT_IR_AL_INICIO}</script>", height=0)
 
 
+# Los enlaces de una respuesta (Etendo, la web) se abren en otra pestaña: en la
+# misma se perdía la conversación y había que volver atrás. Streamlit no deja
+# poner target en el markdown, así que se marca ya puesto en la página, y se
+# vuelve a marcar cuando llegan respuestas nuevas.
+_SCRIPT_ENLACES_NUEVA_PESTANA = """
+(function () {
+  const doc = window.parent.document;
+  function marcar() {
+    doc.querySelectorAll('[data-testid="stChatMessage"] a[href^="http"]').forEach(function (a) {
+      if (a.host !== window.parent.location.host) {
+        a.target = '_blank';
+        a.rel = 'noopener';
+      }
+    });
+  }
+  marcar();
+  if (!window.parent.__abvEnlacesFuera) {
+    window.parent.__abvEnlacesFuera = new MutationObserver(marcar);
+    window.parent.__abvEnlacesFuera.observe(doc.body, {childList: true, subtree: true});
+  }
+})();
+"""
+
+
+def _enlaces_en_pestana_nueva() -> None:
+    import streamlit.components.v1 as componentes
+
+    with st.container(key="enlaces_fuera"):
+        componentes.html(f"<script>{_SCRIPT_ENLACES_NUEVA_PESTANA}</script>", height=0)
+
+
 def _render_chat_history(messages: list[dict], email: str = "") -> None:
     avatar = _assistant_avatar()
     for i, msg in enumerate(messages):
@@ -1338,6 +1369,14 @@ a:hover {
     background-color: var(--abv-ink-hover);
 }
 
+/* Los enlaces de una respuesta (el número de reserva abre su ficha en Etendo)
+   tienen que verse como enlaces: en el chat salían sin subrayar y parecían
+   texto normal. */
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] a {
+    text-decoration: underline !important;
+    text-underline-offset: 2px;
+}
+
 /* Chrome de Streamlit: ocultamos las acciones del toolbar (Deploy, menú)
    pero NO el toolbar entero, porque el botón que despliega la barra
    lateral vive dentro y es la única vía a "Cerrar sesión". */
@@ -1852,6 +1891,7 @@ a:focus-visible,
 }
 
 /* El script que lleva la vista al principio de la respuesta no ocupa sitio. */
+.st-key-enlaces_fuera,
 .st-key-ir_al_inicio {
     height: 0 !important;
     min-height: 0 !important;
@@ -2099,6 +2139,7 @@ def main() -> None:
     # hueco en la página, así que no desplaza el historial al abrirse.
     _abrir_aviso_borrado(email)
     _abrir_ficha(role)
+    _enlaces_en_pestana_nueva()
 
     # Solo tras una respuesta nueva: al pulsar un botón la página no salta.
     if st.session_state.pop("ir_al_inicio_de_la_respuesta", False):

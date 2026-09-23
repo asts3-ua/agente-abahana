@@ -69,6 +69,7 @@ _COLUMNAS = [
     ("metodo_pago_nombre", "Forma de pago"), ("fecha_pago", "Pagado el"),
     ("fecha_confirmacion", "Confirmada el"), ("fecha_pedido", "Hecha el"),
     ("fecha_anulacion", "Anulada el"),
+    ("enlace_etendo", "Enlace en Etendo"),
 ]
 _ETIQUETAS = dict(_COLUMNAS)
 _ORDEN = {clave: i for i, (clave, _) in enumerate(_COLUMNAS)}

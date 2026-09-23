@@ -176,6 +176,24 @@ _COLUMNAS_RESUMEN = f"""
 
 
 
+# En una lista larga los enlaces pesan más de lo que aportan: para eso está
+# `detalle_reserva`, que siempre trae el suyo.
+_MAX_RESERVAS_CON_ENLACE = 25
+
+
+def _enlazar_reservas(reservas: list[dict]) -> None:
+    """Cambia los ids internos de cada reserva por su enlace a Etendo."""
+    con_enlace = len(reservas) <= _MAX_RESERVAS_CON_ENLACE
+    for reserva in reservas:
+        reserva_id = reserva.pop("reserva_id", None)
+        villa_id = reserva.pop("villa_id", None)
+        if not con_enlace:
+            continue
+        enlace = enlaces.reserva(reserva_id, villa_id)
+        if enlace:
+            reserva["enlace_etendo"] = enlace
+
+
 def _separar_total(rows) -> tuple[list[dict], int]:
     """Extrae el total exacto y lo saca de cada fila.
 
@@ -3275,6 +3293,8 @@ def consultar_reservas(
             r.es_prereserva,
             r.es_alto_riesgo,
             r.es_cliente_nuevo,
+            r.reserva_id,
+            r.villa_id,
             v.pueblo_cercano,
             v.zona,
             v.tiene_piscina_privada,
@@ -3299,6 +3319,7 @@ def consultar_reservas(
         return {"reservas": [], "count": 0, "total": 0, "error": str(e)}
 
     reservas, total = _separar_total(rows)
+    _enlazar_reservas(reservas)
     resultado = {"reservas": reservas, "count": len(reservas), "total": total}
     # Qué fecha se ha filtrado: "de septiembre" puede ser entrada, salida,
     # confirmación o creación, y el agente tiene que decir cuál usó.
@@ -3996,9 +4017,11 @@ _REGLAS_GESTION = """
   del `titular` (en cualquier orden, sin importar tildes), villa, y fechas de
   entrada o de salida, combinables. Con un número suelto pueden salir reservas
   de varios años: pregunta cuál.
-- `detalle_reserva` trae `enlace_etendo`: ofrécelo como "Abrir en Etendo" para
-  ir directo a la reserva. Usa el que devuelve la herramienta, nunca uno
-  inventado.
+- Cada reserva trae `enlace_etendo`, que la abre en Etendo. Escribe SIEMPRE el
+  número de reserva como enlace a esa dirección, tanto en una lista como en el
+  detalle: `[2026_3079](enlace_etendo)`. Usa el enlace que devuelve la
+  herramienta, nunca uno inventado, y no lo enseñes como texto suelto. En
+  listas de más de 25 reservas no viene: ahí deja el número tal cual.
 - Para toda la información de una reserva ya localizada (titular y su email,
   país e idioma; personas y mascotas; notas de entrada y salida; condición de
   pago; plan de pagos con lo pagado y lo pendiente) usa `detalle_reserva`. Las
