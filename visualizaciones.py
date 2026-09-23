@@ -63,7 +63,7 @@ def recoger(llamadas: Iterable[tuple[str, dict, Any]]) -> list[dict]:
                 villa = match.get("nombre")
                 if villa and villa not in villas:
                     villas[villa] = {k: match[k] for k in _CAMPOS_VILLA if match.get(k) is not None}
-        elif nombre == "consultar_precios" and respuesta.get("noches"):
+        elif nombre == "consultar_precios" and _hay_precios(respuesta.get("noches")):
             resultado.append({
                 "tipo": "precios",
                 "villa": respuesta.get("villa") or args.get("villa_nombre"),
@@ -86,6 +86,15 @@ def recoger(llamadas: Iterable[tuple[str, dict, Any]]) -> list[dict]:
     if villas:
         resultado.insert(0, {"tipo": "mapa", "villas": list(villas.values())})
     return resultado
+
+
+def _hay_precios(noches: Any) -> bool:
+    """Sin ningún precio no hay gráfico: el de precios saldría vacío y Vega
+    avisa en la consola de que el eje de fechas no tiene extensión."""
+    return bool(noches) and any(
+        n.get("precio_venta") is not None or n.get("precio_compra") is not None
+        for n in noches if isinstance(n, dict)
+    )
 
 
 def _coordenada(valor: Any, limite: float) -> float | None:

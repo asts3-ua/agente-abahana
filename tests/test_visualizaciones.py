@@ -242,6 +242,25 @@ class ResumenReservasTest(unittest.TestCase):
         self.assertLessEqual(d["mark"]["size"], 24)
 
 
+class SinDatosNoHayGraficoTest(unittest.TestCase):
+    """Un gráfico sin nada que pintar solo ensucia la consola del navegador
+    ("Infinite extent for field fecha") y deja un hueco vacío."""
+
+    def test_precios_sin_ningun_precio(self):
+        noches = [{"fecha": "2026-10-01", "precio_venta": None, "precio_compra": None}]
+        self.assertEqual([], viz.recoger([("consultar_precios", {}, {"noches": noches})]))
+
+    def test_precios_con_algun_precio_si(self):
+        noches = [{"fecha": "2026-10-01", "precio_venta": None, "precio_compra": None},
+                  {"fecha": "2026-10-02", "precio_venta": 400.0}]
+        self.assertEqual(["precios"], [v["tipo"] for v in
+                                       viz.recoger([("consultar_precios", {}, {"noches": noches})])])
+
+    def test_calendario_y_resumen_vacios(self):
+        self.assertEqual([], viz.recoger([("calendario_villa", {}, {"tramos": []})]))
+        self.assertEqual([], viz.recoger([("resumen_reservas", {}, {"resumen": []})]))
+
+
 class MapaTest(unittest.TestCase):
 
     def _viz(self, aproximado):
