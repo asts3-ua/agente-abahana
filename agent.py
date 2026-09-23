@@ -2417,6 +2417,9 @@ _TIMEOUT_ETENDO = 25
 _MAX_NOCHES_PRECIO_FINAL = 365
 # Tipo de línea en la respuesta: 1 es la villa, 2 son los extras.
 _LINEA_VILLA = "1"
+# Cómo se cobra cada línea: "d" se multiplica por las noches y "r" es un
+# importe único de la estancia (comprobado alargando la estancia en el WS).
+_COBRO = {"d": "por día", "r": "por reserva"}
 
 _credenciales_etendo_cache: tuple[str, str, str] | None = None
 _productos_cache: tuple[float, dict[str, str]] = (0.0, {})
@@ -2508,7 +2511,10 @@ def precio_final_villa(
         Diccionario con 'precio_final' (suma de las líneas obligatorias),
         'alojamiento', 'obligatorios' (cada extra obligatorio con su importe),
         'incluidos_sin_coste' y 'opcionales' (extras y descuentos que solo se
-        aplican si se contratan, como el descuento por pago completo).
+        aplican si se contratan, como el descuento por pago completo). Cada
+        extra dice en `cobro` si va "por día" (se multiplica por las noches) o
+        "por reserva" (importe único), y con `por_unidad` si se pueden pedir
+        varias unidades.
     """
     try:
         entrada = _parse_iso_date(fecha_entrada, "fecha_entrada")
@@ -2576,14 +2582,20 @@ def _componer_precio_final(datos: dict, nombre: str | None, entrada, salida,
         id_producto = linea.get("id_producto")
         concepto = productos.get(id_producto) or id_producto or "Sin nombre"
         importe = _redondear(float(linea.get("precio_despues") or 0))
+        detalle = {"concepto": concepto, "importe": importe,
+                   "cobro": _COBRO.get(str(linea.get("calculo")), "por reserva")}
+        if linea.get("repetible"):
+            # Se pueden pedir varias (cunas, camas supletorias): el importe es
+            # el de una unidad.
+            detalle["por_unidad"] = True
         if not linea.get("obligatorio"):
             if importe:
-                opcionales.append({"concepto": concepto, "importe": importe})
+                opcionales.append(detalle)
             continue
         if str(linea.get("tipo")) == _LINEA_VILLA:
             alojamiento += importe
         elif importe:
-            obligatorios.append({"concepto": concepto, "importe": importe})
+            obligatorios.append(detalle)
         else:
             # Extras que la villa incluye sin cobrar aparte (energía, wifi...).
             sin_coste.append(concepto)
@@ -4010,6 +4022,11 @@ _REGLAS_GESTION = """
 - Al dar el precio final, desglosa: alojamiento, cada extra obligatorio con su
   importe y el total. Menciona los `opcionales` (descuento por pago completo,
   mascotas, cuna...) como lo que son: solo si se contratan.
+- De cada extra di cómo se cobra, que viene en `cobro`: "por día" (se
+  multiplica por las noches de la estancia) o "por reserva" (importe único de
+  la estancia). Si trae `por_unidad`, ese importe es el de una unidad y se
+  pueden pedir varias (cunas, camas supletorias...). No lo supongas: usa lo
+  que diga la herramienta.
 
 ## Reservas y facturación
 - Para localizar una reserva usa `consultar_reservas` con lo que den: número

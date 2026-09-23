@@ -30,6 +30,8 @@ RESPUESTA = {"response": {"status": "0", "data": [{
          "precio_despues": -191.8322, "obligatorio": False, "tipo": "2", "repetible": False, "calculo": "r"},
         {"id_producto": "C16844F671C841799CB56B5CEB94B39A", "precio_antes": 70,
          "precio_despues": 70, "obligatorio": False, "tipo": "2", "repetible": False, "calculo": "r"},
+        {"id_producto": "024CA4EFF9A746838409C9206C3E538B", "precio_antes": 4,
+         "precio_despues": 4, "obligatorio": False, "tipo": "2", "repetible": True, "calculo": "d"},
     ],
 }]}}
 
@@ -39,6 +41,7 @@ PRODUCTOS = {
     "65773CDB62144A84B9DAB725FB93BB29": "Energía",
     "618E566BD35C4A7EB7CAB135D0201780": "Descuento pago completo",
     "C16844F671C841799CB56B5CEB94B39A": "Animales",
+    "024CA4EFF9A746838409C9206C3E538B": "Cuna Bebé",
 }
 
 
@@ -81,16 +84,32 @@ class PrecioFinalTest(unittest.TestCase):
 
     def test_el_desglose_lleva_el_nombre_de_cada_producto(self):
         r = self._llamar()
-        self.assertEqual([{"concepto": "Limpieza final", "importe": 264.0}], r["obligatorios"])
+        self.assertEqual([{"concepto": "Limpieza final", "importe": 264.0,
+                           "cobro": "por reserva"}], r["obligatorios"])
         self.assertIn("Energía", r["incluidos_sin_coste"])
         self.assertEqual("ANA CLARA", r["villa"])
 
     def test_los_opcionales_van_aparte_y_no_suman(self):
         r = self._llamar()
-        opcionales = {o["concepto"]: o["importe"] for o in r["opcionales"]}
-        self.assertEqual(-191.83, opcionales["Descuento pago completo"])
-        self.assertEqual(70.0, opcionales["Animales"])
+        opcionales = {o["concepto"]: o for o in r["opcionales"]}
+        self.assertEqual(-191.83, opcionales["Descuento pago completo"]["importe"])
+        self.assertEqual(70.0, opcionales["Animales"]["importe"])
         self.assertNotIn("Animales", str(r["obligatorios"]))
+
+    def test_dice_si_se_cobra_por_dia_o_por_reserva(self):
+        # En Etendo, calculo "d" se multiplica por las noches y "r" no.
+        opcionales = {o["concepto"]: o for o in self._llamar()["opcionales"]}
+        self.assertEqual("por reserva", opcionales["Animales"]["cobro"])
+        self.assertEqual("por día", opcionales["Cuna Bebé"]["cobro"])
+        # Los repetibles se pueden pedir varios: el importe es por unidad.
+        self.assertTrue(opcionales["Cuna Bebé"]["por_unidad"])
+        self.assertNotIn("por_unidad", opcionales["Animales"])
+
+    def test_las_instrucciones_piden_decirlo(self):
+        for rol in ("interno", "admin"):
+            texto = " ".join(agent.AGENTS[rol].instruction.split())
+            self.assertIn("por día", texto, rol)
+            self.assertIn("por reserva", texto, rol)
 
     def test_un_producto_desconocido_no_rompe(self):
         respuesta = {"response": {"status": "0", "data": [{
