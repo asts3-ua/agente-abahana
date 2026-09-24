@@ -50,6 +50,8 @@ TABLA_BANIO = f"`{PROJECT_ID}.{DATASET}.stg_etendo_OV_Banios`"
 # única fuente con el desglose real de camas; se enlaza por planta_id, igual
 # que los baños: Villa -> Planta -> Estancia.
 TABLA_ESTANCIA = f"`{PROJECT_ID}.{DATASET}.stg_etendo_Estancia`"
+# Una fila por cama, con su tipo y el tamaño del colchón.
+TABLA_CAMA = f"`{PROJECT_ID}.{DATASET}.stg_etendo_Cama`"
 # Ocupacion es el calendario diario por villa. TarifaDia cuelga de ella por
 # ocupacion_id: no tiene fecha propia, la fecha la pone Ocupacion.
 TABLA_OCUPACION = f"`{PROJECT_ID}.{DATASET}.stg_etendo_Ocupacion`"
@@ -967,11 +969,25 @@ _TOTALES_PLANTA = {
 }
 
 
-def _totales_de_plantas(plantas: list[dict[str, Any]]) -> dict[str, int]:
-    return {
+def _totales_de_plantas(plantas: list[dict[str, Any]]) -> dict[str, Any]:
+    totales: dict[str, Any] = {
         total: sum(p.get(campo) or 0 for p in plantas)
         for total, campo in _TOTALES_PLANTA.items()
     }
+    # Las camas iguales de plantas distintas se suman: "3 dobles de 150×190",
+    # no la misma línea tres veces.
+    por_medida: dict[tuple, dict[str, Any]] = {}
+    for planta in plantas:
+        for cama in planta.get("camas") or []:
+            clave = (cama.get("tipo_cama"), cama.get("tamano_colchon"))
+            if clave in por_medida:
+                por_medida[clave]["unidades"] += cama.get("unidades") or 0
+            else:
+                por_medida[clave] = dict(cama)
+    if por_medida:
+        totales["camas"] = sorted(por_medida.values(),
+                                  key=lambda c: (-(c.get("unidades") or 0), c.get("tipo_cama") or ""))
+    return totales
 
 
 def obtener_detalle_propiedad(
@@ -1089,9 +1105,24 @@ def obtener_detalle_propiedad(
             WHERE es_activo = TRUE
             GROUP BY planta_id
         ),
+        camas_por_estancia AS (
+            -- Cada cama con su colchón; se agrupan para no repetir filas.
+            SELECT
+                estancia_id,
+                ARRAY_AGG(STRUCT(tipo_cama, tamano_colchon, unidades)
+                          ORDER BY unidades DESC, tipo_cama) AS camas
+            FROM (
+                SELECT estancia_id, tipo_cama, tamano_colchon, COUNT(*) AS unidades
+                FROM {TABLA_CAMA}
+                WHERE es_activo = TRUE AND tipo_cama IS NOT NULL
+                GROUP BY estancia_id, tipo_cama, tamano_colchon
+            )
+            GROUP BY estancia_id
+        ),
         estancias AS (
             SELECT
                 planta_id,
+                ARRAY_CONCAT_AGG(COALESCE(c.camas, [])) AS camas,
                 COUNTIF(tipo_estancia = 'dormitorio') AS dormitorios,
                 SUM(COALESCE(num_camas_dobles, 0)
                     + COALESCE(num_camas_king_size, 0)
@@ -1107,7 +1138,8 @@ def obtener_detalle_propiedad(
                 SUM(COALESCE(num_camas_partidas, 0)) AS camas_partidas,
                 COUNTIF(es_en_suite) AS dormitorios_en_suite,
                 COUNTIF(tiene_sofacama) AS estancias_con_sofacama
-            FROM {TABLA_ESTANCIA}
+            FROM {TABLA_ESTANCIA} e
+            LEFT JOIN camas_por_estancia c ON c.estancia_id = e.estancia_id
             WHERE es_activo = TRUE
             GROUP BY planta_id
         )
@@ -1124,6 +1156,7 @@ def obtener_detalle_propiedad(
             COALESCE(b.banios_con_bide, 0) AS banios_con_bide,
             COALESCE(b.banios_ensuite, 0) AS banios_ensuite,
             COALESCE(e.dormitorios, 0) AS dormitorios,
+            COALESCE(e.camas, []) AS camas,
             COALESCE(e.camas_totales, 0) AS camas_totales,
             COALESCE(e.camas_dobles, 0) AS camas_dobles,
             COALESCE(e.camas_king_size, 0) AS camas_king_size,

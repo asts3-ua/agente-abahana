@@ -304,9 +304,16 @@ def _habitaciones(g: _Lector) -> list[Linea]:
         ("camas_simples", "individual", "individuales"), ("camas_partidas", "partida", "partidas"),
         ("literas", "litera", "literas"), ("camas_nido", "nido", "nido"),
     )]
+    detalle = [c for c in (g("camas") or []) if isinstance(c, dict)]
     partes = [_plural(g(c), u, v) for c, u, v in camas if _positivo(g(c))]
     if _positivo(g("camas_totales")):
-        lineas.append(_si(_plural(g("camas_totales"), "cama", "camas") + (f": {', '.join(partes)}" if partes else "")))
+        lineas.append(_si(_plural(g("camas_totales"), "cama", "camas")
+                          + (f": {', '.join(partes)}" if partes and not detalle else "")))
+    for cama in detalle:
+        unidades = cama.get("unidades") or 1
+        tipo = _tipo_de_cama(cama.get("tipo_cama"), unidades)
+        medida = str(cama.get("tamano_colchon") or "").replace("X", "×").replace("x", "×")
+        lineas.append(_si(f"{_num(unidades)} {tipo}" + (f" de {medida}" if medida else "")))
     if _positivo(g("estancias_con_sofacama")):
         lineas.append(_si(_plural(g("estancias_con_sofacama"), "estancia con sofá cama", "estancias con sofá cama")))
     banos = []
@@ -334,6 +341,24 @@ def _habitaciones(g: _Lector) -> list[Linea]:
     if anexo or _positivo(anexos):
         lineas.append(_si(_plural(anexos, "anexo", "anexos") if _positivo(anexos) else "Anexo"))
     return lineas
+
+
+# Los tipos de cama de Etendo, en singular y en plural.
+_TIPOS_DE_CAMA = {
+    "cama doble": ("cama doble", "camas dobles"),
+    "cama doble grande": ("cama doble grande", "camas dobles grandes"),
+    "cama simple": ("cama simple", "camas simples"),
+    "cama partida": ("cama partida", "camas partidas"),
+    "cama nido": ("cama nido", "camas nido"),
+    "literas": ("litera", "literas"),
+    "sofa cama": ("sofá cama", "sofás cama"),
+}
+
+
+def _tipo_de_cama(tipo: Any, unidades: Any) -> str:
+    clave = str(tipo or "cama").strip().lower()
+    singular, plural = _TIPOS_DE_CAMA.get(clave, (clave, clave + "s"))
+    return singular if str(_num(unidades)) == "1" else plural
 
 
 def _exterior(g: _Lector) -> list[Linea]:
@@ -737,11 +762,18 @@ def _plantas(villa: dict) -> str:
         dorm = _num(p.get("dormitorios") or 0)
         if _positivo(p.get("dormitorios_en_suite")):
             dorm += f" · {_num(p['dormitorios_en_suite'])} en suite"
-        camas = ", ".join(_plural(p.get(c), u, v) for c, u, v in (
-            ("camas_king_size", "king size", "king size"), ("camas_dobles", "doble", "dobles"),
-            ("camas_simples", "individual", "individuales"), ("camas_partidas", "partida", "partidas"),
-            ("literas", "litera", "literas"), ("camas_nido", "nido", "nido"),
-        ) if _positivo(p.get(c))) or "—"
+        detalle = [c for c in (p.get("camas") or []) if isinstance(c, dict)]
+        if detalle:
+            camas = ", ".join(
+                f"{_num(c.get('unidades') or 1)} {_tipo_de_cama(c.get('tipo_cama'), c.get('unidades') or 1)}"
+                + (f" de {str(c.get('tamano_colchon')).replace('X', '×')}" if c.get("tamano_colchon") else "")
+                for c in detalle)
+        else:
+            camas = ", ".join(_plural(p.get(c), u, v) for c, u, v in (
+                ("camas_king_size", "king size", "king size"), ("camas_dobles", "doble", "dobles"),
+                ("camas_simples", "individual", "individuales"), ("camas_partidas", "partida", "partidas"),
+                ("literas", "litera", "literas"), ("camas_nido", "nido", "nido"),
+            ) if _positivo(p.get(c))) or "—"
         banos = _num(p.get("banios") or 0)
         detalle = [f"{_num(p[c])} {t}" for c, t in (
             ("banios_ensuite", "en suite"), ("banios_con_banera", "con bañera"),
