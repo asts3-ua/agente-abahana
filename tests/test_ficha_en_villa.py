@@ -108,14 +108,17 @@ class SeccionesSinColumnasFantasmaTest(unittest.TestCase):
     def test_no_pide_columnas_que_ya_no_existen(self):
         todas = {c for cols in agent._SECCIONES_FICHA.values() for c in cols}
         for columna in ("zona_animada", "zona_centrica", "tiene_piscina_infantil",
-                        "accesible_silla_ruedas", "distancia_farmacia_m", "tv_satelite",
+                        "accesible_silla_ruedas", "distancia_farmacia_m",
+                        "tipo_barbacoa_codigo", "barbacoa_portatil_codigo",
                         "tiene_aire_salon"):
             self.assertNotIn(columna, todas, columna)
 
     def test_ofrece_lo_que_antes_no_estaba(self):
         todas = {c for cols in agent._SECCIONES_FICHA.values() for c in cols}
         for columna in ("num_mosquiteras", "tiene_tv_satelite", "score_rating_equipamiento",
-                        "tiene_petanca", "distancia_banco_m"):
+                        "tiene_petanca", "distancia_banco_m",
+                        # Listas de Etendo traducidas en Dataform.
+                        "tipo_cafetera", "tv_satelite", "tipo_parcela_ficha"):
             self.assertIn(columna, todas, columna)
 
 

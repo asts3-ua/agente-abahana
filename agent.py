@@ -626,7 +626,7 @@ def buscar_propiedades(
             dato sí/no por su nombre ("pingpong", "tiene_sauna", "sin
             ascensor"); un número o una fecha con comparación
             ("num_mosquiteras >= 2", "distancia_supermercado_m <= 500",
-            "m2_parcela > 1000"); un texto o código con = ("tipo_cafetera_codigo
+            "m2_parcela > 1000"); un texto con = ("tipo_cafetera
             = nespresso"). Para "X o Y" pon un solo elemento "X | Y"
             (cada elemento de la lista se exige a la vez). Los nombres son
             las columnas de la ficha (las de
@@ -885,7 +885,7 @@ _SECCIONES_FICHA: dict[str, list[str]] = {
         "tiene_horno", "tiene_microondas", "tiene_congelador", "tiene_frigorifico",
         "tiene_induccion", "tiene_vitroceramica", "tiene_placa_gas",
         "tiene_placa_electrica", "tiene_gas", "cocinas_americanas",
-        "cocinas_separadas", "cocinas_exteriores", "tipo_cafetera_codigo",
+        "cocinas_separadas", "cocinas_exteriores", "tipo_cafetera",
     ],
     "exterior": [
         "tiene_terraza_cubierta", "tiene_terraza_descubierta",
@@ -896,6 +896,8 @@ _SECCIONES_FICHA: dict[str, list[str]] = {
         # Parcela de OV_Exterior; sin casilla marcada queda a None (no consta).
         "tipo_parcela", "parcela_cerrada", "parcela_semicerrada",
         "parcela_abierta", "terreno_parcela",
+        # La ficha técnica cubre villas que OV_Exterior no tiene marcadas.
+        "tipo_parcela_ficha", "terreno_parcela_ficha",
         "tiene_cesped", "tiene_arbolado",
         "tiene_solarium", "tiene_jardin",
     ],
@@ -913,7 +915,7 @@ _SECCIONES_FICHA: dict[str, list[str]] = {
     ],
     "multimedia": [
         "tiene_tv", "tiene_smart_tv", "tiene_tdt", "tiene_dvd",
-        "tiene_tv_satelite", "tv_satelite_codigo", "tiene_altavoz",
+        "tiene_tv_satelite", "tv_satelite", "tiene_altavoz",
         "altavoz_descripcion", "tiene_amplificador_wifi", "amplificadores_wifi",
         "amplificadores_wifi_ubicacion",
     ],

@@ -335,12 +335,12 @@ def _habitaciones(g: _Lector) -> list[Linea]:
 
 def _exterior(g: _Lector) -> list[Linea]:
     lineas: list[Linea] = []
-    tipo = g("tipo_parcela")
+    tipo = g("tipo_parcela") or g("tipo_parcela_ficha")
     lineas.append(_si(f"Parcela {str(tipo).lower()}") if not _vacio(tipo)
                   else _nc("Parcela (vallada o abierta)"))
     for c in ("parcela_cerrada", "parcela_semicerrada", "parcela_abierta"):
         g(c)
-    terreno = g("terreno_parcela")
+    terreno = g("terreno_parcela") or g("terreno_parcela_ficha")
     lineas.append(_si(f"Terreno {str(terreno).lower()}") if not _vacio(terreno)
                   else _nc("Terreno de la parcela"))
     jardin = [t for c, t in (("tiene_jardin", "Jardín"), ("tiene_cesped", "césped"),
@@ -409,8 +409,8 @@ def _cocina(g: _Lector) -> list[Linea]:
         lineas.append(_no("Sin lavavajillas"))
     if g("tiene_gas"):
         lineas.append(_si("Gas"))
-    if not _vacio(g("tipo_cafetera_codigo")):
-        lineas.append(_dato(f"Cafetera: código {g('tipo_cafetera_codigo')}"))
+    if not _vacio(g("tipo_cafetera")):
+        lineas.append(_si(f"Cafetera {str(g('tipo_cafetera')).lower()}"))
     return lineas
 
 
@@ -471,7 +471,8 @@ def _equipamiento(g: _Lector) -> list[Linea]:
                          ("tiene_tv_satelite", "satélite"), ("tiene_dvd", "DVD")) if g(c)]
     if g("tiene_tv") is True or tv:
         lineas.append(_si(" · ".join(tv) if tv else "Televisión"))
-    g("tv_satelite_codigo")
+    if not _vacio(g("tv_satelite")) and str(g("tv_satelite")).lower() != "no":
+        lineas.append(_dato(f"Satélite: {g('tv_satelite')}"))
     if g("tiene_altavoz"):
         desc = g("altavoz_descripcion")
         lineas.append(_si("Altavoz" + (f" ({desc})" if not _vacio(desc) else "")))
