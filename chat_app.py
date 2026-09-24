@@ -704,6 +704,10 @@ def _render_visualizaciones(msg: dict, i: int) -> None:
             log.warning("No se pudo pintar la visualización %s", v.get("tipo"), exc_info=True)
 
 
+# Cuánto calendario se enseña al pinchar una villa en el mapa.
+_DIAS_CALENDARIO_MAPA = 90
+
+
 def _render_desplegable_villa(mapa: dict, nombre: str, clave: str) -> None:
     """Lo que se abre al pulsar una villa del mapa: su resumen y el botón de la
     ficha completa."""
@@ -725,6 +729,52 @@ def _render_desplegable_villa(mapa: dict, nombre: str, clave: str) -> None:
             st.button("Ver ficha completa", key=f"ficha_mapa_{clave}", icon=":material/villa:",
                       type="primary", use_container_width=True,
                       on_click=_pedir_ficha, args=(nombre,))
+            # El calendario de la respuesta es el de la villa que se preguntó:
+            # este es el de la villa que se acaba de pinchar en el mapa, y
+            # sigue a la siguiente que se pinche mientras esté abierto.
+            abierto = bool(st.session_state.get("calendario_abierto"))
+            st.button("Ocultar calendario" if abierto else "Ver calendario",
+                      key=f"calendario_mapa_{clave}", icon=":material/calendar_month:",
+                      use_container_width=True, on_click=_alternar_calendario)
+        if st.session_state.get("calendario_abierto"):
+            _render_calendario_villa(nombre)
+
+
+def _alternar_calendario() -> None:
+    """Abre o cierra el calendario de la villa pinchada. Es una preferencia,
+    no una villa: al pinchar otra, el calendario pasa a ser el suyo."""
+    st.session_state["calendario_abierto"] = not st.session_state.get("calendario_abierto")
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _datos_calendario(nombre: str, dias: int) -> dict | None:
+    """Ocupación de una villa desde hoy. Nunca rompe la respuesta."""
+    hoy = datetime.date.today()
+    try:
+        datos = agent.calendario_villa(
+            nombre, hoy.isoformat(), (hoy + datetime.timedelta(days=dias)).isoformat())
+    except Exception:
+        log.warning("No se pudo leer el calendario de %s", nombre, exc_info=True)
+        return None
+    if datos.get("error") or not datos.get("tramos"):
+        return None
+    return datos
+
+
+def _render_calendario_villa(nombre: str, dias: int = _DIAS_CALENDARIO_MAPA) -> None:
+    with st.spinner(f"Cargando el calendario de {nombre}..."):
+        datos = _datos_calendario(nombre, dias)
+    if not datos:
+        st.caption(f"No se ha podido cargar el calendario de {nombre}.")
+        return
+    resumen = datos.get("resumen") or {}
+    ocupacion = resumen.get("ocupacion_pct")
+    st.caption(f"Calendario de {nombre} · próximos {dias // 30} meses"
+               + (f" · ocupación {ocupacion:.0f} %" if ocupacion is not None else ""))
+    try:
+        st.html(visualizaciones.calendario_html(datos))
+    except Exception:
+        log.warning("No se pudo pintar el calendario de %s", nombre, exc_info=True)
 
 
 def _con_todas_las_filas(herramientas: list[tuple[str, dict, dict]]) -> list[tuple[str, dict, dict]]:
