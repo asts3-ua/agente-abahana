@@ -869,6 +869,7 @@ _SECCIONES_FICHA: dict[str, list[str]] = {
     "piscina": [
         "piscina_largo_m", "piscina_ancho_m", "piscina_profundidad_min_m",
         "piscina_profundidad_max_m", "piscina_climatizada", "tiene_piscina_comun",
+        "tipo_piscina", "escalera_piscina",
     ],
     "banos": [
         "banos_con_banera", "banos_con_ducha", "numero_aseos", "banos_en_suite",
@@ -898,8 +899,10 @@ _SECCIONES_FICHA: dict[str, list[str]] = {
         "parcela_abierta", "terreno_parcela",
         # La ficha técnica cubre villas que OV_Exterior no tiene marcadas.
         "tipo_parcela_ficha", "terreno_parcela_ficha",
-        "tiene_cesped", "tiene_arbolado",
+        "tiene_cesped", "tipo_cesped", "tiene_arbolado",
         "tiene_solarium", "tiene_jardin",
+        # Más datos de OV_Exterior, ya traducidos en Dataform.
+        "puerta_parcela", "tipo_toldo", "num_toldos", "fuegos_cocina_exterior",
     ],
     "ocio": [
         "tiene_gimnasio", "tiene_sauna", "tiene_jacuzzi", "tiene_hidromasaje",

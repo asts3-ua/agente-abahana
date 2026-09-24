@@ -266,6 +266,7 @@ def _vistas(g: _Lector) -> list[Linea]:
 def _piscina(g: _Lector) -> list[Linea]:
     lineas: list[Linea] = []
     privada, comun = g("tiene_piscina_privada"), g("tiene_piscina_comun")
+    g("tipo_piscina")
     if privada:
         medidas = (f" · {_num(g('piscina_ancho_m'))} × {_num(g('piscina_largo_m'))} m"
                    if _positivo(g("piscina_largo_m")) and _positivo(g("piscina_ancho_m")) else "")
@@ -278,6 +279,8 @@ def _piscina(g: _Lector) -> list[Linea]:
         lineas.append(_si(f"Profundidad máxima {_num(pmax)} m"))
     if comun:
         lineas.append(_si("Piscina comunitaria"))
+    if not _vacio(g("escalera_piscina")):
+        lineas.append(_si(f"Escalera {str(g('escalera_piscina')).lower()}"))
     if privada or comun:
         climatizada = g("piscina_climatizada")
         if climatizada is True:
@@ -335,15 +338,23 @@ def _habitaciones(g: _Lector) -> list[Linea]:
 
 def _exterior(g: _Lector) -> list[Linea]:
     lineas: list[Linea] = []
-    tipo = g("tipo_parcela") or g("tipo_parcela_ficha")
+    # OV_Exterior manda; la ficha técnica completa las villas que no tiene.
+    tipo, tipo_ficha = g.todos("tipo_parcela", "tipo_parcela_ficha")
+    tipo = tipo or tipo_ficha
     lineas.append(_si(f"Parcela {str(tipo).lower()}") if not _vacio(tipo)
                   else _nc("Parcela (vallada o abierta)"))
     for c in ("parcela_cerrada", "parcela_semicerrada", "parcela_abierta"):
         g(c)
-    terreno = g("terreno_parcela") or g("terreno_parcela_ficha")
-    lineas.append(_si(f"Terreno {str(terreno).lower()}") if not _vacio(terreno)
+    terreno, terreno_ficha = g.todos("terreno_parcela", "terreno_parcela_ficha")
+    terreno = terreno or terreno_ficha
+    # "Terreno: Llano" y no "Terreno llano": las dos fuentes usan palabras
+    # distintas (plana/inclinada, llano/inclinado) y concordarlas sobra.
+    lineas.append(_si(f"Terreno: {terreno}") if not _vacio(terreno)
                   else _nc("Terreno de la parcela"))
-    jardin = [t for c, t in (("tiene_jardin", "Jardín"), ("tiene_cesped", "césped"),
+    cesped = g("tipo_cesped")
+    jardin = [t for c, t in (("tiene_jardin", "Jardín"),
+                             ("tiene_cesped", f"césped {str(cesped).lower()}" if not _vacio(cesped)
+                                              and str(cesped).lower() != "no" else "césped"),
                              ("tiene_arbolado", "arbolado")) if g(c)]
     if jardin:
         lineas.append(_si(" · ".join([jardin[0]] + jardin[1:]).capitalize()))
@@ -354,6 +365,14 @@ def _exterior(g: _Lector) -> list[Linea]:
     for c, t in (("tiene_solarium", "Solárium"), ("tiene_ducha_exterior", "Ducha exterior")):
         if g(c):
             lineas.append(_si(t))
+    if not _vacio(g("puerta_parcela")):
+        lineas.append(_si(f"Puerta de la parcela {str(g('puerta_parcela')).lower()}"))
+    toldos, tipo_toldo = g("num_toldos"), g("tipo_toldo")
+    if _positivo(toldos) or not _vacio(tipo_toldo):
+        detalle = f" {str(tipo_toldo).lower()}" if not _vacio(tipo_toldo) else ""
+        lineas.append(_si((_plural(toldos, "toldo", "toldos") if _positivo(toldos) else "Toldo") + detalle))
+    if not _vacio(g("fuegos_cocina_exterior")) and str(g("fuegos_cocina_exterior")).lower() != "no":
+        lineas.append(_si(f"Cocina exterior de {str(g('fuegos_cocina_exterior')).lower()}"))
     if g("tiene_barbacoa"):
         clases = [t for c, t in (("tiene_barbacoa_obra", "de obra"), ("tiene_barbacoa_portatil", "portátil")) if g(c)]
         texto = "Barbacoa " + " y ".join(clases) if clases else "Barbacoa"
