@@ -697,15 +697,28 @@ def _render_filtros(msg: dict) -> None:
 def _render_visualizaciones(msg: dict, i: int) -> None:
     for n, v in enumerate(msg.get("visualizaciones") or []):
         try:
-            pulsada = visualizaciones.render(v, key=f"viz_{msg.get('turn_id') or i}_{n}")
+            clave = f"{msg.get('turn_id') or i}_{n}"
+            pulsada = visualizaciones.render(v, key=f"viz_{clave}") or _villa_recordada(clave)
             if pulsada:
-                _render_desplegable_villa(v, pulsada, f"{msg.get('turn_id') or i}_{n}")
+                _recordar_villa(clave, pulsada)
+                _render_desplegable_villa(v, pulsada, clave)
         except Exception:
             log.warning("No se pudo pintar la visualización %s", v.get("tipo"), exc_info=True)
 
 
 # Cuánto calendario se enseña al pinchar una villa en el mapa.
 _DIAS_CALENDARIO_MAPA = 90
+
+
+def _villa_recordada(clave: str) -> str | None:
+    """La última villa pinchada en ese mapa. Un clic en un hueco del mapa
+    borra la selección, y con ella desaparecían el panel y su botón: el panel
+    se queda hasta que se pinche otra villa."""
+    return st.session_state.get(f"villa_mapa_{clave}")
+
+
+def _recordar_villa(clave: str, nombre: str) -> None:
+    st.session_state[f"villa_mapa_{clave}"] = nombre
 
 
 def _render_desplegable_villa(mapa: dict, nombre: str, clave: str) -> None:
@@ -981,7 +994,7 @@ def _datos_ficha(nombre: str, con_internos: bool) -> dict | None:
     return {"villa": villa, "fotos": ficha.fotos_de_la_web(villa.get("url_web"))}
 
 
-@st.dialog("Ficha de la villa", width="large")
+@st.dialog("Ficha de la villa", width="large", on_dismiss="rerun")
 def _dialogo_ficha(nombre: str, role: str) -> None:
     try:
         with st.spinner("Cargando la ficha..."):
