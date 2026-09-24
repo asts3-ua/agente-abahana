@@ -897,8 +897,6 @@ _SECCIONES_FICHA: dict[str, list[str]] = {
         # Parcela de OV_Exterior; sin casilla marcada queda a None (no consta).
         "tipo_parcela", "parcela_cerrada", "parcela_semicerrada",
         "parcela_abierta", "terreno_parcela",
-        # La ficha técnica cubre villas que OV_Exterior no tiene marcadas.
-        "tipo_parcela_ficha", "terreno_parcela_ficha",
         "tiene_cesped", "tipo_cesped", "tiene_arbolado",
         "tiene_solarium", "tiene_jardin",
         # Más datos de OV_Exterior, ya traducidos en Dataform.

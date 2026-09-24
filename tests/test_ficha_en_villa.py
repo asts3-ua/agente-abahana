@@ -118,7 +118,7 @@ class SeccionesSinColumnasFantasmaTest(unittest.TestCase):
         for columna in ("num_mosquiteras", "tiene_tv_satelite", "score_rating_equipamiento",
                         "tiene_petanca", "distancia_banco_m",
                         # Listas de Etendo traducidas en Dataform.
-                        "tipo_cafetera", "tv_satelite", "tipo_parcela_ficha"):
+                        "tipo_cafetera", "tv_satelite", "tipo_cesped", "tipo_piscina"):
             self.assertIn(columna, todas, columna)
 
 

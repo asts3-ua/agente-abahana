@@ -338,15 +338,13 @@ def _habitaciones(g: _Lector) -> list[Linea]:
 
 def _exterior(g: _Lector) -> list[Linea]:
     lineas: list[Linea] = []
-    # OV_Exterior manda; la ficha técnica completa las villas que no tiene.
-    tipo, tipo_ficha = g.todos("tipo_parcela", "tipo_parcela_ficha")
-    tipo = tipo or tipo_ficha
+    # Dataform ya resuelve las dos fuentes: manda la ficha técnica.
+    tipo = g("tipo_parcela")
     lineas.append(_si(f"Parcela {str(tipo).lower()}") if not _vacio(tipo)
                   else _nc("Parcela (vallada o abierta)"))
     for c in ("parcela_cerrada", "parcela_semicerrada", "parcela_abierta"):
         g(c)
-    terreno, terreno_ficha = g.todos("terreno_parcela", "terreno_parcela_ficha")
-    terreno = terreno or terreno_ficha
+    terreno = g("terreno_parcela")
     # "Terreno: Llano" y no "Terreno llano": las dos fuentes usan palabras
     # distintas (plana/inclinada, llano/inclinado) y concordarlas sobra.
     lineas.append(_si(f"Terreno: {terreno}") if not _vacio(terreno)
