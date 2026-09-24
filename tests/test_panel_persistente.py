@@ -32,6 +32,18 @@ class PanelPersistenteTest(unittest.TestCase):
         self.assertIn("or _villa_recordada(clave)", codigo)
         self.assertIn("_recordar_villa(clave, pulsada)", codigo)
 
+    def test_al_pinchar_una_villa_se_asoma_su_panel(self):
+        # La barra de escribir tapa lo último de la respuesta.
+        codigo = inspect.getsource(chat_app._render_visualizaciones)
+        self.assertIn("_ver_panel(clave)", codigo)
+        self.assertIn("scrollIntoView", chat_app._SCRIPT_VER_PANEL)
+
+    def test_solo_cuando_cambia_la_villa(self):
+        # Si no, la página saltaría en cada repintado.
+        codigo = inspect.getsource(chat_app._render_visualizaciones)
+        self.assertIn("nueva = _villa_recordada(clave) != pulsada", codigo)
+        self.assertIn("if nueva:", codigo)
+
     def test_al_cerrar_la_ficha_la_pagina_se_repinta(self):
         # Sin esto el servidor no se entera de que se ha cerrado.
         codigo = inspect.getsource(chat_app._dialogo_ficha)

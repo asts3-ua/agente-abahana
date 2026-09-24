@@ -700,14 +700,42 @@ def _render_visualizaciones(msg: dict, i: int) -> None:
             clave = f"{msg.get('turn_id') or i}_{n}"
             pulsada = visualizaciones.render(v, key=f"viz_{clave}") or _villa_recordada(clave)
             if pulsada:
+                # Al pinchar otra villa hay que llevar la vista al panel: en
+                # pantalla estrecha se queda debajo de la barra de escribir.
+                nueva = _villa_recordada(clave) != pulsada
                 _recordar_villa(clave, pulsada)
                 _render_desplegable_villa(v, pulsada, clave)
+                if nueva:
+                    _ver_panel(clave)
         except Exception:
             log.warning("No se pudo pintar la visualización %s", v.get("tipo"), exc_info=True)
 
 
 # Cuánto calendario se enseña al pinchar una villa en el mapa.
 _DIAS_CALENDARIO_MAPA = 90
+
+
+# La barra de escribir está fija abajo y tapa lo último de la respuesta: al
+# abrirse el panel de una villa hay que asomarlo.
+_SCRIPT_VER_PANEL = """
+(function () {
+  const doc = window.parent.document;
+  const panel = doc.querySelector('[class*="st-key-desplegable_CLAVE"]');
+  if (panel) {
+    setTimeout(function () {
+      panel.scrollIntoView({block: 'center', behavior: 'smooth'});
+    }, 150);
+  }
+})();
+"""
+
+
+def _ver_panel(clave: str) -> None:
+    import streamlit.components.v1 as componentes
+
+    with st.container(key=f"ver_panel_{clave}"):
+        componentes.html(
+            f"<script>{_SCRIPT_VER_PANEL.replace('CLAVE', clave)}</script>", height=0)
 
 
 def _villa_recordada(clave: str) -> str | None:
@@ -2082,6 +2110,7 @@ a:focus-visible,
 }
 
 /* El script que lleva la vista al principio de la respuesta no ocupa sitio. */
+[class*="st-key-ver_panel_"],
 .st-key-enlaces_fuera,
 .st-key-ir_al_inicio {
     height: 0 !important;
