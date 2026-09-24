@@ -1789,23 +1789,34 @@ def _estancia(fecha_desde: str, fecha_hasta: str | None):
 # noche, o la de larga estancia si la estancia llega a su mínimo. La compra
 # se suma igual para dar el margen (solo interno y admin tienen estas
 # herramientas).
+# La venta es lo que paga el cliente por noche: la ocupación lo guarda ya
+# sumado en `precio_tarifa_sin_fees` (villa + extras diarios obligatorios). La
+# línea PrecioVilla sola se queda corta: DIVA en noviembre son 88 € de villa y
+# 70 € de energía, y el cliente paga 166,31 €. La compra suma todos los
+# conceptos, para que el margen no salga inflado.
 _SQL_TARIFA_ESTANCIA = f"""
     SELECT
         o.villa_id,
-        COUNTIF(t.tipo != 'lt' AND t.es_venta) AS noches_con_precio,
-        SUM(IF(t.tipo != 'lt' AND t.es_venta, t.precio_final, 0)) AS venta_std,
+        COUNTIF(t.tipo != 'lt' AND t.es_venta AND t.nombre = '{_CONCEPTO_VILLA}')
+            AS noches_con_precio,
+        SUM(IF(t.tipo != 'lt' AND t.es_venta AND t.nombre = '{_CONCEPTO_VILLA}',
+               o.precio_tarifa_sin_fees, 0)) AS venta_std,
+        SUM(IF(t.tipo != 'lt' AND t.es_venta AND t.nombre = '{_CONCEPTO_VILLA}',
+               t.precio_final, 0)) AS venta_villa_std,
         SUM(IF(t.tipo != 'lt' AND NOT t.es_venta, t.precio_final, 0)) AS compra_std,
-        COUNTIF(t.tipo != 'lt' AND NOT t.es_venta) AS noches_con_compra,
-        COUNTIF(t.tipo = 'lt' AND t.es_venta) AS noches_larga,
+        COUNTIF(t.tipo != 'lt' AND NOT t.es_venta AND t.nombre = '{_CONCEPTO_VILLA}')
+            AS noches_con_compra,
+        COUNTIF(t.tipo = 'lt' AND t.es_venta AND t.nombre = '{_CONCEPTO_VILLA}')
+            AS noches_larga,
         SUM(IF(t.tipo = 'lt' AND t.es_venta, t.precio_final, 0)) AS venta_larga,
         SUM(IF(t.tipo = 'lt' AND NOT t.es_venta, t.precio_final, 0)) AS compra_larga,
-        COUNTIF(t.tipo = 'lt' AND NOT t.es_venta) AS noches_con_compra_larga,
+        COUNTIF(t.tipo = 'lt' AND NOT t.es_venta AND t.nombre = '{_CONCEPTO_VILLA}')
+            AS noches_con_compra_larga,
         MAX(IF(t.tipo = 'lt', t.estancia_minima_noches, NULL)) AS minimo_larga
     FROM {TABLA_OCUPACION} o
     JOIN {TABLA_TARIFA_DIA} t ON t.ocupacion_id = o.id
     WHERE o.es_activo = TRUE
       AND t.es_activo = TRUE
-      AND t.nombre = '{_CONCEPTO_VILLA}'
       AND t.es_venta IS NOT NULL
       AND t.precio_final IS NOT NULL
       AND o.fecha >= @fecha_desde
@@ -2120,8 +2131,10 @@ def alternativas_villa(
                     WHERE d != @fecha_desde
                 ),
                 precio_dia AS (
+                    -- Lo que paga el cliente por noche, extras diarios incluidos.
                     SELECT o.fecha,
-                           MAX(IF(t.tipo != 'lt' AND t.es_venta, t.precio_final, NULL)) AS venta
+                           MAX(IF(t.tipo != 'lt' AND t.es_venta,
+                                  o.precio_tarifa_sin_fees, NULL)) AS venta
                     FROM {TABLA_OCUPACION} o
                     JOIN {TABLA_TARIFA_DIA} t ON t.ocupacion_id = o.id
                     WHERE o.villa_id = @villa_id AND o.es_activo = TRUE
@@ -2658,7 +2671,8 @@ def consultar_precios(
     query = f"""
         WITH{_CTE_VILLAS_VIGENTES},
         ocupacion AS (
-            SELECT o.id, o.fecha, o.estado, v.villa_id, v.nombre AS villa_nombre
+            SELECT o.id, o.fecha, o.estado, o.precio_tarifa_sin_fees AS precio_cliente,
+                   v.villa_id, v.nombre AS villa_nombre
             FROM {TABLA_OCUPACION} o
             JOIN villa_dedup v ON v.villa_id = o.villa_id
             WHERE o.es_activo = TRUE
@@ -2667,7 +2681,7 @@ def consultar_precios(
         )
         SELECT
             oc.villa_id, oc.villa_nombre,
-            oc.fecha, oc.estado, t.nombre, t.tipo, t.es_venta,
+            oc.fecha, oc.estado, oc.precio_cliente, t.nombre, t.tipo, t.es_venta,
             t.precio_final, t.descuento_pct, t.estancia_minima_noches
         FROM {TABLA_TARIFA_DIA} t
         JOIN ocupacion oc ON oc.id = t.ocupacion_id
@@ -2730,6 +2744,11 @@ def _componer_precios(rows: list[dict], desde, hasta) -> dict[str, Any]:
             noche = por_noche.setdefault(
                 fecha, {"fecha": fecha, "estado": fila.get("estado")}
             )
+            # Lo que paga el cliente esa noche (villa + extras obligatorios);
+            # `precio_venta` es solo la tarifa de la villa.
+            cliente = fila.get("precio_cliente")
+            if cliente:
+                noche["precio_cliente"] = _redondear(cliente)
             noche["precio_venta" if es_venta else "precio_compra"] = precio
         elif fila.get("tipo") != "lt":
             acumulado = extras.setdefault(nombre, {"venta": [], "compra": []})
@@ -2749,6 +2768,7 @@ def _componer_precios(rows: list[dict], desde, hasta) -> dict[str, Any]:
     con_ambos = [n for n in noches if n.get("margen") is not None]
     total_venta = sum(n["precio_venta"] for n in con_ambos)
     total_compra = sum(n["precio_compra"] for n in con_ambos)
+    total_cliente = sum(n["precio_cliente"] for n in noches if n.get("precio_cliente"))
 
     def _media(valores):
         limpios = [v for v in valores if v is not None]
@@ -2759,6 +2779,12 @@ def _componer_precios(rows: list[dict], desde, hasta) -> dict[str, Any]:
         "noches": noches,
         "resumen": {
             "noches_con_precio": len(con_ambos),
+            "total_cliente": _redondear(total_cliente),
+            "nota": ("`precio_cliente` y `total_cliente` son lo que paga el cliente: "
+                     "la villa más los extras diarios obligatorios (energía, aire...). "
+                     "`precio_venta` es solo la tarifa de la villa. Ninguno incluye la "
+                     "limpieza final ni otros extras por reserva: para el total exacto, "
+                     "`precio_final_villa`."),
             "total_venta": _redondear(total_venta),
             "total_compra": _redondear(total_compra),
             "margen_total": _redondear(total_venta - total_compra),
@@ -4089,6 +4115,13 @@ _REGLAS_GESTION = """
   la noche de salida. `consultar_precios` es noche a noche y su `fecha_hasta`
   es la última noche: si la usas para una estancia, pásale la salida menos un
   día.
+- El precio de `buscar_ofertas` y `alternativas_villa` es lo que paga el
+  cliente por las noches: la villa más los extras diarios obligatorios
+  (energía, aire acondicionado). En `consultar_precios` esa cifra es
+  `precio_cliente` por noche y `total_cliente` en el resumen; `precio_venta` es
+  solo la tarifa de la villa y sirve para el margen, no para dar precios. Ni
+  una ni otra incluyen la limpieza final ni los extras por reserva: si piden el
+  total exacto, usa `precio_final_villa`.
 - Al presentar ofertas da siempre el precio total de la estancia y por noche;
   si `larga_estancia` es true, di que se aplica la tarifa de larga estancia, y
   si `precio_completo` es false, que faltan precios de alguna noche.
