@@ -19,9 +19,11 @@ import time
 import urllib.parse
 import uuid
 from pathlib import Path
+from typing import Any
 
 import requests
 import streamlit as st
+from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
@@ -274,6 +276,111 @@ def _handle_oauth_callback() -> None:
 # ---------------------------------------------------------------------------
 # ADK Runner
 # ---------------------------------------------------------------------------
+
+# Qué enseñar mientras el agente trabaja. El texto tarda 10 s o más en
+# empezar, pero las herramientas contestan antes: decir en qué está quita la
+# sensación de cuelgue.
+_ETIQUETA_HERRAMIENTA = {
+    "obtener_fecha_hora_actual": "Mirando la fecha",
+    "listar_propiedades": "Abriendo el catálogo",
+    "buscar_propiedades": "Buscando villas",
+    "buscar_por_valoracion": "Buscando villas bien valoradas",
+    "obtener_detalle_propiedad": "Leyendo la ficha de la villa",
+    "consultar_disponibilidad": "Comprobando disponibilidad",
+    "buscar_ofertas": "Buscando villas libres con su precio",
+    "alternativas_villa": "Buscando alternativas",
+    "consultar_precios": "Mirando las tarifas",
+    "precio_final_villa": "Pidiendo el precio a Etendo",
+    "calendario_villa": "Montando el calendario",
+    "consultar_reservas": "Buscando reservas",
+    "detalle_reserva": "Abriendo la reserva",
+    "resumen_reservas": "Resumiendo las reservas",
+    "consultar_web": "Consultando la web de Abahana",
+    "buscar_pagina_web": "Buscando la página en la web",
+    "buscar_internet": "Buscando en internet",
+    "consultar_feedback_negativo": "Repasando valoraciones anteriores",
+    "listar_tablas_disponibles": "Mirando qué datos hay",
+    "describir_tabla": "Mirando las columnas",
+    "ejecutar_sql": "Consultando los datos",
+}
+
+
+def _etiqueta_herramienta(nombre: str) -> str:
+    return _ETIQUETA_HERRAMIENTA.get(nombre, "Consultando los datos")
+
+
+def _trozos_del_evento(evento, argumentos: dict[str, dict]) -> list[tuple[str, Any]]:
+    """Lo que aporta un evento del agente: en qué herramienta está, qué
+    devolvió, y el texto (a cachos mientras se escribe, entero al final)."""
+    trozos: list[tuple[str, Any]] = []
+    for llamada in evento.get_function_calls() or []:
+        argumentos[llamada.id] = dict(llamada.args or {})
+        trozos.append(("herramienta", llamada.name))
+    for respuesta in evento.get_function_responses() or []:
+        if isinstance(respuesta.response, dict):
+            trozos.append(("resultado", (
+                respuesta.name,
+                argumentos.get(respuesta.id, {}),
+                respuesta.response,
+            )))
+    partes = getattr(evento.content, "parts", None) or [] if evento.content else []
+    texto = "".join(getattr(p, "text", "") or "" for p in partes)
+    if texto:
+        trozos.append(("texto" if getattr(evento, "partial", False) else "final", texto))
+    return trozos
+
+
+def _stream_agent(
+    role: str,
+    user_id: str,
+    session_id: str,
+    message: str,
+    contexto_si_se_perdio: str = "",
+):
+    """Va soltando lo que hace el agente: ("herramienta", nombre),
+    ("resultado", (nombre, args, respuesta)), ("texto", cacho) y
+    ("final", respuesta entera).
+
+    En modo SSE el modelo escribe según piensa; sin esto la pantalla se queda
+    quieta hasta que termina, que son entre 13 y 21 segundos.
+    """
+    agente = AGENTS[role]
+    runner = Runner(agent=agente, app_name=APP_NAME, session_service=_session_service)
+    argumentos: dict[str, dict] = {}
+
+    async def _eventos():
+        existing = await _session_service.get_session(
+            app_name=APP_NAME, user_id=user_id, session_id=session_id
+        )
+        texto = message
+        if existing is None:
+            await _session_service.create_session(
+                app_name=APP_NAME, user_id=user_id, session_id=session_id
+            )
+            texto = contexto_si_se_perdio + message
+        content = types.Content(role="user", parts=[types.Part(text=texto)])
+        async for evento in runner.run_async(
+            user_id=user_id,
+            session_id=session_id,
+            new_message=content,
+            run_config=RunConfig(streaming_mode=StreamingMode.SSE),
+        ):
+            yield evento
+
+    # El bucle asíncrono se pisa paso a paso desde código normal: así los
+    # trozos llegan a Streamlit según salen, sin esperar al final.
+    bucle = asyncio.new_event_loop()
+    try:
+        eventos = _eventos().__aiter__()
+        while True:
+            try:
+                evento = bucle.run_until_complete(eventos.__anext__())
+            except StopAsyncIteration:
+                break
+            yield from _trozos_del_evento(evento, argumentos)
+    finally:
+        bucle.close()
+
 
 def _run_agent(
     role: str,
@@ -982,21 +1089,36 @@ def _process_user_prompt(prompt: str, *, role: str, email: str) -> None:
     started = time.perf_counter()
     avatar = _assistant_avatar()
     with st.chat_message("assistant", avatar=avatar):
-        with st.spinner("Consultando..."):
-            try:
-                response, herramientas = _run_agent(
-                    role=role,
-                    user_id=email,
-                    session_id=st.session_state.session_id,
-                    message=agent_prompt,
-                    contexto_si_se_perdio=rescate,
-                )
-                if not response:
-                    response = "_(sin respuesta del agente)_"
-            except Exception as exc:
-                error_msg = str(exc)
-                response = _mensaje_error(exc)
-        st.markdown(response)
+        estado = st.status("Pensando...", expanded=False)
+        hueco = st.empty()
+        response = ""
+        try:
+            for tipo, dato in _stream_agent(
+                role=role,
+                user_id=email,
+                session_id=st.session_state.session_id,
+                message=agent_prompt,
+                contexto_si_se_perdio=rescate,
+            ):
+                if tipo == "herramienta":
+                    estado.update(label=f"{_etiqueta_herramienta(dato)}...")
+                elif tipo == "resultado":
+                    herramientas.append(dato)
+                elif tipo == "texto":
+                    # El texto se va escribiendo según lo genera el modelo.
+                    response += dato
+                    estado.update(label="Escribiendo la respuesta...")
+                    hueco.markdown(response)
+                elif tipo == "final":
+                    response = dato
+            if not response:
+                response = "_(sin respuesta del agente)_"
+        except Exception as exc:
+            error_msg = str(exc)
+            response = _mensaje_error(exc)
+        estado.update(label="Listo", state="complete")
+        estado.empty()
+        hueco.markdown(response)
         visuales = _preparar_visualizaciones(herramientas, role)
         lineas_filtros = _filtros_del_turno(herramientas)
         lineas_frescura = _frescura_del_turno(herramientas)
