@@ -21,6 +21,7 @@ import time
 import types
 import typing
 import unicodedata
+import uuid
 from typing import Any
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
@@ -310,6 +311,101 @@ def _get_genai_client() -> genai.Client:
             location=_VERTEX_LOCATION,
         )
     return _genai_client
+
+
+# ---------------------------------------------------------------------------
+# Imágenes
+# ---------------------------------------------------------------------------
+
+# Una imagen pesa un par de megas: no puede viajar en la respuesta de la
+# herramienta (iría al modelo y llenaría su contexto). Se queda aquí y la
+# aplicación la recoge por su identificador, como hace con el mapa.
+_MODELO_IMAGENES = os.environ.get("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image")
+_MAX_IMAGENES = 20
+_imagenes_generadas: dict[str, dict[str, Any]] = {}
+_FORMATOS_IMAGEN = {
+    "horizontal": "16:9", "apaisado": "16:9", "panoramica": "16:9",
+    "cuadrado": "1:1", "cuadrada": "1:1",
+    "vertical": "9:16", "retrato": "9:16",
+}
+_FORMATO_IMAGEN_POR_DEFECTO = "16:9"
+_cliente_imagenes_cache: genai.Client | None = None
+
+
+def _cliente_imagenes() -> genai.Client:
+    global _cliente_imagenes_cache
+    if _cliente_imagenes_cache is None:
+        _cliente_imagenes_cache = _get_genai_client()
+    return _cliente_imagenes_cache
+
+
+def imagen_generada(imagen_id: str) -> dict[str, Any] | None:
+    """La imagen que guardó `generar_imagen`, para pintarla en la pantalla."""
+    return _imagenes_generadas.get(imagen_id)
+
+
+def generar_imagen(descripcion: str, formato: str = "horizontal") -> dict[str, Any]:
+    """Dibuja una imagen a partir de una descripción.
+
+    Úsala cuando el usuario pida una imagen, una ilustración, un dibujo, un
+    cartel, un boceto o una foto de ejemplo ("hazme una imagen de...",
+    "dibújame...", "genera una ilustración para..."). La imagen aparece sola
+    bajo tu respuesta: no hace falta que la describas entera, basta con una
+    línea de presentación.
+
+    No sirve para fotos reales de una villa: son imágenes inventadas. Si piden
+    la foto de una villa concreta, dilo y pasa el enlace de su página web.
+
+    Args:
+        descripcion: Qué dibujar, con todo el detalle que haga falta (estilo,
+            colores, encuadre, ambiente). En español o en inglés.
+        formato: "horizontal" (por defecto), "cuadrado" o "vertical".
+
+    Returns:
+        Diccionario con 'imagen_id' (la imagen ya está en pantalla) y la
+        descripción usada, o 'error' si no se ha podido dibujar.
+    """
+    peticion = (descripcion or "").strip()
+    if not peticion:
+        return {"error": "Hace falta describir qué imagen quieres."}
+    proporcion = _FORMATOS_IMAGEN.get(
+        _clave_ficha(formato), _FORMATO_IMAGEN_POR_DEFECTO)
+    try:
+        respuesta = _cliente_imagenes().models.generate_content(
+            model=_MODELO_IMAGENES,
+            contents=peticion,
+            config=genai_types.GenerateContentConfig(
+                response_modalities=["TEXT", "IMAGE"],
+                image_config=genai_types.ImageConfig(aspect_ratio=proporcion),
+            ),
+        )
+    except Exception as e:
+        log.exception("generar_imagen: falló la llamada al modelo")
+        return {"error": f"No se ha podido generar la imagen: {e}"}
+
+    datos, tipo, comentario = None, "image/png", ""
+    for candidato in respuesta.candidates or []:
+        for parte in getattr(candidato.content, "parts", None) or []:
+            adjunto = getattr(parte, "inline_data", None)
+            if adjunto is not None and getattr(adjunto, "data", None):
+                datos, tipo = adjunto.data, getattr(adjunto, "mime_type", tipo)
+            elif getattr(parte, "text", None):
+                comentario += parte.text
+    if not datos:
+        # El modelo contesta con texto cuando no quiere o no puede dibujarlo.
+        return {"error": (comentario.strip() or
+                          "El modelo no ha devuelto ninguna imagen.")}
+
+    imagen_id = uuid.uuid4().hex[:12]
+    _imagenes_generadas[imagen_id] = {
+        "datos": datos, "tipo": tipo, "descripcion": peticion,
+        "formato": proporcion,
+    }
+    # Solo las últimas: son megas en memoria y la pantalla ya las tiene.
+    for viejo in list(_imagenes_generadas)[:-_MAX_IMAGENES]:
+        _imagenes_generadas.pop(viejo, None)
+    return {"imagen_id": imagen_id, "descripcion": peticion,
+            "formato": formato, "aviso": "La imagen ya se ve bajo tu respuesta."}
 
 
 # ---------------------------------------------------------------------------
@@ -3910,8 +4006,26 @@ def ejecutar_sql(query: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 _INSTRUCCION_BASE = """
-Eres el asistente virtual de Abahana Villas, empresa de alquiler de villas vacacionales
-en la Costa Blanca (España). Ayudas con villas Y con información turística local.
+Eres el asistente de Abahana Villas, empresa de alquiler de villas vacacionales
+en la Costa Blanca (España). Eres dos cosas a la vez: el que mejor conoce las
+villas, las reservas y la zona, y un asistente capaz de ayudar en CUALQUIER TEMA.
+
+## Qué puedes responder
+- Cualquier tema, como un asistente general: redactar y traducir, resumir,
+  cálculos, ideas, dudas de informática o de ofimática, cultura general,
+  explicaciones... Si sabes la respuesta, dala; no hace falta que tenga nada
+  que ver con las villas.
+- NUNCA respondas que solo puedes ayudar con villas o con temas de Abahana: no
+  es verdad. Ayuda con lo que te pidan.
+- Lo que no sepas de memoria y pueda haber cambiado (noticias, precios de
+  terceros, horarios, datos de actualidad), búscalo con `buscar_internet` antes
+  de responder, y cita la fuente.
+- Si te piden una imagen, un dibujo, una ilustración o un cartel, usa
+  `generar_imagen`. La imagen sale sola bajo tu respuesta.
+- La cautela con los datos sigue intacta: lo de Abahana (villas, reservas,
+  precios, disponibilidad) sale SIEMPRE de las herramientas, nunca de memoria.
+- Para consejo médico, legal o financiero personal, ayuda con información
+  general y recomienda acudir a un profesional.
 
 ## Reglas generales
 - Responde SIEMPRE en español.
@@ -4060,6 +4174,9 @@ en la Costa Blanca (España). Ayudas con villas Y con información turística lo
 _HERRAMIENTAS_COMUNES = """
 - `obtener_fecha_hora_actual()`: fecha y hora actual en Europe/Madrid; obligatoria
   para expresiones relativas como hoy o mañana.
+- `generar_imagen(descripcion, formato)`: dibuja una imagen (horizontal, cuadrado
+  o vertical) cuando pidan una ilustración, un dibujo o un cartel. No son fotos
+  reales: para la foto de una villa, pasa el enlace de su página.
 - `listar_propiedades()`: catálogo completo sin filtros.
 - `buscar_propiedades(...)`: búsqueda con filtros: ubicación, zona, capacidad,
   habitaciones (`habitaciones_min`), camas reales (`camas_min`),
@@ -4465,6 +4582,7 @@ agent_cliente = Agent(
     on_tool_error_callback=error_de_herramienta,
     tools=[
         obtener_fecha_hora_actual,
+        generar_imagen,
         listar_propiedades,
         buscar_propiedades,
         buscar_por_valoracion,
@@ -4492,6 +4610,7 @@ agent_interno = Agent(
     on_tool_error_callback=error_de_herramienta,
     tools=[
         obtener_fecha_hora_actual,
+        generar_imagen,
         listar_propiedades,
         buscar_propiedades,
         buscar_por_valoracion,
@@ -4534,6 +4653,7 @@ agent_admin = Agent(
     on_tool_error_callback=error_de_herramienta,
     tools=[
         obtener_fecha_hora_actual,
+        generar_imagen,
         listar_propiedades,
         buscar_propiedades,
         buscar_por_valoracion,

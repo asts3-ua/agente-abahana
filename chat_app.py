@@ -282,6 +282,7 @@ def _handle_oauth_callback() -> None:
 # sensación de cuelgue.
 _ETIQUETA_HERRAMIENTA = {
     "obtener_fecha_hora_actual": "Mirando la fecha",
+    "generar_imagen": "Dibujando la imagen",
     "listar_propiedades": "Abriendo el catálogo",
     "buscar_propiedades": "Buscando villas",
     "buscar_por_valoracion": "Buscando villas bien valoradas",
@@ -645,6 +646,32 @@ def _preparar_visualizaciones(
         return []
 
 
+def _imagenes_del_turno(herramientas: list[tuple[str, dict, dict]]) -> list[dict]:
+    """Las imágenes que ha dibujado el agente en este turno. Los bytes no
+    viajan en la respuesta de la herramienta: se recogen por su id."""
+    imagenes = []
+    for nombre, _args, respuesta in herramientas:
+        if nombre != "generar_imagen" or not isinstance(respuesta, dict):
+            continue
+        guardada = agent.imagen_generada(respuesta.get("imagen_id") or "")
+        if guardada and guardada.get("datos"):
+            imagenes.append(guardada)
+    return imagenes
+
+
+def _render_imagenes(msg: dict) -> None:
+    """Las imágenes generadas, bajo la respuesta y con su botón de guardar."""
+    for n, imagen in enumerate(msg.get("imagenes") or []):
+        st.image(imagen["datos"], caption=imagen.get("descripcion") or None,
+                 use_container_width=True)
+        st.download_button(
+            "Guardar imagen", imagen["datos"],
+            file_name=f"abahana_{msg.get('turn_id') or 'imagen'}_{n + 1}.png",
+            mime=imagen.get("tipo") or "image/png",
+            key=f"guardar_imagen_{msg.get('turn_id') or id(msg)}_{n}",
+            icon=":material/download:")
+
+
 def _filtros_del_turno(herramientas: list[tuple[str, dict, dict]]) -> list[str]:
     """Lo que filtró el agente; nunca rompe la respuesta de texto."""
     try:
@@ -969,6 +996,7 @@ def _render_chat_history(messages: list[dict], email: str = "") -> None:
                 # Antes de la respuesta: es lo primero que hay que comprobar.
                 _render_filtros(msg)
                 st.markdown(msg["content"])
+                _render_imagenes(msg)
                 _render_visualizaciones(msg, i)
                 _render_botones_ficha(msg, i)
                 _render_pie_de_respuesta(msg, i)
@@ -1243,6 +1271,8 @@ def _process_user_prompt(prompt: str, *, role: str, email: str) -> None:
         "excel": excel_turno,
         # Un botón "Ficha" por villa de la respuesta (solo en la sesión).
         "villas": ficha.villas_del_turno(herramientas),
+        # Lo que haya dibujado: pesa megas, así que no sale del navegador.
+        "imagenes": _imagenes_del_turno(herramientas),
     })
     # El turno recién guardado cambia el histórico (conversación nueva, título
     # o recuento), así que la lista cacheada deja de valer.
