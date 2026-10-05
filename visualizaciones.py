@@ -77,6 +77,14 @@ def recoger(llamadas: Iterable[tuple[str, dict, Any]]) -> list[dict]:
                 "tramos": respuesta["tramos"],
                 "resumen": respuesta.get("resumen") or {},
             })
+        elif nombre == "resumen_ocupacion" and respuesta.get("resumen"):
+            resultado.append({
+                "tipo": "ocupacion",
+                "agrupar_por": str(respuesta.get("agrupar_por")
+                                   or args.get("agrupar_por") or "villa").lower(),
+                "filas": respuesta["resumen"],
+                "totales": respuesta.get("totales") or {},
+            })
         elif nombre == "resumen_reservas" and respuesta.get("resumen"):
             resultado.append({
                 "tipo": "resumen_reservas",
@@ -384,6 +392,41 @@ def grafico_resumen(v: dict) -> alt.Chart:
     return _estilo(chart)
 
 
+
+def grafico_ocupacion(v: dict) -> alt.Chart:
+    """Ocupación por grupo. Las villas sin noches comercializables (todo
+    bloqueado o todo del propietario) no tienen porcentaje y no se pintan:
+    una barra a cero diría que no se vendió nada, y no es eso."""
+    df = pd.DataFrame([f for f in v["filas"] if f.get("ocupacion_pct") is not None])
+    if df.empty:
+        return _estilo(alt.Chart(pd.DataFrame({"x": []})).mark_bar())
+    df["dimension"] = df["dimension"].astype(str)
+    detalle = [alt.Tooltip("dimension:N", title=v["agrupar_por"].capitalize())]
+    for columna, titulo, formato in (
+        ("ocupacion_pct", "Ocupación (%)", ",.1f"),
+        ("noches_vendidas", "Noches vendidas", ","),
+        ("noches_comercializables", "Comercializables", ","),
+        ("noches_propietario", "Del propietario (fuera)", ","),
+    ):
+        if columna in df:
+            detalle.append(alt.Tooltip(f"{columna}:Q", title=titulo, format=formato))
+    if v["agrupar_por"] in ("mes", "ano"):
+        df = df.sort_values("dimension")
+        chart = alt.Chart(df).mark_bar(size=20, cornerRadiusEnd=4, color=AZUL).encode(
+            x=alt.X("dimension:O", title=None, sort=None, axis=alt.Axis(labelAngle=0)),
+            y=alt.Y("ocupacion_pct:Q", title="Ocupación (%)",
+                    scale=alt.Scale(domain=[0, 100])),
+            tooltip=detalle,
+        ).properties(height=240)
+    else:
+        chart = alt.Chart(df).mark_bar(size=18, cornerRadiusEnd=4, color=AZUL).encode(
+            y=alt.Y("dimension:N", title=None, sort="-x"),
+            x=alt.X("ocupacion_pct:Q", title="Ocupación (%)",
+                    scale=alt.Scale(domain=[0, 100])),
+            tooltip=detalle,
+        ).properties(height=max(120, 26 * len(df)))
+    return _estilo(chart)
+
 def _zoom(villas: list[dict]) -> float:
     lats = [v["lat"] for v in villas]
     lons = [v["lon"] for v in villas]
@@ -520,11 +563,23 @@ def render(v: dict, key: str | None = None) -> str | None:
         ocupacion = resumen.get("ocupacion_pct")
         st.markdown(cifras_html([
             ("Ocupación", "—" if ocupacion is None else f"{ocupacion:.0f} %"),
-            ("Noches ocupadas", _numero(resumen.get("noches_ocupadas"))),
+            ("Noches vendidas", _numero(resumen.get("noches_vendidas"))),
             ("Libres", _numero(resumen.get("noches_libres"))),
             ("Bloqueadas", _numero(resumen.get("noches_bloqueadas"))),
+            ("Propietario", _numero(resumen.get("noches_propietario"))),
         ]), unsafe_allow_html=True)
         st.html(calendario_html(v))
+    elif tipo == "ocupacion":
+        totales = v.get("totales") or {}
+        st.caption(f"Ocupación por {v['agrupar_por']}")
+        ocupacion = totales.get("ocupacion_pct")
+        st.markdown(cifras_html([
+            ("Ocupación", "—" if ocupacion is None else f"{ocupacion:.1f} %"),
+            ("Noches vendidas", _numero(totales.get("noches_vendidas"))),
+            ("Comercializables", _numero(totales.get("noches_comercializables"))),
+            ("Propietario", _numero(totales.get("noches_propietario"))),
+        ]), unsafe_allow_html=True)
+        st.altair_chart(grafico_ocupacion(v), use_container_width=True, theme=None)
     elif tipo == "resumen_reservas":
         st.caption(f"Reservas por {v['agrupar_por']}")
         st.altair_chart(grafico_resumen(v), use_container_width=True, theme=None)

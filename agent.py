@@ -2939,7 +2939,17 @@ def _componer_precios(rows: list[dict], desde, hasta) -> dict[str, Any]:
     }
 
 
+# Días en los que la villa no está alquilada a nadie. Sirve para saber qué
+# tramos del calendario cuelgan de una reserva que se pueda enlazar.
 _ESTADOS_NO_OCUPADOS = {"Libre", "No Disponible"}
+
+# Noches en las que la villa no estaba a la venta: no se vendieron, pero
+# tampoco se dejaron de vender. Salen de la fórmula de ocupación por arriba y
+# por abajo (decisión de negocio, 05/10/2026). La del propietario pesa: en
+# junio de 2026 son 2.330 noches frente a 2.402 comerciales, y según cómo se
+# traten la ocupación del mes sale 66 % o 77 %.
+_PROPIETARIO = "Reserva Propietario"
+_ESTADOS_FUERA_DE_VENTA = {"No Disponible", _PROPIETARIO}
 
 
 def _fecha(valor: Any) -> datetime.date | None:
@@ -3121,28 +3131,164 @@ def _componer_calendario(rows: list[dict], desde, hasta) -> dict[str, Any]:
                 tramo["estancia_minima_noches"] = fila["estancia_minima_noches"]
             tramos.append(tramo)
 
-    ocupadas = sum(
-        n for estado, n in por_estado.items() if estado not in _ESTADOS_NO_OCUPADOS
+    vendidas = sum(
+        n for estado, n in por_estado.items()
+        if estado not in _ESTADOS_NO_OCUPADOS and estado not in _ESTADOS_FUERA_DE_VENTA
     )
     libres = por_estado.get("Libre", 0)
     bloqueadas = por_estado.get("No Disponible", 0)
-    comercializables = ocupadas + libres
+    propietario = por_estado.get(_PROPIETARIO, 0)
+    comercializables = vendidas + libres
 
     return {
         "periodo": {"desde": desde.isoformat(), "hasta": hasta.isoformat()},
         "tramos": tramos,
         "resumen": {
-            "noches_ocupadas": ocupadas,
+            "noches_vendidas": vendidas,
             "noches_libres": libres,
             "noches_bloqueadas": bloqueadas,
-            # Sobre los días que se podían vender: las bloqueadas no cuentan.
-            "ocupacion_pct": _redondear(ocupadas / comercializables * 100)
+            "noches_propietario": propietario,
+            # Lo que de verdad se podía vender: ni las bloqueadas ni las que
+            # usó el propietario estaban en el mercado.
+            "noches_comercializables": comercializables,
+            "ocupacion_pct": _redondear(vendidas / comercializables * 100)
             if comercializables else None,
             "por_canal": {
                 estado: n for estado, n in sorted(por_estado.items())
                 if estado not in _ESTADOS_NO_OCUPADOS
+                and estado not in _ESTADOS_FUERA_DE_VENTA
             },
         },
+    }
+
+
+
+# Estados que sí son una venta, para contarlos en SQL sin repetir la lista.
+_SQL_ES_VENTA = (
+    "o.tipo_ocupacion IS NOT NULL AND o.tipo_ocupacion != 'Libre' AND "
+    + " AND ".join(f"o.tipo_ocupacion != '{e}'" for e in sorted(_ESTADOS_FUERA_DE_VENTA))
+)
+
+
+def resumen_ocupacion(
+    agrupar_por: str = "villa",
+    fecha_desde: str = "",
+    fecha_hasta: str = "",
+    villa_nombre: str | None = None,
+    ubicacion: str | None = None,
+    zona: str | None = None,
+    limite: int = 20,
+) -> dict[str, Any]:
+    """Ocupación de varias villas en un periodo: el porcentaje y sus noches.
+
+    Úsala siempre que pregunten por la ocupación de más de una villa ("qué
+    ocupación tuvimos en junio", "ocupación por zona este verano", "cómo va el
+    año"). Para una sola villa día a día usa `calendario_villa`.
+
+    La ocupación se mide sobre lo que se podía vender: quedan fuera del
+    cálculo, arriba y abajo, las noches bloqueadas y las que el propietario
+    usó su propia villa. Esas noches no estaban en el mercado, así que ni se
+    vendieron ni se dejaron de vender. Se devuelven aparte para que se vean.
+
+    Args:
+        agrupar_por: Dimensión: 'villa' (defecto), 'zona', 'mes' o 'ano'.
+        fecha_desde: Primer día del periodo (YYYY-MM-DD). Obligatorio.
+        fecha_hasta: Último día del periodo (YYYY-MM-DD). Obligatorio.
+        villa_nombre: Limita a una villa (o a las que contengan ese texto).
+        ubicacion: Filtra por pueblo cercano (Altea, Calpe, Moraira…).
+        zona: Filtra por zona geográfica.
+        limite: Máximo de filas (defecto 20, máx. 50).
+
+    Returns:
+        Diccionario con 'resumen' (una fila por dimensión, con
+        noches_vendidas, noches_libres, noches_bloqueadas, noches_propietario,
+        noches_comercializables y ocupacion_pct), 'totales' del conjunto y
+        'periodo'.
+    """
+    if not fecha_desde or not fecha_hasta:
+        return {"resumen": [], "error": "Indica el periodo: fecha_desde y fecha_hasta."}
+    try:
+        desde = _parse_iso_date(fecha_desde, "fecha_desde")
+        hasta = _parse_iso_date(fecha_hasta, "fecha_hasta")
+    except ValueError as exc:
+        return {"resumen": [], "error": str(exc)}
+    if hasta < desde:
+        return {"resumen": [], "error": "fecha_hasta es anterior a fecha_desde."}
+
+    dimensiones = {
+        "villa": "v.nombre",
+        "zona": "v.zona",
+        "mes": "FORMAT_DATE('%Y-%m', o.fecha)",
+        "ano": "CAST(EXTRACT(YEAR FROM o.fecha) AS STRING)",
+    }
+    clave = (agrupar_por or "villa").lower()
+    dimension = dimensiones.get(clave, dimensiones["villa"])
+
+    condiciones = ["o.es_activo = TRUE", "o.fecha BETWEEN @desde AND @hasta"]
+    params = [
+        bigquery.ScalarQueryParameter("desde", "DATE", desde),
+        bigquery.ScalarQueryParameter("hasta", "DATE", hasta),
+    ]
+    if villa_nombre:
+        condiciones.append(_sql_nombre_villa("v.nombre"))
+        params += _params_nombre_villa(villa_nombre)
+    if ubicacion:
+        condiciones.append(_condicion_lugar("v.pueblo_cercano", "ubicacion", ubicacion, params))
+    if zona:
+        condiciones.append(_condicion_lugar("v.zona", "zona", zona, params))
+
+    query = f"""
+        WITH{_CTE_VILLAS_VIGENTES}
+        SELECT {dimension} AS dimension,
+               COUNTIF({_SQL_ES_VENTA}) AS noches_vendidas,
+               COUNTIF(o.tipo_ocupacion = 'Libre') AS noches_libres,
+               COUNTIF(o.tipo_ocupacion = 'No Disponible') AS noches_bloqueadas,
+               COUNTIF(o.tipo_ocupacion = '{_PROPIETARIO}') AS noches_propietario
+        FROM {TABLA_OCUPACION} o
+        JOIN villa_dedup v ON v.villa_id = o.villa_id
+        WHERE {" AND ".join(condiciones)}
+        GROUP BY dimension
+        ORDER BY dimension
+        LIMIT @limite
+    """
+    params.append(bigquery.ScalarQueryParameter("limite", "INT64", _tope_filas(limite)))
+
+    try:
+        rows = [_row_to_dict(r) for r in _bq.query(
+            query,
+            job_config=bigquery.QueryJobConfig(
+                query_parameters=params,
+                maximum_bytes_billed=_BILLING_CAP_DIARIO,
+            ),
+        ).result()]
+    except Exception as e:
+        log.exception("resumen_ocupacion: error en BigQuery")
+        return {"resumen": [], "error": str(e)}
+
+    filas = [dict(f, **_ocupacion_de(f)) for f in rows]
+    total = {c: sum(f.get(c) or 0 for f in rows) for c in (
+        "noches_vendidas", "noches_libres", "noches_bloqueadas", "noches_propietario")}
+    return {
+        "periodo": {"desde": desde.isoformat(), "hasta": hasta.isoformat()},
+        "agrupar_por": clave if clave in dimensiones else "villa",
+        "resumen": filas,
+        # La media del conjunto, no la media de los porcentajes: una villa con
+        # una noche no puede pesar igual que una con treinta.
+        "totales": dict(total, **_ocupacion_de(total)),
+        "count": len(filas),
+    }
+
+
+def _ocupacion_de(fila: dict) -> dict[str, Any]:
+    """Noches comercializables y porcentaje, con el mismo criterio en todas
+    partes: vendidas entre vendidas más libres."""
+    vendidas = fila.get("noches_vendidas") or 0
+    libres = fila.get("noches_libres") or 0
+    comercializables = vendidas + libres
+    return {
+        "noches_comercializables": comercializables,
+        "ocupacion_pct": _redondear(vendidas / comercializables * 100)
+        if comercializables else None,
     }
 
 
@@ -4352,6 +4498,32 @@ _REGLAS_GESTION = """
   quedado incompletas recientemente en otras conversaciones para no repetir errores.
 """.strip()
 
+_CRITERIOS_DE_CALCULO = """
+## Cómo se miden las cosas (criterio de la casa)
+
+Cuando alguien del equipo pregunta por estas magnitudes da por hecho estos
+criterios, que son los que aplican las herramientas. Si la pregunta pide otra
+cosa ("incluyendo las del propietario", "contando las canceladas"), usa los
+argumentos de la herramienta para cambiarlo y dilo en la respuesta.
+
+- **Ocupación**: noches vendidas ÷ noches que se podían vender. Quedan fuera
+  del cálculo, tanto del numerador como del denominador, las noches bloqueadas
+  (No Disponible) y las que el propietario usa su propia villa (Reserva
+  Propietario): esos días la casa no estaba en el mercado, así que ni se
+  vendieron ni se dejaron de vender. Sí cuentan como venta las reservas
+  directas y las de agencia o turoperador.
+- **Reservas y facturación**: solo las que están en firme. No cuentan
+  canceladas, anuladas, perdidas, prerreservas ni borradores; el no show sí,
+  porque se cobra. Tampoco cuentan las estancias del propietario, que no
+  facturan.
+- **Precio al cliente**: el total que paga, con los extras obligatorios
+  incluidos (limpieza final). Para eso está `precio_final_villa`.
+
+No presumas de estos criterios en la respuesta ni los recites enteros: la
+aplicación ya los enseña debajo. Menciona solo el que afecte a lo que te han
+preguntado, en una frase.
+"""
+
 _HERRAMIENTAS_GESTION = """
 - `obtener_detalle_propiedad(nombre)`: ficha completa con dirección, coordenadas,
   desglose de camas, metros habitables, ratings por categoría, propietario,
@@ -4371,8 +4543,13 @@ _HERRAMIENTAS_GESTION = """
 - `consultar_precios(villa_nombre, ...)`: precio de venta, precio de compra y
   margen noche a noche, tarifa de larga estancia y extras. Solo alojamiento.
 - `calendario_villa(villa_nombre, fecha_desde, ...)`: calendario de ocupación de
-  una villa por tramos (libre, ocupada por canal, bloqueada) y % de ocupación.
+  UNA villa por tramos (libre, ocupada por canal, bloqueada) y % de ocupación.
   Para saber si se puede vender en unas fechas, usa `consultar_disponibilidad`.
+- `resumen_ocupacion(agrupar_por, fecha_desde, fecha_hasta, ...)`: ocupación de
+  VARIAS villas en un periodo, agrupada por villa, zona, mes o año. Úsala
+  siempre que pregunten por la ocupación de más de una villa ("qué ocupación
+  tuvimos en junio", "ocupación por zona"). Nunca calcules una ocupación a mano
+  con `ejecutar_sql`: esta herramienta ya aplica el criterio acordado.
 - `consultar_reservas(...)`: reservas individuales con fechas de entrada/salida,
   importe, cliente y estado. Filtra por número de reserva (`localizador`),
   `titular`, villa, ubicación, zona, piscina, rango de
@@ -4409,6 +4586,8 @@ INSTRUCTION_INTERNO = f"""{_INSTRUCCION_BASE}
 
 {_REGLAS_GESTION}
 
+{_CRITERIOS_DE_CALCULO}
+
 ## Herramientas disponibles
 {_HERRAMIENTAS_COMUNES}
 {_HERRAMIENTAS_GESTION}
@@ -4421,6 +4600,8 @@ completa, coordenadas, datos de reservas, importes, precios de compra y márgene
 INSTRUCTION_ADMIN = f"""{_INSTRUCCION_BASE}
 
 {_REGLAS_GESTION}
+
+{_CRITERIOS_DE_CALCULO}
 
 ## Herramientas disponibles
 {_HERRAMIENTAS_COMUNES}
@@ -4626,6 +4807,7 @@ agent_interno = Agent(
         consultar_precios,
         precio_final_villa,
         calendario_villa,
+        resumen_ocupacion,
         consultar_web,
         buscar_pagina_web,
         buscar_internet,
@@ -4669,6 +4851,7 @@ agent_admin = Agent(
         consultar_precios,
         precio_final_villa,
         calendario_villa,
+        resumen_ocupacion,
         consultar_web,
         buscar_pagina_web,
         buscar_internet,

@@ -25,6 +25,7 @@ _HERRAMIENTAS = {
     "resumen_reservas": "Resumen de reservas",
     "consultar_precios": "Precios",
     "calendario_villa": "Calendario",
+    "resumen_ocupacion": "Ocupación",
     "ejecutar_sql": "Consulta SQL a medida",
 }
 

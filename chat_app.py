@@ -33,6 +33,7 @@ import agent
 import exportar
 import ficha
 import frescura
+import metodo
 import visualizaciones
 from agent import AGENTS, TABLA_VILLA, _bq
 from conversation_store import TITLE_MAX_CHARS, get_conversation_store
@@ -293,6 +294,7 @@ _ETIQUETA_HERRAMIENTA = {
     "consultar_precios": "Mirando las tarifas",
     "precio_final_villa": "Pidiendo el precio a Etendo",
     "calendario_villa": "Montando el calendario",
+    "resumen_ocupacion": "Calculando la ocupación",
     "consultar_reservas": "Buscando reservas",
     "detalle_reserva": "Abriendo la reserva",
     "resumen_reservas": "Resumiendo las reservas",
@@ -689,6 +691,16 @@ def _datos_frescura() -> dict:
     return frescura.consultar(_bq)
 
 
+def _metodo_del_turno(herramientas: list[tuple[str, dict, dict]]) -> list[dict]:
+    """Con qué datos y con qué fórmula salió cada número, para que quien
+    decide pueda rehacer la cuenta. Nunca rompe la respuesta de texto."""
+    try:
+        return metodo.explicar(herramientas)
+    except Exception:
+        log.warning("No se pudo explicar el método de cálculo", exc_info=True)
+        return []
+
+
 def _frescura_del_turno(herramientas: list[tuple[str, dict, dict]]) -> list[str]:
     """Cuándo se actualizaron los datos de esta respuesta; se fija al
     responder. Nunca rompe la respuesta de texto."""
@@ -719,6 +731,30 @@ def _render_filtros(msg: dict) -> None:
     actualidad = msg.get("frescura") or []
     if actualidad:
         st.caption("  \n".join(f":material/schedule: {linea}" for linea in actualidad))
+
+
+def _render_metodo(msg: dict) -> None:
+    """Debajo de la respuesta y plegado: quien solo quiere el dato no lo abre,
+    y quien tiene que defenderlo en una reunión lo abre y rehace la cuenta."""
+    bloques = msg.get("metodo") or []
+    if not bloques:
+        return
+    with st.expander("Cómo lo he calculado", expanded=False,
+                     icon=":material/function:"):
+        for n, bloque in enumerate(bloques):
+            if n:
+                st.divider()
+            st.markdown(f"**{bloque.get('titulo') or 'Cálculo'}**")
+            criterios = bloque.get("criterios") or []
+            if criterios:
+                st.markdown("\n".join(f"- {c}" for c in criterios))
+            if bloque.get("formula"):
+                st.markdown(bloque["formula"])
+            if bloque.get("sql"):
+                st.code(bloque["sql"], language="sql")
+            fuentes = bloque.get("fuentes") or []
+            if fuentes:
+                st.caption("  \n".join(f":material/database: {f}" for f in fuentes))
 
 
 def _render_visualizaciones(msg: dict, i: int) -> None:
@@ -998,6 +1034,9 @@ def _render_chat_history(messages: list[dict], email: str = "") -> None:
                 st.markdown(msg["content"])
                 _render_imagenes(msg)
                 _render_visualizaciones(msg, i)
+                # Al final y plegado: es una nota al pie de la respuesta, no
+                # parte de ella.
+                _render_metodo(msg)
                 _render_botones_ficha(msg, i)
                 _render_pie_de_respuesta(msg, i)
         else:
@@ -1266,6 +1305,8 @@ def _process_user_prompt(prompt: str, *, role: str, email: str) -> None:
         "filtros": lineas_filtros,
         # Cuándo se actualizaron esos datos, fijado al responder.
         "frescura": lineas_frescura,
+        # Con qué datos y qué fórmula, para poder rehacer la cuenta.
+        "metodo": _metodo_del_turno(herramientas),
         # Para copiar o descargar las listas de la respuesta (solo en la sesión).
         "tablas": tablas_turno,
         "excel": excel_turno,

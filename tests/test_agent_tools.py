@@ -556,10 +556,11 @@ class CalendarioVillaTest(unittest.TestCase):
     def test_resume_noches_por_estado_y_ocupacion(self):
         r = agent.calendario_villa("ADORA", "2026-09-08", "2026-09-13")
         res = r["resumen"]
-        self.assertEqual(3, res["noches_ocupadas"])
+        self.assertEqual(3, res["noches_vendidas"])
         self.assertEqual(2, res["noches_libres"])
         self.assertEqual(1, res["noches_bloqueadas"])
-        # 3 ocupadas sobre 5 comercializables (se excluyen las bloqueadas)
+        # 3 vendidas sobre 5 comercializables: fuera la bloqueada (y, si las
+        # hubiera, las del propietario). Ver tests/test_ocupacion.py.
         self.assertEqual(60.0, res["ocupacion_pct"])
 
     def test_desglosa_el_canal(self):

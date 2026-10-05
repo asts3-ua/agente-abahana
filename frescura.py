@@ -29,6 +29,7 @@ _HERRAMIENTAS = {
     "obtener_detalle_propiedad": ("villas",),
     "consultar_disponibilidad": ("villas", "disponibilidad"),
     "calendario_villa": ("disponibilidad",),
+    "resumen_ocupacion": ("villas", "disponibilidad"),
     "consultar_precios": ("precios",),
     "buscar_ofertas": ("villas", "disponibilidad", "precios"),
     "alternativas_villa": ("villas", "disponibilidad", "precios"),
