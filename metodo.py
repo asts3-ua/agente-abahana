@@ -246,6 +246,69 @@ def _precio_final(args: dict, datos: dict) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
+# Disponibilidad (la única que también ve el cliente)
+# ---------------------------------------------------------------------------
+
+def _disponibilidad(args: dict, datos: dict) -> dict | None:
+    total = datos.get("total_disponibles")
+    if total is None:
+        return None
+    return {
+        "titulo": " · ".join(x for x in (
+            f"Villas libres: {_num(total)}", _periodo(datos, args)) if x),
+        "fuentes": [
+            "stg_etendo_Reserva — las reservas que ocupan la villa.",
+            "stg_etendo_Ocupacion — el calendario día a día de cada villa.",
+        ],
+        "criterios": [
+            "**Ocupan la villa** las reservas que siguen vivas. Una cancelada "
+            "o un presupuesto que no se cerró no ocupan: la villa sale libre.",
+            "**También cuenta el calendario**: una noche bloqueada (cierre, "
+            "mantenimiento o uso del propietario) no está disponible aunque "
+            "no haya ninguna reserva.",
+            "Una noche sin estado conocido se da por **no libre**: decir que "
+            "está libre una villa que no lo está es el peor error posible.",
+            "Si la villa pide una **estancia mínima** mayor que las noches "
+            "pedidas, no sale en el resultado.",
+        ],
+        "formula": None,
+    }
+
+
+def _ofertas(args: dict, datos: dict) -> dict | None:
+    """Libres + precio: hereda los criterios de disponibilidad y añade de
+    dónde sale el precio, que es lo que más se discute."""
+    total = datos.get("total")
+    if total is None:
+        return None
+    base = _disponibilidad(args, {"total_disponibles": total,
+                                  "periodo": datos.get("periodo")}) or {}
+    libres = datos.get("total_libres")
+    criterios = list(base.get("criterios") or [])
+    if libres is not None and libres != total:
+        criterios.insert(0, (
+            f"De **{_num(libres)} villas libres** en esas fechas, "
+            f"**{_num(total)}** cumplen además el resto de lo pedido "
+            f"(presupuesto, capacidad, equipamiento…)."
+        ))
+    criterios.append(
+        "El **precio por noche** es la tarifa de la villa para cada noche del "
+        "periodo. No incluye los extras obligatorios: para el total que paga "
+        "el cliente está `precio_final_villa`, que los suma."
+    )
+    return {
+        "titulo": " · ".join(x for x in (
+            f"Villas libres con precio: {_num(total)}",
+            _periodo(datos, args)) if x),
+        "fuentes": (base.get("fuentes") or []) + [
+            "stg_etendo_TarifaDia — la tarifa de cada villa noche a noche."
+        ],
+        "criterios": criterios,
+        "formula": "`precio total = suma de la tarifa de cada noche del periodo`",
+    }
+
+
+# ---------------------------------------------------------------------------
 # SQL a medida: la consulta ES el método
 # ---------------------------------------------------------------------------
 
@@ -271,6 +334,8 @@ _EXPLICAN = {
     "resumen_reservas": _resumen_reservas,
     "consultar_reservas": _consultar_reservas,
     "precio_final_villa": _precio_final,
+    "consultar_disponibilidad": _disponibilidad,
+    "buscar_ofertas": _ofertas,
     "ejecutar_sql": _sql,
 }
 

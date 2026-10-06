@@ -138,6 +138,64 @@ class MismoCriterioQueElCodigoTest(unittest.TestCase):
         self.assertIn("Reserva Propietario", agent._ESTADOS_FUERA_DE_VENTA)
 
 
+class DisponibilidadTest(unittest.TestCase):
+    """La única con cuenta que ve también el cliente."""
+
+    def _bloque(self):
+        return metodo.explicar([("consultar_disponibilidad",
+                                 {"fecha_desde": "2026-07-01", "fecha_hasta": "2026-07-08"},
+                                 {"total_disponibles": 12, "matches": [],
+                                  "periodo": {"desde": "2026-07-01", "hasta": "2026-07-08"}})])[0]
+
+    def test_explica_que_una_cancelada_no_ocupa(self):
+        self.assertIn("cancelada", " ".join(self._bloque()["criterios"]).lower())
+
+    def test_explica_que_el_calendario_tambien_bloquea(self):
+        self.assertIn("calendario", " ".join(self._bloque()["criterios"]).lower())
+
+    def test_no_se_le_cuelan_datos_internos_al_cliente(self):
+        texto = " ".join(self._bloque()["criterios"] + self._bloque()["fuentes"]).lower()
+        for interno in ("margen", "precio de compra", "importe", "titular"):
+            self.assertNotIn(interno, texto)
+
+    def test_la_tiene_el_agente_de_cliente(self):
+        nombres = {t.__name__ for t in agent.AGENTS["cliente"].tools}
+        self.assertIn("consultar_disponibilidad", nombres)
+
+
+class OfertasTest(unittest.TestCase):
+    """La ruta que el modelo elige de verdad para "libres en agosto"."""
+
+    def _bloque(self, **datos):
+        base = {"total": 7, "total_libres": 12, "matches": [],
+                "periodo": {"desde": "2027-08-10", "hasta": "2027-08-17"}}
+        return metodo.explicar([("buscar_ofertas", {}, {**base, **datos})])[0]
+
+    def test_hereda_los_criterios_de_disponibilidad(self):
+        self.assertIn("calendario", " ".join(self._bloque()["criterios"]).lower())
+
+    def test_distingue_las_libres_de_las_que_cumplen_lo_pedido(self):
+        texto = " ".join(self._bloque()["criterios"])
+        self.assertIn("12", texto)
+        self.assertIn("7", texto)
+
+    def test_avisa_de_que_el_precio_no_lleva_los_obligatorios(self):
+        self.assertIn("precio_final_villa", " ".join(self._bloque()["criterios"]))
+
+    def test_si_no_sobra_ninguna_no_marea_con_la_resta(self):
+        criterios = " ".join(self._bloque(total_libres=7)["criterios"])
+        self.assertNotIn("cumplen además", criterios)
+
+
+class TodosLosRolesTest(unittest.TestCase):
+
+    def test_el_desplegable_no_depende_del_rol(self):
+        """Se pinta en el histórico, que es común a los tres agentes."""
+        codigo = inspect.getsource(chat_app._render_chat_history)
+        self.assertIn("_render_metodo(msg)", codigo)
+        self.assertNotIn("role", inspect.getsource(chat_app._render_metodo))
+
+
 class EnLaAppTest(unittest.TestCase):
 
     def test_va_en_un_desplegable_despues_de_la_respuesta(self):
@@ -150,9 +208,12 @@ class EnLaAppTest(unittest.TestCase):
         self.assertIn("_render_metodo(msg)",
                       inspect.getsource(chat_app._render_chat_history))
 
-    def test_el_turno_lo_guarda(self):
-        self.assertIn('"metodo": _metodo_del_turno(herramientas)',
-                      inspect.getsource(chat_app._process_user_prompt))
+    def test_el_turno_lo_calcula_y_lo_lleva(self):
+        codigo = inspect.getsource(chat_app._process_user_prompt)
+        self.assertIn("metodo_turno = _metodo_del_turno(herramientas)", codigo)
+        # Al mensaje en pantalla y al almacén: el mismo, calculado una vez.
+        self.assertIn('"metodo": metodo_turno', codigo)
+        self.assertIn("metodo=metodo_turno", codigo)
 
     def test_nunca_tumba_la_respuesta(self):
         with patch.object(chat_app.metodo, "explicar", side_effect=RuntimeError("boom")):

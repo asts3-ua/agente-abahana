@@ -55,6 +55,15 @@ _FEEDBACK_COLUMNS: list[tuple[str, str, str]] = [
     ("feedback_at", "TEXT", "TIMESTAMP"),
 ]
 
+# Columnas que no son de feedback y se añadieron después de que la tabla
+# estuviera en producción: se crean y se migran igual.
+# `metodo` guarda, en JSON, con qué datos y qué fórmula se calculó cada número
+# de la respuesta. Sin esto, auditar una respuesta de hace semanas es
+# imposible: el número sigue ahí pero la cuenta que lo produjo se perdió.
+_COLUMNAS_EXTRA: list[tuple[str, str, str]] = [
+    ("metodo", "TEXT", "STRING"),
+]
+
 
 # Última valoración de cada turno. Se resuelve al leer porque el feedback es
 # un registro de altas: revalorar añade una fila, no reescribe la anterior.
@@ -118,6 +127,7 @@ class ConversationStore:
         app_name: str = "abahana_chat",
         response_ms: int | None = None,
         error: str | None = None,
+        metodo: list[dict] | None = None,
     ) -> str | None:
         """Guarda un turno completo. Devuelve turn_id o None si falla."""
         row = {
@@ -138,6 +148,7 @@ class ConversationStore:
             "feedback_tags": None,
             "feedback_comment": None,
             "feedback_at": None,
+            "metodo": json.dumps(metodo, ensure_ascii=False) if metodo else None,
         }
         try:
             backend = self._resolve_backend()
@@ -522,7 +533,7 @@ class ConversationStore:
             bigquery.SchemaField("rating", "INTEGER"),
             bigquery.SchemaField("rated_at", "TIMESTAMP"),
         ]
-        for name, _, tipo_bq in _FEEDBACK_COLUMNS:
+        for name, _, tipo_bq in _FEEDBACK_COLUMNS + _COLUMNAS_EXTRA:
             fields.append(bigquery.SchemaField(name, tipo_bq))
         return fields
 
@@ -536,7 +547,7 @@ class ConversationStore:
             new_fields.append(bigquery.SchemaField("rating", "INTEGER"))
         if "rated_at" not in names:
             new_fields.append(bigquery.SchemaField("rated_at", "TIMESTAMP"))
-        for name, _, tipo_bq in _FEEDBACK_COLUMNS:
+        for name, _, tipo_bq in _FEEDBACK_COLUMNS + _COLUMNAS_EXTRA:
             if name not in names:
                 new_fields.append(bigquery.SchemaField(name, tipo_bq))
         if new_fields:
@@ -557,7 +568,8 @@ class ConversationStore:
 
     def _sqlite_create_table_sql(self) -> str:
         feedback_cols = ", ".join(
-            f"{name} {tipo_sqlite}" for name, tipo_sqlite, _ in _FEEDBACK_COLUMNS
+            f"{name} {tipo_sqlite}"
+            for name, tipo_sqlite, _ in _FEEDBACK_COLUMNS + _COLUMNAS_EXTRA
         )
         return f"""
             CREATE TABLE IF NOT EXISTS chat_turns (
@@ -621,7 +633,7 @@ class ConversationStore:
             conn.execute("ALTER TABLE chat_turns ADD COLUMN rating INTEGER")
         if "rated_at" not in cols:
             conn.execute("ALTER TABLE chat_turns ADD COLUMN rated_at TEXT")
-        for name, tipo_sqlite, _ in _FEEDBACK_COLUMNS:
+        for name, tipo_sqlite, _ in _FEEDBACK_COLUMNS + _COLUMNAS_EXTRA:
             if name not in cols:
                 conn.execute(f"ALTER TABLE chat_turns ADD COLUMN {name} {tipo_sqlite}")
 
@@ -637,8 +649,8 @@ class ConversationStore:
                     user_message, assistant_message, created_at,
                     response_ms, error, app_name, rating, rated_at,
                     feedback_score, feedback_label, feedback_tags,
-                    feedback_comment, feedback_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    feedback_comment, feedback_at, metodo
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     row["turn_id"],
@@ -658,6 +670,7 @@ class ConversationStore:
                     row.get("feedback_tags"),
                     row.get("feedback_comment"),
                     row.get("feedback_at"),
+                    row.get("metodo"),
                 ),
             )
             conn.commit()
@@ -814,7 +827,8 @@ class ConversationStore:
         SELECT t.turn_id, t.user_message, t.assistant_message, t.created_at,
                COALESCE(f.feedback_label, t.feedback_label) AS feedback_label,
                COALESCE(f.feedback_tags, t.feedback_tags) AS feedback_tags,
-               COALESCE(f.feedback_comment, t.feedback_comment) AS feedback_comment
+               COALESCE(f.feedback_comment, t.feedback_comment) AS feedback_comment,
+               t.metodo
         FROM chat_turns t
         LEFT JOIN ultimo_feedback f ON f.turn_id = t.turn_id
         WHERE t.session_id = ? AND t.user_id = ? AND {_NO_BORRADO_SQLITE}
@@ -921,7 +935,8 @@ class ConversationStore:
                    COALESCE(f.feedback_label, t.feedback_label) AS feedback_label,
                    COALESCE(f.feedback_tags, t.feedback_tags) AS feedback_tags,
                    COALESCE(f.feedback_comment, t.feedback_comment)
-                       AS feedback_comment
+                       AS feedback_comment,
+                   t.metodo
             FROM `{self._bq_table_id}` t
             LEFT JOIN ultimo_feedback f ON f.turn_id = t.turn_id
             WHERE t.session_id = @session_id AND t.user_id = @user_id
@@ -940,6 +955,7 @@ class ConversationStore:
                     row.feedback_label,
                     row.feedback_tags,
                     row.feedback_comment,
+                    row.metodo,
                 )
             )
             for row in rows
@@ -967,7 +983,21 @@ class ConversationStore:
             "feedback_label": row[4],
             "feedback_tags": cls._parse_tags(row[5]),
             "feedback_comment": row[6],
+            "metodo": cls._parse_metodo(row[7] if len(row) > 7 else None),
         }
+
+    @staticmethod
+    def _parse_metodo(crudo: Any) -> list[dict]:
+        """Un turno anterior a esta columna, o un JSON que se estropeó, no
+        puede impedir abrir la conversación: se abre sin el desglose."""
+        if not crudo:
+            return []
+        try:
+            valor = json.loads(crudo)
+        except (TypeError, ValueError):
+            log.warning("El método guardado del turno no es JSON válido")
+            return []
+        return valor if isinstance(valor, list) else []
 
     @staticmethod
     def _parse_tags(tags_raw: Any) -> list[str]:

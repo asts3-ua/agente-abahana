@@ -1281,6 +1281,7 @@ def _process_user_prompt(prompt: str, *, role: str, email: str) -> None:
         lineas_filtros = _filtros_del_turno(herramientas)
         lineas_frescura = _frescura_del_turno(herramientas)
         tablas_turno, excel_turno = _exportable_del_turno(herramientas)
+        metodo_turno = _metodo_del_turno(herramientas)
 
     response_ms = int((time.perf_counter() - started) * 1000)
     turn_id = get_conversation_store().save_turn(
@@ -1292,6 +1293,7 @@ def _process_user_prompt(prompt: str, *, role: str, email: str) -> None:
         app_name=APP_NAME,
         response_ms=response_ms,
         error=error_msg,
+        metodo=metodo_turno,
     )
 
     st.session_state.messages.append({
@@ -1306,7 +1308,7 @@ def _process_user_prompt(prompt: str, *, role: str, email: str) -> None:
         # Cuándo se actualizaron esos datos, fijado al responder.
         "frescura": lineas_frescura,
         # Con qué datos y qué fórmula, para poder rehacer la cuenta.
-        "metodo": _metodo_del_turno(herramientas),
+        "metodo": metodo_turno,
         # Para copiar o descargar las listas de la respuesta (solo en la sesión).
         "tablas": tablas_turno,
         "excel": excel_turno,
@@ -1452,6 +1454,9 @@ def _load_conversation(session_id: str, email: str) -> None:
                 "feedback_label": etiqueta,
                 "feedback_tags": turno.get("feedback_tags") or [],
                 "feedback_comment": turno.get("feedback_comment"),
+                # Lo único de la respuesta que sobrevive al cierre, además del
+                # texto: los gráficos y el mapa siguen siendo de sesión.
+                "metodo": turno.get("metodo") or [],
                 "rating": FEEDBACK_RATINGS.get(etiqueta) if etiqueta else None,
             }
         )
