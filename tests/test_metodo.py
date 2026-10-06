@@ -196,6 +196,33 @@ class TodosLosRolesTest(unittest.TestCase):
         self.assertNotIn("role", inspect.getsource(chat_app._render_metodo))
 
 
+class EnLaImagenTest(unittest.TestCase):
+
+    def test_el_modulo_viaja_en_el_contenedor(self):
+        """El Dockerfile copia los módulos uno a uno: olvidar uno tumba el
+        servicio al arrancar, no al construirlo."""
+        import os
+        ruta = os.path.join(os.path.dirname(__file__), "..", "Dockerfile")
+        with open(ruta) as f:
+            dockerfile = f.read()
+        for modulo in ("metodo.py", "enlaces.py", "filtros.py", "frescura.py"):
+            self.assertIn(f"COPY {modulo} .", dockerfile, modulo)
+
+    def test_todo_lo_que_importa_chat_app_esta_copiado(self):
+        """Blindaje: cualquier módulo propio nuevo tiene que ir al Dockerfile."""
+        import os, re
+        base = os.path.join(os.path.dirname(__file__), "..")
+        with open(os.path.join(base, "chat_app.py")) as f:
+            codigo = f.read()
+        with open(os.path.join(base, "Dockerfile")) as f:
+            dockerfile = f.read()
+        importados = set(re.findall(r"^import (\w+)$", codigo, re.M))
+        propios = {m for m in importados
+                   if os.path.exists(os.path.join(base, f"{m}.py"))}
+        for modulo in sorted(propios):
+            self.assertIn(f"COPY {modulo}.py .", dockerfile, modulo)
+
+
 class EnLaAppTest(unittest.TestCase):
 
     def test_va_en_un_desplegable_despues_de_la_respuesta(self):

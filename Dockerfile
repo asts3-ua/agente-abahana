@@ -19,6 +19,7 @@ COPY exportar.py .
 COPY filtros.py .
 COPY ficha.py .
 COPY enlaces.py .
+COPY metodo.py .
 COPY assets/ assets/
 COPY agente_villas/ agente_villas/
 COPY .streamlit/ .streamlit/
