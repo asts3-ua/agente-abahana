@@ -295,7 +295,7 @@ def _parse_iso_date(value: str, field_name: str) -> datetime.date:
         raise ValueError(f"{field_name} debe tener formato YYYY-MM-DD.") from exc
 
 
-# Gemini 3.7 solo existe en el punto de acceso global de Vertex AI (no en
+# Gemini 3.8 solo existe en el punto de acceso global de Vertex AI (no en
 # europe-west1): las peticiones pueden procesarse fuera de la UE. Decidido así
 # por el usuario el 2026-09-22. BigQuery sigue en la UE.
 _VERTEX_LOCATION = os.environ.get("GOOGLE_CLOUD_LOCATION", "global")
@@ -1594,7 +1594,7 @@ _REINTENTOS_GEMINI = genai_types.HttpRetryOptions(
     exp_base=2.0,
     http_status_codes=[429, 500, 502, 503, 504],
 )
-_MODELO_GEMINI = "gemini-3.7-flash"
+_MODELO_GEMINI = "gemini-3.8-flash"
 
 
 def buscar_internet(consulta: str) -> dict[str, Any]:
@@ -4736,7 +4736,7 @@ def _texto_fecha_de_hoy(hoy: datetime.datetime) -> str:
 # El menor razonamiento previo posible en cada paso del modelo: una respuesta
 # con dos herramientas son tres pasos y cada uno pensaba antes (con 2.5 Flash:
 # 7,9 s de media con razonamiento y 4,5 s sin él, sin respuestas peores).
-# Gemini 3.7 no deja apagarlo (thinking_budget=0 razona igual) ni admite
+# Gemini 3.8 no deja apagarlo (thinking_budget=0 razona igual) ni admite
 # MINIMAL: LOW es el nivel más bajo.
 _CONFIG_MODELO = genai_types.GenerateContentConfig(
     thinking_config=genai_types.ThinkingConfig(thinking_level="LOW"),

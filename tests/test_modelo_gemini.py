@@ -1,4 +1,4 @@
-"""El agente usa Gemini 3.7 Flash, que solo existe en el punto de acceso global
+"""El agente usa Gemini 3.8 Flash, que solo existe en el punto de acceso global
 de Vertex AI (decisión del usuario, sabiendo que las peticiones pueden
 procesarse fuera de la UE)."""
 
@@ -12,20 +12,20 @@ with patch("google.cloud.bigquery.Client", Mock()):
 
 class ModeloTest(unittest.TestCase):
 
-    def test_los_tres_roles_usan_gemini_3_7_flash(self):
+    def test_los_tres_roles_usan_gemini_3_8_flash(self):
         for rol, ag in agent.AGENTS.items():
-            self.assertEqual("gemini-3.7-flash", ag.model, rol)
+            self.assertEqual("gemini-3.8-flash", ag.model, rol)
 
     def test_la_busqueda_en_internet_tambien(self):
         cliente = Mock()
         cliente.models.generate_content.return_value = Mock(text="ok", candidates=[])
         with patch.object(agent, "_get_genai_client", return_value=cliente):
             agent.buscar_internet("fiestas de Calpe")
-        self.assertEqual("gemini-3.7-flash", cliente.models.generate_content.call_args.kwargs["model"])
+        self.assertEqual("gemini-3.8-flash", cliente.models.generate_content.call_args.kwargs["model"])
 
     def test_razonamiento_al_minimo_que_admite(self):
-        # 3.7 no deja apagarlo (thinking_budget=0 razona igual) ni admite
-        # MINIMAL: LOW es lo más bajo.
+        # 3.8 tampoco deja apagarlo ni admite MINIMAL (comprobado contra
+        # Vertex: "Thinking level is unsupported: THINKING_LEVEL_MINIMAL").
         config = agent.AGENTS["interno"].generate_content_config.thinking_config
         self.assertEqual("LOW", getattr(config.thinking_level, "value", config.thinking_level))
         self.assertIsNone(config.thinking_budget)
